@@ -327,9 +327,10 @@ export class LinkedContentController {
   }
 
   private eligibleActiveFilePath(file: TFile | null): string | null {
+    const extension = file?.extension.toLocaleLowerCase();
     if (
       !file
-      || file.extension.toLocaleLowerCase() !== 'md'
+      || (extension !== 'md' && extension !== 'pdf')
       || this.getExcludedTagState(file) !== 'not-excluded'
     ) {
       return null;

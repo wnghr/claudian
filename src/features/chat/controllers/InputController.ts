@@ -41,6 +41,7 @@ import type {
   LinkedContentController,
   LinkedContentSubmissionToken,
 } from '../linked-content';
+import type { PaperContentResult } from '../linked-content/PaperContentResolver';
 import { type InlineAskQuestionConfig, InlineAskUserQuestion } from '../rendering/InlineAskUserQuestion';
 import type { MessageRenderer } from '../rendering/MessageRenderer';
 import { setToolIcon } from '../rendering/ToolCallRenderer';
@@ -105,6 +106,7 @@ export interface InputControllerDeps {
   getWelcomeEl: () => HTMLElement | null;
   getMessagesEl: () => HTMLElement;
   getLinkedContentController: () => LinkedContentController;
+  resolvePaperContent?: (path: string) => Promise<PaperContentResult>;
   getImageContextManager: () => ImageContextManager | null;
   getInstructionModeManager: () => InstructionModeManager | null;
   getInstructionRefineService: () => InstructionRefineService | null;
@@ -502,6 +504,9 @@ export class InputController {
     const dynamicSystemPromptSections = await this.resolveMainAgentDynamicSystemPromptSections();
 
     try {
+      const linkedContentBody = await this.resolvePaperContent(
+        admittedTurnRequest.linkedContentPath,
+      );
       userMsg.content = admittedTurnRequest.text;
       userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
       const result = await coordinator.execute(this.createExecutionSubmission(
@@ -510,6 +515,7 @@ export class InputController {
         userMsg,
         assistantMsg,
         dynamicSystemPromptSections,
+        linkedContentBody,
       ));
       if (result.status === 'completed') {
         const checkpoint = result.nativeAssistantMessageId ?? result.nativeCheckpointId;
@@ -962,6 +968,7 @@ export class InputController {
     user?: ChatMessage,
     assistant?: ChatMessage,
     dynamicSystemPromptSections: readonly string[] = [],
+    linkedContentBody?: string,
   ): ChatTurnSubmission {
     const providerId = this.getActiveProviderId();
     const settings = ProviderSettingsCoordinator.getProviderSettingsSnapshot(
@@ -1006,7 +1013,12 @@ export class InputController {
           ? { canvasSelection: request.canvasSelection }
           : {}),
         ...(request.linkedContentPath
-          ? { linkedContent: { path: request.linkedContentPath } }
+          ? {
+              linkedContent: {
+                path: request.linkedContentPath,
+                ...(linkedContentBody === undefined ? {} : { content: linkedContentBody }),
+              },
+            }
           : {}),
         ...(request.editorSelection
           ? { editorSelection: request.editorSelection }
@@ -1024,6 +1036,24 @@ export class InputController {
       toolPolicy: { kind: 'provider-default' },
       userTurnOrdinal: user ? existingUserTurns : existingUserTurns + 1,
     };
+  }
+
+  private async resolvePaperContent(path: string | undefined): Promise<string | undefined> {
+    if (!path || !path.toLocaleLowerCase().endsWith('.pdf')) return undefined;
+    const resolver = this.deps.resolvePaperContent;
+    if (!resolver) return undefined;
+    const result = await resolver(path);
+    if (result.status !== 'ready' || !result.content) {
+      throw new Error(
+        `Cannot read linked PDF: ${result.reason ?? 'a valid Markdown cache is unavailable.'}`,
+      );
+    }
+    if (result.complete === false) {
+      throw new Error(
+        `Cannot read linked PDF completely: ${result.reason ?? 'the cached content is truncated.'}`,
+      );
+    }
+    return result.content;
   }
 
   private getQueuedMessageDisplay(message: QueuedMessage | null): string {

@@ -127,6 +127,19 @@ describe('LinkedContentController', () => {
     expect(excludedController.getSnapshot().path).toBeNull();
   });
 
+  it('auto-links an active PDF the same way as an active Markdown Note', () => {
+    const pdf = createFile('论文/PDF/Current-paper.pdf');
+    const harness = createHarness([pdf]);
+
+    harness.setActiveFile(pdf);
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      mode: 'auto-draft',
+      path: '论文/PDF/Current-paper.pdf',
+    });
+  });
+
   it('waits for metadata before auto-linking when excluded tags are configured', () => {
     const markdown = createFile('Notes/Startup.md');
     const harness = createHarness([markdown]);

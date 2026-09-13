@@ -10,6 +10,7 @@ import { BrowserSelectionController } from '../../controllers/BrowserSelectionCo
 import { CanvasSelectionController } from '../../controllers/CanvasSelectionController';
 import { ConversationController } from '../../controllers/ConversationController';
 import { InputController } from '../../controllers/InputController';
+import { createVaultPaperContentResolver } from '../../linked-content/PaperContentResolver';
 import { NavigationController } from '../../controllers/NavigationController';
 import { SelectionController } from '../../controllers/SelectionController';
 import { StreamController } from '../../controllers/StreamController';
@@ -113,6 +114,7 @@ export function buildTabRuntimeControllers(
     () => getTabCapabilities(runtimeRef.requirePublished(), plugin),
   );
   options.registerCleanup('tab message renderer', () => renderer.dispose());
+  const paperContentResolver = createVaultPaperContentResolver(plugin.app);
 
   const selectionController = new SelectionController(
     plugin.app,
@@ -329,6 +331,7 @@ export function buildTabRuntimeControllers(
     getWelcomeEl: () => dom.welcomeEl,
     getMessagesEl: () => dom.messagesEl,
     getLinkedContentController: () => ui.linkedContentController,
+    resolvePaperContent: path => paperContentResolver.resolve(path),
     getImageContextManager: () => ui.imageContextManager,
     getInstructionModeManager: () => ui.instructionModeManager,
     getInstructionRefineService: () => services.instructionRefineService,
