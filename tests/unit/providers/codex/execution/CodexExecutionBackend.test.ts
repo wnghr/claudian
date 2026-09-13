@@ -473,16 +473,24 @@ describe('CodexExecutionBackend', () => {
         cwd: '/vault',
         experimentalRawEvents: true,
         persistExtendedHistory: true,
-        dynamicTools: [
+        dynamicTools: expect.arrayContaining([
           expect.objectContaining({
             namespace: 'codex_app',
             name: 'load_workspace_dependencies',
           }),
           expect.objectContaining({
             namespace: 'claudian',
+            name: 'browse',
+          }),
+          expect.objectContaining({
+            namespace: 'claudian',
+            name: 'cite',
+          }),
+          expect.objectContaining({
+            namespace: 'claudian',
             name: 'read_pdf',
           }),
-        ],
+        ]),
       }),
     );
     expect(mockTransportRequest).toHaveBeenCalledWith(

@@ -97,6 +97,13 @@ function createHost(): ProviderHost {
     storage: {} as ProviderHost['storage'],
     getResolvedProviderCliPath: jest.fn().mockResolvedValue('/bin/claude'),
     getActiveEnvironmentVariables: jest.fn().mockReturnValue(''),
+    readPaper: jest.fn().mockResolvedValue({
+      sourcePath: '论文/PDF/current.pdf',
+      cachePath: '论文/MD/current/current.paged.md',
+      content: '<!-- p.2 -->\nFocused body',
+      selection: 'p.2',
+      truncated: false,
+    }),
   } as unknown as ProviderHost;
 }
 
@@ -462,7 +469,44 @@ describe('ClaudeExecutionBackend', () => {
       cwd: '/vault',
       tools: ['Read', 'Grep'],
     }));
-    expect(sdkMock.getLastOptions()?.mcpServers).toBeUndefined();
+    expect(sdkMock.getLastOptions()?.mcpServers).toHaveProperty('claudian');
+  });
+
+  it('exposes read_pdf through an in-process MCP server and reads the linked PDF', async () => {
+    const { services } = createServices();
+    const host = createHost();
+    sdkMock.setMockMessages([
+      { type: 'result', subtype: 'success' },
+    ], { appendResult: false });
+    const session = new ClaudeExecutionBackend(host, services)
+      .createSession(createConfig({ lifecycle: 'ephemeral' }));
+
+    await collectEvents(session.execute(createRequest({
+      context: { linkedContent: { path: '论文/PDF/current.pdf' } },
+    })).events);
+
+    const server = sdkMock.getLastOptions()?.mcpServers?.claudian as unknown as {
+      __options: {
+        tools: Array<{
+          name: string;
+          handler: (input: Record<string, unknown>) => Promise<{
+            content: Array<{ type: string; text: string }>;
+          }>;
+        }>;
+      };
+    };
+    const readPdf = server.__options.tools.find(candidate => candidate.name === 'read_pdf');
+
+    await expect(readPdf?.handler({ pages: '2' })).resolves.toEqual({
+      content: [expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Selection: p.2'),
+      })],
+    });
+    expect(host.readPaper).toHaveBeenCalledWith({
+      pages: '2',
+      sourcePath: '论文/PDF/current.pdf',
+    });
   });
 
   it('passes provider-default dynamic sections through a non-snapshotted custom system prompt', async () => {

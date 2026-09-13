@@ -59,6 +59,24 @@ export interface Settings {
   effortLevel?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
+export function tool(
+  name: string,
+  description: string,
+  inputSchema: Record<string, unknown>,
+  handler: (input: Record<string, unknown>) => Promise<unknown>,
+) {
+  return { name, description, inputSchema, handler };
+}
+
+export function createSdkMcpServer(options: Record<string, unknown>) {
+  return {
+    type: 'sdk',
+    name: options.name,
+    instance: {},
+    __options: options,
+  };
+}
+
 // Type exports that match the real SDK
 export type AgentDefinition = {
   description: string;

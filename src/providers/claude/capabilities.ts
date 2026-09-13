@@ -8,6 +8,7 @@ export const CLAUDE_PROVIDER_CAPABILITIES: Readonly<ProviderCapabilities> = Obje
   supportsProviderCommands: true,
   supportsImageAttachments: true,
   supportsInstructionMode: true,
+  supportsLinkedPdfReadTool: true,
   supportsTurnSteer: false,
   reasoningControl: 'effort',
 });

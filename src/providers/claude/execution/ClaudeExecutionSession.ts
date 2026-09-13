@@ -109,6 +109,7 @@ ClaudeExecutionStrategySink {
   private readonly pendingProviderStateDeletes = new Set<string>();
   private lastEncodedRequest: ClaudeEncodedExecutionRequest | null = null;
   private lastAllowedTools: ReadonlySet<string> | null = null;
+  private linkedPdfPath: string | null = null;
   private readonly eventNormalizer = new ClaudeExecutionEventNormalizer();
   private nativeQuery: Query | null = null;
   private authoritativeContextWindow: {
@@ -146,6 +147,7 @@ ClaudeExecutionStrategySink {
     this.encoder = new ClaudeExecutionRequestEncoder({
       host,
       pluginManager: services.pluginManager,
+      getLinkedPdfPath: () => this.linkedPdfPath,
     });
     this.interactionHandler = new ClaudeInteractionHandler({
       interactionPort: config.interactionPort,
@@ -692,6 +694,10 @@ ClaudeExecutionStrategySink {
     request: ProviderExecutionRequest,
   ): Promise<void> {
     try {
+      const linkedPath = request.context?.linkedContent?.path;
+      this.linkedPdfPath = linkedPath?.toLocaleLowerCase().endsWith('.pdf')
+        ? linkedPath
+        : null;
       const nativeResume = this.getNativeResume();
       active.nativeFork = nativeResume.fork === true;
       const replayConversationHistory = this.shouldReplayConversationHistory(

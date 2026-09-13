@@ -12,6 +12,7 @@ import { buildSystemPrompt } from '../../../core/prompt/mainAgent';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import type { AppPluginManager } from '../../../core/providers/types';
+import { PLUGIN_TOOL_INSTRUCTIONS } from '../../../core/tools/pluginToolSpecs';
 import {
   isReadOnlyTool,
   READ_ONLY_TOOLS,
@@ -38,6 +39,7 @@ import {
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
 import { toClaudeRuntimeModelId } from '../modelSelection';
+import { createClaudePluginToolServers } from '../runtime/ClaudePluginTools';
 import { createCustomSpawnFunction } from '../runtime/customSpawn';
 import {
   DISABLED_BUILTIN_SUBAGENTS,
@@ -89,6 +91,7 @@ export interface ClaudeEncodedExecutionRequest {
 export interface ClaudeExecutionRequestEncoderDeps {
   readonly host: ProviderHost;
   readonly pluginManager: AppPluginManager;
+  readonly getLinkedPdfPath: () => string | null;
 }
 
 export class ClaudeExecutionRequestEncoder {
@@ -130,7 +133,7 @@ export class ClaudeExecutionRequestEncoder {
       : claudeSettings.safeMode;
     const prompt = this.encodePrompt(request, replayConversationHistory);
     const policy = resolveToolPolicy(request);
-    const systemPrompt = request.configuration.systemInstructions.kind === 'explicit'
+    const baseSystemPrompt = request.configuration.systemInstructions.kind === 'explicit'
       ? [
         request.configuration.systemInstructions.instructions.trim(),
         EXPLICIT_PROTOCOL_INSTRUCTIONS,
@@ -145,6 +148,12 @@ export class ClaudeExecutionRequestEncoder {
           ? [...request.configuration.systemInstructions.dynamicSections]
           : undefined,
       });
+    const systemPrompt = [
+      baseSystemPrompt,
+      ...(request.toolPolicy.kind === 'passive' ? [] : PLUGIN_TOOL_INSTRUCTIONS),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     const options: Options = {
       cwd: sessionConfig.vaultWorkingDirectory,
       systemPrompt: {
@@ -171,6 +180,18 @@ export class ClaudeExecutionRequestEncoder {
       includePartialMessages: true,
       enableFileCheckpointing: true,
       canUseTool,
+      ...(request.toolPolicy.kind === 'passive'
+        ? {}
+        : {
+            mcpServers: createClaudePluginToolServers({
+              fields: this.deps.host,
+              getLinkedPdfPath: this.deps.getLinkedPdfPath,
+              library: this.deps.host,
+              reader: this.deps.host,
+              search: this.deps.host,
+              writer: this.deps.host,
+            }),
+          }),
       disallowedTools: [
         ...UNSUPPORTED_SDK_TOOLS,
         ...DISABLED_BUILTIN_TASK_TOOLS,

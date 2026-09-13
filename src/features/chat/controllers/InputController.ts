@@ -1041,7 +1041,7 @@ export class InputController {
 
   private async resolvePaperContent(path: string | undefined): Promise<string | undefined> {
     if (!path || !path.toLocaleLowerCase().endsWith('.pdf')) return undefined;
-    if (this.getActiveProviderId() === 'codex') return undefined;
+    if (this.getActiveCapabilities().supportsLinkedPdfReadTool) return undefined;
     const resolver = this.deps.resolvePaperContent;
     if (!resolver) return undefined;
     const result = await resolver(path);

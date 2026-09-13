@@ -52,6 +52,22 @@ import {
   ProviderExecutionLifecycleRegistry,
   type ProviderExecutionTransitionScope,
 } from './core/execution';
+import type {
+  PaperCitation,
+  PaperLibraryEntry,
+  PaperLibraryPort,
+  PaperLibraryQuery,
+} from './core/library/PaperLibrary';
+import type {
+  PaperFieldEditPort,
+  PaperFieldEditRequest,
+  PaperFieldEditResult,
+} from './core/note/PaperFieldEdit';
+import type {
+  PaperNoteWritePort,
+  PaperNoteWriteRequest,
+  PaperNoteWriteResult,
+} from './core/note/PaperNoteWrite';
 import type { PaperReadRequest, PaperReadResult } from './core/paper/PaperRead';
 import {
   getEnvironmentVariablesForScope as getScopedEnvironmentVariables,
@@ -70,6 +86,17 @@ import type {
   ProviderId,
 } from './core/providers/types';
 import { DEFAULT_CHAT_PROVIDER_ID } from './core/providers/types';
+import {
+  createDisabledEmbeddingClient,
+  createEmbeddingClient,
+  type EmbeddingClient,
+  resolveEmbeddingConfig,
+} from './core/search/embedding';
+import type {
+  PaperSearchPort,
+  PaperSearchRequest,
+  PaperSearchResult,
+} from './core/search/PaperSearch';
 import type {
   ClaudianSettings,
   Conversation,
@@ -89,8 +116,16 @@ import {
   WarmExecutionPool,
 } from './features/chat/execution/WarmExecutionPool';
 import { registerFileMenu } from './features/chat/fileMenu';
+import {
+  createFileEmbeddingVectorStore,
+  readEmbeddingConfigFile,
+  resolveEmbeddingCachePath,
+} from './features/chat/linked-content/EmbeddingVectorCache';
 import { PaperReader } from './features/chat/linked-content/PaperReader';
 import { createVaultPaperContentResolver } from './features/chat/linked-content/VaultPaperContentResolver';
+import { createVaultPaperLibrary } from './features/chat/linked-content/VaultPaperLibrary';
+import { createVaultPaperNoteWriter } from './features/chat/linked-content/VaultPaperNoteWriter';
+import { createVaultPaperSearch } from './features/chat/linked-content/VaultPaperSearch';
 import {
   COLLAB_DETAIL_VIEW_TYPE,
   CollabDetailView,
@@ -228,6 +263,9 @@ export default class ClaudianPlugin extends Plugin {
   private applicationShutdownPromise: Promise<void> | null = null;
   private tabWorkspaceMigrationCoordinator!: TabWorkspaceMigrationCoordinator;
   private paperReader: PaperReader | null = null;
+  private paperLibrary: PaperLibraryPort | null = null;
+  private paperSearch: PaperSearchPort | null = null;
+  private paperNoteWriter: (PaperNoteWritePort & PaperFieldEditPort) | null = null;
 
   get executionPersistence(): ChatExecutionPersistence {
     return this.conversationRepository;
@@ -240,6 +278,61 @@ export default class ClaudianPlugin extends Plugin {
   readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
     this.paperReader ??= new PaperReader(createVaultPaperContentResolver(this.app));
     return this.paperReader.read(request);
+  }
+
+  listPapers(query: PaperLibraryQuery = {}): Promise<readonly PaperLibraryEntry[]> {
+    return this.getPaperLibrary().listPapers(query);
+  }
+
+  citePaper(citekey: string): Promise<PaperCitation> {
+    return this.getPaperLibrary().citePaper(citekey);
+  }
+
+  private getPaperLibrary(): PaperLibraryPort {
+    this.paperLibrary ??= createVaultPaperLibrary(this.app);
+    return this.paperLibrary;
+  }
+
+  searchPapers(request: PaperSearchRequest): Promise<PaperSearchResult> {
+    return this.getPaperSearch().searchPapers(request);
+  }
+
+  appendToNote(request: PaperNoteWriteRequest): Promise<PaperNoteWriteResult> {
+    this.paperNoteWriter ??= createVaultPaperNoteWriter({ app: this.app });
+    return this.paperNoteWriter.appendToNote(request);
+  }
+
+  setPaperFields(request: PaperFieldEditRequest): Promise<PaperFieldEditResult> {
+    this.paperNoteWriter ??= createVaultPaperNoteWriter({ app: this.app });
+    return this.paperNoteWriter.setPaperFields(request);
+  }
+
+  private getPaperSearch(): PaperSearchPort {
+    if (this.paperSearch) return this.paperSearch;
+    const cachePath = resolveEmbeddingCachePath(this.app);
+    this.paperSearch = createVaultPaperSearch({
+      app: this.app,
+      embedding: this.createEmbeddingClient(),
+      vectorStore: cachePath ? createFileEmbeddingVectorStore(cachePath) : null,
+    });
+    return this.paperSearch;
+  }
+
+  /**
+   * Search runs without vectors when no endpoint is configured; the client
+   * carries the reason so the tool can report a degraded answer honestly
+   * instead of quietly returning keyword-only results.
+   */
+  private createEmbeddingClient(): EmbeddingClient {
+    const config = resolveEmbeddingConfig(process.env, readEmbeddingConfigFile(this.app));
+    if (!config) {
+      return createDisabledEmbeddingClient(
+        'Semantic search is off: set KB_EMBED_URL / KB_EMBED_KEY / KB_EMBED_MODEL '
+        + '(or PHYSICS_KB_EMBEDDING_URL / _API_KEY / _MODEL), or add .kb/embed.json '
+        + 'beside the vault.',
+      );
+    }
+    return createEmbeddingClient({ config });
   }
 
   async onload() {

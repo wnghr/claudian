@@ -34,6 +34,8 @@ export interface ProviderCapabilities {
   commandDiscoveryDeadline?: 'shared' | 'provider-owned';
   supportsImageAttachments: boolean;
   supportsInstructionMode: boolean;
+  /** Whether linked PDFs are retrieved lazily through a provider-native tool. */
+  supportsLinkedPdfReadTool?: boolean;
   supportsTurnSteer?: boolean;
   reasoningControl: 'effort' | 'token-budget' | 'none';
 }

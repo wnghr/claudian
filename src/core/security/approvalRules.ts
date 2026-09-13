@@ -1,6 +1,10 @@
 /** Permission utilities for tool action approval. */
 
 import {
+  describePluginToolAction,
+  pluginToolActionPattern,
+} from '../tools/pluginToolSpecs';
+import {
   TOOL_BASH,
   TOOL_EDIT,
   TOOL_GLOB,
@@ -11,6 +15,9 @@ import {
 } from '../tools/toolNames';
 
 export function getActionPattern(toolName: string, input: Record<string, unknown>): string | null {
+  const pluginPattern = pluginToolActionPattern(toolName, input);
+  if (pluginPattern !== null) return pluginPattern;
+
   switch (toolName) {
     case TOOL_BASH:
       return typeof input.command === 'string' ? input.command.trim() : '';
@@ -33,6 +40,9 @@ export function getActionPattern(toolName: string, input: Record<string, unknown
 }
 
 export function getActionDescription(toolName: string, input: Record<string, unknown>): string {
+  const pluginDescription = describePluginToolAction(toolName, input);
+  if (pluginDescription !== null) return pluginDescription;
+
   const pattern = getActionPattern(toolName, input) ?? '(unknown)';
   switch (toolName) {
     case TOOL_BASH:

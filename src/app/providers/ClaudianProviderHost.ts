@@ -1,7 +1,21 @@
 import type { ProviderExecutionTransitionScope } from '../../core/execution';
+import type {
+  PaperCitation,
+  PaperLibraryEntry,
+  PaperLibraryQuery,
+} from '../../core/library/PaperLibrary';
+import type {
+  PaperFieldEditRequest,
+  PaperFieldEditResult,
+} from '../../core/note/PaperFieldEdit';
+import type {
+  PaperNoteWriteRequest,
+  PaperNoteWriteResult,
+} from '../../core/note/PaperNoteWrite';
 import type { PaperReadRequest, PaperReadResult } from '../../core/paper/PaperRead';
 import type { ProviderHost } from '../../core/providers/ProviderHost';
 import type { ProviderCliResolutionContext, ProviderId } from '../../core/providers/types';
+import type { PaperSearchRequest, PaperSearchResult } from '../../core/search/PaperSearch';
 import type { EnvironmentScope } from '../../core/types/settings';
 import type ClaudianPlugin from '../../main';
 
@@ -31,6 +45,26 @@ export class ClaudianProviderHost implements ProviderHost {
 
   readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
     return this.plugin.readPaper(request);
+  }
+
+  listPapers(query: PaperLibraryQuery = {}): Promise<readonly PaperLibraryEntry[]> {
+    return this.plugin.listPapers(query);
+  }
+
+  citePaper(citekey: string): Promise<PaperCitation> {
+    return this.plugin.citePaper(citekey);
+  }
+
+  searchPapers(request: PaperSearchRequest): Promise<PaperSearchResult> {
+    return this.plugin.searchPapers(request);
+  }
+
+  appendToNote(request: PaperNoteWriteRequest): Promise<PaperNoteWriteResult> {
+    return this.plugin.appendToNote(request);
+  }
+
+  setPaperFields(request: PaperFieldEditRequest): Promise<PaperFieldEditResult> {
+    return this.plugin.setPaperFields(request);
   }
 
   saveSettings(): Promise<void> {
