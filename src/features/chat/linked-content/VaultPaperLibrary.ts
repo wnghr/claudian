@@ -9,6 +9,10 @@ import type {
   PaperLibraryPort,
   PaperLibraryQuery,
 } from '../../../core/library/PaperLibrary';
+import {
+  manifestFullMarkdownPath,
+  manifestSourcePath,
+} from './PaperCachePackage';
 
 const CARDS_ROOT = '论文/卡片/';
 const PARSED_ROOT = '论文/MD/';
@@ -24,6 +28,7 @@ interface ParsedManifest {
   readonly pages: number | null;
   readonly parsedAt: string | null;
   readonly status: string | null;
+  readonly schemaVersion: number;
 }
 
 interface ScannedCard {
@@ -119,6 +124,10 @@ async function readJsonRecord(
 }
 
 function readPageCount(manifest: Readonly<Record<string, unknown>>): number | null {
+  const totalPages = manifest.totalPages;
+  if (typeof totalPages === 'number' && Number.isFinite(totalPages) && totalPages > 0) {
+    return totalPages;
+  }
   const pageMap = manifest.page_map;
   if (!pageMap || typeof pageMap !== 'object' || Array.isArray(pageMap)) return null;
   const pages = (pageMap as Record<string, unknown>).pages;
@@ -155,17 +164,28 @@ async function scanManifests(app: App): Promise<Map<string, ParsedManifest>> {
     if (!data) continue;
     const citekey = readText(data, 'citekey')
       ?? path.slice(PARSED_ROOT.length).split('/')[0];
-    manifests.set(citekey, {
+    const parsedManifest: ParsedManifest = {
       manifestPath: path,
-      sourcePdf: readText(data, 'source_pdf'),
-      cachePath: readText(data, 'paged_md') ?? readText(data, 'output'),
+      sourcePdf: manifestSourcePath(data),
+      cachePath: manifestFullMarkdownPath(data),
       jsonPath: readText(data, 'json_output'),
       pages: readPageCount(data),
       parsedAt: readText(data, 'parsed_at'),
       status: readText(data, 'status'),
-    });
+      schemaVersion: typeof data.schema_version === 'number' ? data.schema_version : 0,
+    };
+    const existing = manifests.get(citekey);
+    if (!existing || manifestPriority(parsedManifest) >= manifestPriority(existing)) {
+      manifests.set(citekey, parsedManifest);
+    }
   }
   return manifests;
+}
+
+function manifestPriority(manifest: ParsedManifest): number {
+  const parsedAt = manifest.parsedAt ? Date.parse(manifest.parsedAt) : 0;
+  return manifest.schemaVersion * 1_000_000_000_000
+    + (Number.isFinite(parsedAt) ? parsedAt : 0);
 }
 
 /**

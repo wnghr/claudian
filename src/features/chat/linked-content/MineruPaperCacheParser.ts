@@ -7,10 +7,16 @@ import { TFile as ObsidianFile } from 'obsidian';
 
 import { resolveWindowsCmdShimSpawnSpec } from '@/utils/windowsCmdShim';
 
+import {
+  buildCacheNavigationIndex,
+  buildPageAnchoredMarkdown,
+  PAPER_CACHE_FILES,
+  PAPER_CACHE_ROOT,
+  PAPER_CACHE_SCHEMA_VERSION,
+} from './PaperCachePackage';
 import { sha256Hex } from './PaperContentResolver';
 
 const spawn = crossSpawn as typeof nodeSpawn;
-const CACHE_ROOT = '论文/MD';
 const PARSER = 'mineru-open-api';
 
 type FileSystemVaultAdapter = {
@@ -38,8 +44,18 @@ function fileStem(path: string): string {
   return name.replace(/\.pdf$/i, '') || 'paper';
 }
 
-function cacheDirFor(sourcePath: string): string {
-  return `${CACHE_ROOT}/${fileStem(sourcePath)}`;
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+async function cacheIdFor(sourcePath: string): Promise<string> {
+  const bytes = new TextEncoder().encode(normalizePath(sourcePath));
+  const digest = await sha256Hex(bytes.buffer);
+  return digest.slice(0, 16).toLocaleLowerCase();
+}
+
+function cacheDirFor(sourcePath: string, cacheId: string): string {
+  return `${PAPER_CACHE_ROOT}/${fileStem(sourcePath)}--${cacheId}`;
 }
 
 function runParser(
@@ -103,10 +119,41 @@ async function clearGeneratedFiles(
   const listing = await adapter.list(cacheDir);
   const generated = listing.files.filter(path => {
     const name = path.replace(/\\/g, '/').split('/').pop() ?? '';
-    return name === 'manifest.json'
+    return name === PAPER_CACHE_FILES.manifest
+      || name === PAPER_CACHE_FILES.fullMarkdown
+      || name === PAPER_CACHE_FILES.contentList
+      || name === PAPER_CACHE_FILES.source
       || (name.startsWith(stem) && /\.(?:md|json)$/i.test(name));
   });
+  if (await adapter.exists(`${cacheDir}/images`)) {
+    const imageListing = await adapter.list(`${cacheDir}/images`);
+    generated.push(...imageListing.files);
+  }
   await Promise.all(generated.map(path => adapter.remove(path)));
+}
+
+async function removeEmptyPackage(adapter: FileSystemVaultAdapter, cacheDir: string): Promise<void> {
+  const imageDir = `${cacheDir}/images`;
+  if (await adapter.exists(imageDir)) {
+    const images = await adapter.list(imageDir);
+    if (images.files.length === 0 && images.folders.length === 0) {
+      try {
+        await adapter.remove(imageDir);
+      } catch {
+        // Some desktop adapters cannot remove directories through this API.
+      }
+    }
+  }
+  if (await adapter.exists(cacheDir)) {
+    const packageListing = await adapter.list(cacheDir);
+    if (packageListing.files.length === 0 && packageListing.folders.length === 0) {
+      try {
+        await adapter.remove(cacheDir);
+      } catch {
+        // A leftover empty directory is harmless and not a readable cache.
+      }
+    }
+  }
 }
 
 async function waitForVaultFile(app: App, path: string): Promise<void> {
@@ -126,60 +173,100 @@ export function createVaultMineruCacheEnsurer(app: App): (sourcePath: string) =>
     }
 
     const adapter = getAdapter(app);
-    const cacheDir = cacheDirFor(sourcePath);
     const stem = fileStem(sourcePath);
-    const outputPath = `${cacheDir}/${stem}.md`;
-    const jsonPath = `${cacheDir}/${stem}.json`;
-    const manifestPath = `${cacheDir}/manifest.json`;
+    const normalizedSourcePath = normalizePath(sourcePath);
+    const sourceHash = await sha256Hex(await app.vault.readBinary(sourceFile));
+    const cacheId = await cacheIdFor(normalizedSourcePath);
+    const cacheDir = cacheDirFor(normalizedSourcePath, cacheId);
+    const fullMarkdownPath = `${cacheDir}/${PAPER_CACHE_FILES.fullMarkdown}`;
+    const contentListPath = `${cacheDir}/${PAPER_CACHE_FILES.contentList}`;
+    const sourcePathFile = `${cacheDir}/${PAPER_CACHE_FILES.source}`;
+    const manifestPath = `${cacheDir}/${PAPER_CACHE_FILES.manifest}`;
     await ensureFolderTree(adapter, cacheDir);
     await clearGeneratedFiles(adapter, cacheDir, stem);
 
     const basePath = adapter.getFullPath('');
-    await runParser(
-      process.platform === 'win32' ? `${PARSER}.cmd` : PARSER,
-      [
-        'extract',
-        adapter.getFullPath(sourcePath),
-        '-f', 'md,json',
-        '--language', 'en',
-        '-o', basePath + '/' + cacheDir,
-      ],
-      basePath,
-    );
-
-    const mdExists = await adapter.exists(outputPath);
-    if (!mdExists) {
-      const listing = await adapter.list(cacheDir);
-      const candidate = listing.files.find(path => {
-        const name = path.replace(/\\/g, '/').split('/').pop() ?? '';
-        return /\.md$/i.test(name) && !name.endsWith('.paged.md');
-      });
-      if (candidate) await adapter.rename(candidate, outputPath);
-    }
-    if (!(await adapter.exists(outputPath))) {
-      throw new Error(`MinerU did not produce Markdown in ${cacheDir}.`);
+    try {
+      await runParser(
+        process.platform === 'win32' ? `${PARSER}.cmd` : PARSER,
+        [
+          'extract',
+          adapter.getFullPath(sourcePath),
+          '-f', 'md,json',
+          '--language', 'en',
+          '-o', basePath + '/' + cacheDir,
+        ],
+        basePath,
+      );
+    } catch (error) {
+      await clearGeneratedFiles(adapter, cacheDir, stem);
+      await removeEmptyPackage(adapter, cacheDir);
+      throw error;
     }
 
     const listing = await adapter.list(cacheDir);
+    const markdownCandidate = listing.files.find(path => path.endsWith('.paged.md'))
+      ?? listing.files.find(path => /\.md$/i.test(path));
+    if (!markdownCandidate) {
+      throw new Error(`MinerU did not produce Markdown in ${cacheDir}.`);
+    }
+    const rawMarkdown = await adapter.read(markdownCandidate);
+
     const jsonCandidate = listing.files.find(path => {
       const name = path.replace(/\\/g, '/').split('/').pop() ?? '';
-      return /\.json$/i.test(name) && name !== 'manifest.json';
+      return /\.json$/i.test(name) && name !== PAPER_CACHE_FILES.manifest;
     });
-    if (jsonCandidate && !(await adapter.exists(jsonPath))) {
-      await adapter.rename(jsonCandidate, jsonPath);
+    const rawContentList = jsonCandidate ? await adapter.read(jsonCandidate) : '[]\n';
+    let contentList: unknown;
+    try {
+      contentList = JSON.parse(rawContentList);
+    } catch {
+      // Keep the raw parser output for diagnosis, but don't let a malformed
+      // optional sidecar prevent the usable Markdown package from being read.
+      contentList = [];
     }
+    const fullMarkdown = buildPageAnchoredMarkdown(rawMarkdown, contentList);
+    await adapter.write(fullMarkdownPath, fullMarkdown);
+    await adapter.write(contentListPath, rawContentList.endsWith('\n') ? rawContentList : `${rawContentList}\n`);
+    if (markdownCandidate !== fullMarkdownPath) await adapter.remove(markdownCandidate);
+    if (jsonCandidate && jsonCandidate !== contentListPath) await adapter.remove(jsonCandidate);
 
-    const sourceHash = await sha256Hex(await app.vault.readBinary(sourceFile));
+    const parsedAt = new Date().toISOString();
+    const sourceMtime = sourceFile.stat.mtime > 0
+      ? new Date(sourceFile.stat.mtime).toISOString()
+      : undefined;
+    const navigation = buildCacheNavigationIndex(fullMarkdown, contentList);
+    const relativeImagesPath = `${cacheDir}/images`;
+    await adapter.write(sourcePathFile, JSON.stringify({
+      attachmentId: cacheId,
+      cacheId,
+      sourcePath: normalizedSourcePath,
+      sourceFilename: sourceFile.name,
+      sourceSha256: sourceHash,
+      sourceBytes: sourceFile.stat.size,
+      origin: 'parsed',
+      parsedAt,
+    }, null, 2) + '\n');
     const manifest = {
+      schema_version: PAPER_CACHE_SCHEMA_VERSION,
+      cache_id: cacheId,
       citekey: stem,
-      source_pdf: sourcePath,
+      source_pdf: normalizedSourcePath,
       source_sha256: sourceHash,
       source_bytes: sourceFile.stat.size,
+      ...(sourceMtime ? { source_mtime: sourceMtime } : {}),
+      source: {
+        path: normalizedSourcePath,
+        filename: sourceFile.name,
+        sha256: sourceHash,
+        bytes: sourceFile.stat.size,
+        ...(sourceMtime ? { mtime: sourceMtime } : {}),
+      },
       parser: PARSER,
       parser_version: 'cli',
       mode: 'precision',
       parameters: {
-        file_sources: [sourcePath],
+        file_sources: [normalizedSourcePath],
         output_dir: cacheDir,
         formats: ['md', 'json'],
         language: 'en',
@@ -188,13 +275,23 @@ export function createVaultMineruCacheEnsurer(app: App): (sourcePath: string) =>
         ocr: false,
       },
       status: 'success',
-      output: outputPath,
-      json_output: (await adapter.exists(jsonPath)) ? jsonPath : undefined,
-      images_dir: `${cacheDir}/images`,
-      parsed_at: new Date().toISOString(),
+      full_md: fullMarkdownPath,
+      output: fullMarkdownPath,
+      json_output: contentListPath,
+      images_dir: relativeImagesPath,
+      files: {
+        full_md: fullMarkdownPath,
+        content_list: contentListPath,
+        source: sourcePathFile,
+        images: relativeImagesPath,
+      },
+      parsed_at: parsedAt,
+      ...navigation,
     };
     await adapter.write(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
-    await waitForVaultFile(app, outputPath);
+    await waitForVaultFile(app, fullMarkdownPath);
+    await waitForVaultFile(app, contentListPath);
+    await waitForVaultFile(app, sourcePathFile);
     await waitForVaultFile(app, manifestPath);
   };
 }

@@ -2,6 +2,7 @@ import type {
   PaperReadRequest,
   PaperReadResult,
 } from '../../../core/paper/PaperRead';
+import type { PaperCacheManifest } from './PaperCachePackage';
 import type { PaperContentResolver } from './PaperContentResolver';
 
 const DEFAULT_MAX_CHARS = 12_000;
@@ -53,9 +54,24 @@ function selectPages(content: string, pages: string): SelectedContent {
   };
 }
 
-function selectSection(content: string, section: string): SelectedContent {
+function selectSection(
+  content: string,
+  section: string,
+  manifest?: PaperCacheManifest,
+): SelectedContent {
   const wanted = section.trim().toLocaleLowerCase();
   if (!wanted) throw new Error('section cannot be empty.');
+  const indexed = manifest?.sections?.find(candidate => (
+    candidate.heading.toLocaleLowerCase().includes(wanted)
+  ));
+  if (indexed) {
+    const start = Math.max(0, Math.min(content.length, indexed.charStart));
+    const end = Math.max(start, Math.min(content.length, indexed.charEnd));
+    return {
+      content: content.slice(start, end).trim(),
+      selection: `section: ${indexed.heading}`,
+    };
+  }
   const headings = [...content.matchAll(/^(#{1,6})\s+(.+)$/gm)];
   const index = headings.findIndex(match => match[2].trim().toLocaleLowerCase().includes(wanted));
   if (index < 0) throw new Error(`No cached section matches "${section}".`);
@@ -123,7 +139,7 @@ export class PaperReader {
     const selected = request.pages
       ? selectPages(resolved.content, request.pages)
       : request.section
-        ? selectSection(resolved.content, request.section)
+        ? selectSection(resolved.content, request.section, resolved.manifest)
         : request.query
           ? selectQuery(resolved.content, request.query)
           : { content: resolved.content, selection: 'beginning of paper' };

@@ -1,7 +1,11 @@
 import type { PaperContentResolver } from '@/features/chat/linked-content/PaperContentResolver';
 import { PaperReader } from '@/features/chat/linked-content/PaperReader';
 
-function createReader(content: string, cachePath = '论文/MD/current/current.paged.md') {
+function createReader(
+  content: string,
+  cachePath = '论文/MD/current/current.paged.md',
+  manifest?: Record<string, unknown>,
+) {
   const resolver = {
     resolve: jest.fn().mockResolvedValue({
       status: 'ready',
@@ -9,6 +13,7 @@ function createReader(content: string, cachePath = '论文/MD/current/current.pa
       cachePath,
       content,
       complete: true,
+      ...(manifest ? { manifest } : {}),
     }),
   } as unknown as PaperContentResolver;
   return { reader: new PaperReader(resolver), resolver };
@@ -54,5 +59,29 @@ describe('PaperReader', () => {
     expect(result.content).toContain('skyrmion Hall angle');
     expect(result.content).not.toContain('Unrelated appendix');
     expect(result.selection).toBe('query: skyrmion confinement');
+  });
+
+  it('uses manifest character ranges for section reads when available', async () => {
+    const content = '# Introduction\n\nIntro\n\n## Methods\n\nMethod body';
+    const methodStart = content.indexOf('## Methods');
+    const { reader } = createReader(content, '论文/MD/paper/full.md', {
+      sections: [{
+        heading: 'Methods',
+        page: 2,
+        charStart: methodStart,
+        charEnd: content.length,
+        figures: [],
+        tables: [],
+        equationCount: 0,
+      }],
+    });
+
+    await expect(reader.read({
+      sourcePath: '论文/PDF/current.pdf',
+      section: 'methods',
+    })).resolves.toMatchObject({
+      content: '## Methods\n\nMethod body',
+      selection: 'section: Methods',
+    });
   });
 });

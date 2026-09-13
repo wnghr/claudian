@@ -1,4 +1,10 @@
-const PAPER_CACHE_ROOT = '论文/MD/';
+import {
+  manifestFullMarkdownPath,
+  manifestSourceHash,
+  manifestSourcePath,
+  PAPER_CACHE_ROOT,
+  type PaperCacheManifest,
+} from './PaperCachePackage';
 
 export type PaperContentStatus = 'ready' | 'missing' | 'stale' | 'invalid';
 
@@ -9,6 +15,8 @@ export interface PaperContentResult {
   readonly content?: string;
   readonly complete?: boolean;
   readonly sha256?: string;
+  readonly manifestPath?: string;
+  readonly manifest?: PaperCacheManifest;
   readonly reason?: string;
 }
 
@@ -44,15 +52,11 @@ function normalizePath(path: string): string {
 
 function isManifest(file: PaperContentFile): boolean {
   const path = normalizePath(file.path);
-  return path.startsWith(PAPER_CACHE_ROOT) && path.endsWith('/manifest.json');
+  return path.startsWith(`${PAPER_CACHE_ROOT}/`) && path.endsWith('/manifest.json');
 }
 
-function getCachePath(manifest: Record<string, unknown>): string | null {
-  for (const key of ['paged_md', 'output']) {
-    const value = manifest[key];
-    if (typeof value === 'string' && value.trim()) return normalizePath(value);
-  }
-  return null;
+function normalizeOptionalPath(path: string | null): string | undefined {
+  return path ? normalizePath(path) : undefined;
 }
 
 export class PaperContentResolver {
@@ -107,14 +111,14 @@ export class PaperContentResolver {
     const currentHash = await (this.options.hashBinary ?? sha256Hex)(
       await this.options.readBinary(sourceFile),
     );
-    const recordedHash = typeof manifest.data.source_sha256 === 'string'
-      ? manifest.data.source_sha256.toUpperCase()
-      : '';
+    const recordedHash = manifestSourceHash(manifest.data)?.toUpperCase() ?? '';
     if (!recordedHash || currentHash.toUpperCase() !== recordedHash) {
       return {
         status: 'stale',
         sourcePath: normalizedSourcePath,
-        cachePath: getCachePath(manifest.data) ?? undefined,
+        cachePath: normalizeOptionalPath(manifestFullMarkdownPath(manifest.data)),
+        manifestPath: normalizePath(manifest.file.path),
+        manifest: manifest.data,
         sha256: currentHash,
         reason: 'The PDF changed after this cache was created.',
       };
@@ -124,18 +128,22 @@ export class PaperContentResolver {
       return {
         status: 'invalid',
         sourcePath: normalizedSourcePath,
-        cachePath: getCachePath(manifest.data) ?? undefined,
+        cachePath: normalizeOptionalPath(manifestFullMarkdownPath(manifest.data)),
+        manifestPath: normalizePath(manifest.file.path),
+        manifest: manifest.data,
         sha256: currentHash,
         reason: 'The cache manifest is not marked as successful.',
       };
     }
 
-    const cachePath = getCachePath(manifest.data);
+    const cachePath = normalizeOptionalPath(manifestFullMarkdownPath(manifest.data));
     const cacheFile = cachePath ? this.options.getFile(cachePath) : null;
     if (!cachePath || !cacheFile) {
       return {
         status: 'invalid',
         sourcePath: normalizedSourcePath,
+        manifestPath: normalizePath(manifest.file.path),
+        manifest: manifest.data,
         sha256: currentHash,
         reason: 'The cache manifest points to a missing Markdown file.',
       };
@@ -147,6 +155,8 @@ export class PaperContentResolver {
         status: 'invalid',
         sourcePath: normalizedSourcePath,
         cachePath,
+        manifestPath: normalizePath(manifest.file.path),
+        manifest: manifest.data,
         sha256: currentHash,
         reason: 'The cached Markdown file is empty.',
       };
@@ -158,6 +168,8 @@ export class PaperContentResolver {
       status: 'ready',
       sourcePath: normalizedSourcePath,
       cachePath,
+      manifestPath: normalizePath(manifest.file.path),
+      manifest: manifest.data,
       content: complete ? fullContent : fullContent.slice(0, maxChars),
       complete,
       sha256: currentHash,
@@ -168,6 +180,7 @@ export class PaperContentResolver {
   private async findManifest(
     sourcePath: string,
   ): Promise<{ file: PaperContentFile; data: Record<string, unknown> } | null> {
+    const matches: { file: PaperContentFile; data: Record<string, unknown> }[] = [];
     for (const file of this.options.getFiles().filter(isManifest)) {
       let data: unknown;
       try {
@@ -176,11 +189,17 @@ export class PaperContentResolver {
         continue;
       }
       if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
-      const sourcePdf = (data as Record<string, unknown>).source_pdf;
-      if (typeof sourcePdf === 'string' && normalizePath(sourcePdf) === sourcePath) {
-        return { file, data: data as Record<string, unknown> };
+      const sourcePdf = manifestSourcePath(data as PaperCacheManifest);
+      if (sourcePdf !== null && normalizePath(sourcePdf) === sourcePath) {
+        matches.push({ file, data: data as Record<string, unknown> });
       }
     }
-    return null;
+    return matches.sort((left, right) => manifestPriority(right.data) - manifestPriority(left.data))[0] ?? null;
   }
+}
+
+function manifestPriority(manifest: Readonly<Record<string, unknown>>): number {
+  const schema = typeof manifest.schema_version === 'number' ? manifest.schema_version : 0;
+  const parsedAt = typeof manifest.parsed_at === 'string' ? Date.parse(manifest.parsed_at) : 0;
+  return schema * 1_000_000_000_000 + (Number.isFinite(parsedAt) ? parsedAt : 0);
 }
