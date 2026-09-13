@@ -52,6 +52,7 @@ import {
   ProviderExecutionLifecycleRegistry,
   type ProviderExecutionTransitionScope,
 } from './core/execution';
+import type { PaperReadRequest, PaperReadResult } from './core/paper/PaperRead';
 import {
   getEnvironmentVariablesForScope as getScopedEnvironmentVariables,
   getRuntimeEnvironmentText,
@@ -88,6 +89,8 @@ import {
   WarmExecutionPool,
 } from './features/chat/execution/WarmExecutionPool';
 import { registerFileMenu } from './features/chat/fileMenu';
+import { PaperReader } from './features/chat/linked-content/PaperReader';
+import { createVaultPaperContentResolver } from './features/chat/linked-content/VaultPaperContentResolver';
 import {
   COLLAB_DETAIL_VIEW_TYPE,
   CollabDetailView,
@@ -224,6 +227,7 @@ export default class ClaudianPlugin extends Plugin {
   private isUnloading = false;
   private applicationShutdownPromise: Promise<void> | null = null;
   private tabWorkspaceMigrationCoordinator!: TabWorkspaceMigrationCoordinator;
+  private paperReader: PaperReader | null = null;
 
   get executionPersistence(): ChatExecutionPersistence {
     return this.conversationRepository;
@@ -231,6 +235,11 @@ export default class ClaudianPlugin extends Plugin {
 
   get chatModelSelection(): ChatModelSelectionCoordinator {
     return this.chatModelSelectionCoordinator;
+  }
+
+  readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
+    this.paperReader ??= new PaperReader(createVaultPaperContentResolver(this.app));
+    return this.paperReader.read(request);
   }
 
   async onload() {

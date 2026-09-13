@@ -1,4 +1,5 @@
 import type { ProviderExecutionTransitionScope } from '../../core/execution';
+import type { PaperReadRequest, PaperReadResult } from '../../core/paper/PaperRead';
 import type { ProviderHost } from '../../core/providers/ProviderHost';
 import type { ProviderCliResolutionContext, ProviderId } from '../../core/providers/types';
 import type { EnvironmentScope } from '../../core/types/settings';
@@ -26,6 +27,10 @@ export class ClaudianProviderHost implements ProviderHost {
 
   get manifest() {
     return this.plugin.manifest;
+  }
+
+  readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
+    return this.plugin.readPaper(request);
   }
 
   saveSettings(): Promise<void> {

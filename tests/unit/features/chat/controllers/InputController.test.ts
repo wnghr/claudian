@@ -610,6 +610,33 @@ describe('InputController coordinator execution', () => {
     }));
   });
 
+  it('keeps linked PDF content path-only for Codex so the read_pdf tool owns retrieval', async () => {
+    const linkedContentController = {
+      getSnapshot: () => ({ mode: 'locked', path: '论文/PDF/current.pdf' }),
+    };
+    const resolvePaperContent = jest.fn().mockResolvedValue({
+      status: 'ready',
+      sourcePath: '论文/PDF/current.pdf',
+      cachePath: '论文/MD/current/current.paged.md',
+      content: '## Entire cached paper body',
+      complete: true,
+    });
+    const fixture = createFixture({
+      getLinkedContentController: () => linkedContentController,
+      getTabProviderId: () => 'codex',
+      resolvePaperContent,
+    });
+
+    await fixture.controller.sendMessage({ content: 'Summarize this paper' });
+
+    expect(resolvePaperContent).not.toHaveBeenCalled();
+    expect(fixture.coordinator.execute).toHaveBeenCalledWith(expect.objectContaining({
+      context: {
+        linkedContent: { path: '论文/PDF/current.pdf' },
+      },
+    }));
+  });
+
   it('restores composer input and rolls back the local turn on definite pre-handoff failure', async () => {
     const image: ImageAttachment = {
       id: 'image-1',

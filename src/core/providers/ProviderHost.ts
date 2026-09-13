@@ -5,6 +5,7 @@ import type {
   ProviderExecutionLifecycleRegistry,
   ProviderExecutionTransitionScope,
 } from '../execution';
+import type { PaperReadPort } from '../paper/PaperRead';
 import type { ClaudianSettings } from '../types';
 import type { EnvironmentScope } from '../types/settings';
 import type { ProviderCliResolutionContext, ProviderId } from './types';
@@ -16,7 +17,7 @@ import type { ProviderCliResolutionContext, ProviderId } from './types';
  * conversation ownership. Providers receive only the settings, environment,
  * path, CLI, storage, and interaction capabilities they currently consume.
  */
-export interface ProviderHost {
+export interface ProviderHost extends PaperReadPort {
   readonly app: App;
   readonly executionLifecycleRegistry: ProviderExecutionLifecycleRegistry;
   readonly settings: ClaudianSettings;

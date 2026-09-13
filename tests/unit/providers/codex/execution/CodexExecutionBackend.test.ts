@@ -213,6 +213,13 @@ function createPlugin(): ProviderHost {
     getResolvedProviderCliPath: jest.fn().mockResolvedValue('/usr/local/bin/codex'),
     runProviderExecutionTransition: jest.fn(),
     notifyProviderChatOptionsChanged: jest.fn(),
+    readPaper: jest.fn().mockResolvedValue({
+      cachePath: '论文/MD/current/current.paged.md',
+      content: '<!-- p.2 -->\nFocused body',
+      selection: 'p.2',
+      sourcePath: '论文/PDF/current.pdf',
+      truncated: false,
+    }),
   } as unknown as ProviderHost;
 }
 
@@ -470,6 +477,10 @@ describe('CodexExecutionBackend', () => {
           expect.objectContaining({
             namespace: 'codex_app',
             name: 'load_workspace_dependencies',
+          }),
+          expect.objectContaining({
+            namespace: 'claudian',
+            name: 'read_pdf',
           }),
         ],
       }),
@@ -3142,6 +3153,21 @@ describe('CodexExecutionBackend', () => {
       contentItems: [expect.objectContaining({
         type: 'inputText',
         text: expect.stringContaining('unavailable'),
+      })],
+    }));
+    await expect(
+      serverRequestHandlers.get('item/tool/call')?.('paper-read-request', {
+        threadId: 'thread-tools',
+        turnId: 'turn-tools',
+        callId: 'paper-read-call',
+        namespace: 'claudian',
+        tool: 'read_pdf',
+        arguments: { path: '论文/PDF/current.pdf', pages: '2' },
+      }),
+    ).resolves.toEqual(expect.objectContaining({
+      success: true,
+      contentItems: [expect.objectContaining({
+        text: expect.stringContaining('Selection: p.2'),
       })],
     }));
     await expect(session.steer(createRequest(

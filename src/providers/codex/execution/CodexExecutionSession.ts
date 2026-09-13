@@ -71,6 +71,7 @@ import type {
 import { CodexDynamicToolRegistry } from '../runtime/CodexDynamicToolRegistry';
 import type { CodexLaunchSpec } from '../runtime/codexLaunchTypes';
 import { CodexNotificationRouter } from '../runtime/CodexNotificationRouter';
+import { createCodexPaperReadTool } from '../runtime/CodexPaperReadTool';
 import {
   CodexRpcResponseError,
   CodexRpcTransport,
@@ -101,6 +102,8 @@ const PASSIVE_INSTRUCTIONS =
   'Do not invoke tools. Complete the request only from the supplied input and context.';
 const LEGACY_WORKSPACE_DEPENDENCY_INSTRUCTIONS =
   'This thread predates Claudian client-hosted workspace dependency tools. Do not emulate load_workspace_dependencies or install replacement dependencies.';
+const PAPER_READ_INSTRUCTIONS =
+  'When Linked content is a PDF, use claudian.read_pdf to read only the pages, section, or query-relevant passages needed for the request. Do not read the PDF through shell commands or ask the user to copy its path.';
 const CODEX_SUPPORTS_EXACT_BUILT_IN_TOOL_ALLOW_LIST = false;
 const MISSED_TURN_COMPLETION_GRACE_MS = 1_000;
 const MISSED_TURN_COMPLETION_MAX_ATTEMPTS = 3;
@@ -303,6 +306,7 @@ export class CodexExecutionSession
   private loadedThreadBaseInstructions: string | null = null;
   private sessionFilePath: string | null;
   private workspaceDependencyToolVersion: number | null;
+  private linkedPdfPath: string | null = null;
   private pendingFork: CodexProviderState['forkSource'];
   private pendingForkTarget: CodexPendingForkTarget | undefined;
   private nativeConversationContextEstablished: boolean;
@@ -346,6 +350,10 @@ export class CodexExecutionSession
     }
     if (this.activeRun) {
       throw new Error('Codex execution session already has an active requested run.');
+    }
+    const linkedContentPath = request.context?.linkedContent?.path;
+    if (linkedContentPath?.toLocaleLowerCase().endsWith('.pdf')) {
+      this.linkedPdfPath = linkedContentPath;
     }
 
     const run = new CodexExecutionRun(
@@ -656,6 +664,9 @@ export class CodexExecutionSession
       this.dynamicToolRegistry = new CodexDynamicToolRegistry();
       this.dynamicToolRegistry.register(
         createCodexWorkspaceDependencyTool(this.runtimeContext),
+      );
+      this.dynamicToolRegistry.register(
+        createCodexPaperReadTool(this.plugin, () => this.linkedPdfPath),
       );
       this.serverRequestRouter.setDynamicToolRegistry(this.dynamicToolRegistry);
       this.wireTransportHandlers(transport, generation);
@@ -1793,7 +1804,7 @@ export class CodexExecutionSession
         });
     return request.toolPolicy.kind === 'passive'
       ? `${base}\n\n${PASSIVE_INSTRUCTIONS}`
-      : base;
+      : `${base}\n\n${PAPER_READ_INSTRUCTIONS}`;
   }
 
   private getSystemPromptSettings(): SystemPromptSettings {
