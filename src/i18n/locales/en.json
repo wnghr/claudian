@@ -411,6 +411,7 @@
     "title": "Claudian Settings",
     "tabs": {
       "general": "General",
+      "paper-cache": "Paper cache",
       "collab": "Collab",
       "providers": "Providers",
       "claude": "Claude",

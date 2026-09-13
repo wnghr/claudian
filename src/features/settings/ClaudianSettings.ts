@@ -29,7 +29,7 @@ import type { FeatureHost } from '../FeatureHost';
 import { AgentSkillManagementCoordinator } from './AgentSkillManagementCoordinator';
 import { buildNavMappingText, parseNavMappings } from './keyboardNavigation';
 
-type SettingsTabId = 'general' | 'collab' | 'providers';
+type SettingsTabId = 'general' | 'paper-cache' | 'collab' | 'providers';
 const CLAUDIAN_COLLAB_READ_MORE_URL =
   'https://claudian.md/docs/collab-mode/';
 type ObsidianHotkey = { modifiers: string[]; key: string };
@@ -176,7 +176,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
     setLocale(this.plugin.settings.locale as Locale);
 
     const providerTabs = ProviderRegistry.getRegisteredProviderIds();
-    const tabIds: SettingsTabId[] = ['general', 'collab', 'providers'];
+    const tabIds: SettingsTabId[] = ['general', 'paper-cache', 'collab', 'providers'];
     const preferredProvider = providerTabs.includes(this.plugin.settings.settingsProvider)
       ? this.plugin.settings.settingsProvider
       : providerTabs[0] ?? null;
@@ -286,6 +286,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
     }
 
     this.renderGeneralTab(tabContents.get('general')!);
+    this.renderPaperCacheTab(tabContents.get('paper-cache')!);
     activateCollabTab = this.renderCollabTab(tabContents.get('collab')!);
 
     for (const providerId of providerTabs) {
@@ -540,9 +541,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
 
     new Setting(container).setName(t('settings.content')).setHeading();
 
-    new Setting(container).setName(t('settings.paperCache.sectionTitle')).setHeading();
-    new PaperCacheSettings(container, this.plugin, this.app);
-
     new Setting(container)
       .setName(t('settings.userName.name'))
       .setDesc(t('settings.userName.desc'))
@@ -743,6 +741,10 @@ export class ClaudianSettingTab extends PluginSettingTab {
           });
       });
 
+  }
+
+  private renderPaperCacheTab(container: HTMLElement): void {
+    new PaperCacheSettings(container, this.plugin, this.app);
   }
 
   private renderCollabTab(container: HTMLElement): () => void {

@@ -411,6 +411,7 @@
     "title": "Claudian 设置",
     "tabs": {
       "general": "通用",
+      "paper-cache": "论文缓存",
       "collab": "协作",
       "providers": "提供商",
       "claude": "Claude",
