@@ -424,7 +424,15 @@ export class InputController {
     state.hasPendingConversationSave = true;
     renderer.addMessage(userMsg);
 
+    const admittedTurnRequest = this.bindLinkedContentAtTurnAdmission(
+      turnRequest,
+      isCompact,
+    );
+    let linkedContentBody: string | undefined;
     try {
+      linkedContentBody = await this.resolvePaperContent(
+        admittedTurnRequest.linkedContentPath,
+      );
       await this.ensureConversationShell(linkedContentSubmission);
       await this.triggerTitleGeneration();
     } catch (error) {
@@ -436,10 +444,6 @@ export class InputController {
       throw error;
     }
     turnConversationId = state.currentConversationId;
-    const admittedTurnRequest = this.bindLinkedContentAtTurnAdmission(
-      turnRequest,
-      isCompact,
-    );
 
     const assistantMsg: ChatMessage = {
       id: this.deps.generateId(),
@@ -504,9 +508,6 @@ export class InputController {
     const dynamicSystemPromptSections = await this.resolveMainAgentDynamicSystemPromptSections();
 
     try {
-      const linkedContentBody = await this.resolvePaperContent(
-        admittedTurnRequest.linkedContentPath,
-      );
       userMsg.content = admittedTurnRequest.text;
       userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
       const result = await coordinator.execute(this.createExecutionSubmission(

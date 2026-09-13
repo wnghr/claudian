@@ -52,4 +52,50 @@ describe('PaperContentResolver', () => {
       status: 'stale',
     });
   });
+
+  it('parses a missing cache once and retries the read', async () => {
+    const pdf = { path: '论文/PDF/Current-paper.pdf', extension: 'pdf' };
+    let hasCache = false;
+    const parse = jest.fn().mockImplementation(async () => {
+      hasCache = true;
+    });
+    const files = [pdf];
+    const resolver = new PaperContentResolver({
+      getFile: path => {
+        if (path === pdf.path) return pdf;
+        if (hasCache && path === '论文/MD/current/manifest.json') {
+          return { path, extension: 'json' };
+        }
+        if (hasCache && path === '论文/MD/current/current.paged.md') {
+          return { path, extension: 'md' };
+        }
+        return null;
+      },
+      getFiles: () => hasCache
+        ? [...files,
+          { path: '论文/MD/current/manifest.json', extension: 'json' },
+          { path: '论文/MD/current/current.paged.md', extension: 'md' }]
+        : files,
+      read: async file => file.path.endsWith('manifest.json')
+        ? JSON.stringify({
+            source_pdf: pdf.path,
+            source_sha256: 'ABC123',
+            paged_md: '论文/MD/current/current.paged.md',
+            status: 'success',
+          })
+        : 'Parsed body',
+      readBinary: async () => new Uint8Array([1, 2, 3]).buffer,
+      hashBinary: async () => 'ABC123',
+      ensureCache: parse,
+    });
+
+    await expect(Promise.all([
+      resolver.resolve(pdf.path),
+      resolver.resolve(pdf.path),
+    ])).resolves.toEqual([
+      expect.objectContaining({ status: 'ready', content: 'Parsed body' }),
+      expect.objectContaining({ status: 'ready', content: 'Parsed body' }),
+    ]);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
 });

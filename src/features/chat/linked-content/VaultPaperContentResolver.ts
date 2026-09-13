@@ -1,6 +1,7 @@
 import type { App, TFile } from 'obsidian';
 import { TFile as ObsidianFile } from 'obsidian';
 
+import { createVaultMineruCacheEnsurer } from './MineruPaperCacheParser';
 import { PaperContentResolver } from './PaperContentResolver';
 
 export function createVaultPaperContentResolver(app: App): PaperContentResolver {
@@ -20,5 +21,6 @@ export function createVaultPaperContentResolver(app: App): PaperContentResolver 
     getFiles: () => app.vault.getFiles(),
     read: file => app.vault.read(getVaultFile(file.path)),
     readBinary: file => app.vault.readBinary(getVaultFile(file.path)),
+    ensureCache: createVaultMineruCacheEnsurer(app),
   });
 }

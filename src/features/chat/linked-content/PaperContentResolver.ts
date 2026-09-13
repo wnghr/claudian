@@ -18,6 +18,7 @@ export interface PaperContentResolverOptions {
   readonly read: (file: PaperContentFile) => Promise<string>;
   readonly readBinary: (file: PaperContentFile) => Promise<ArrayBuffer>;
   readonly hashBinary?: (binary: ArrayBuffer) => Promise<string>;
+  readonly ensureCache?: (sourcePath: string) => Promise<void>;
 }
 
 export interface PaperContentFile {
@@ -29,7 +30,7 @@ export interface PaperContentResolveOptions {
   readonly maxChars?: number;
 }
 
-async function sha256Hex(binary: ArrayBuffer): Promise<string> {
+export async function sha256Hex(binary: ArrayBuffer): Promise<string> {
   const digest = await window.crypto.subtle.digest('SHA-256', binary);
   return [...new Uint8Array(digest)]
     .map(byte => byte.toString(16).padStart(2, '0'))
@@ -55,11 +56,34 @@ function getCachePath(manifest: Record<string, unknown>): string | null {
 }
 
 export class PaperContentResolver {
+  private readonly pendingCacheEnsures = new Map<string, Promise<void>>();
+
   constructor(private readonly options: PaperContentResolverOptions) {}
 
   async resolve(
     sourcePath: string,
     resolveOptions: PaperContentResolveOptions = {},
+  ): Promise<PaperContentResult> {
+    const initial = await this.resolveCurrent(sourcePath, resolveOptions);
+    if (initial.status === 'ready' || !this.options.ensureCache) return initial;
+
+    const normalizedSourcePath = normalizePath(sourcePath);
+    let pending = this.pendingCacheEnsures.get(normalizedSourcePath);
+    if (!pending) {
+      pending = this.options.ensureCache(normalizedSourcePath).finally(() => {
+        if (this.pendingCacheEnsures.get(normalizedSourcePath) === pending) {
+          this.pendingCacheEnsures.delete(normalizedSourcePath);
+        }
+      });
+      this.pendingCacheEnsures.set(normalizedSourcePath, pending);
+    }
+    await pending;
+    return this.resolveCurrent(sourcePath, resolveOptions);
+  }
+
+  private async resolveCurrent(
+    sourcePath: string,
+    resolveOptions: PaperContentResolveOptions,
   ): Promise<PaperContentResult> {
     const normalizedSourcePath = normalizePath(sourcePath);
     const sourceFile = this.options.getFile(normalizedSourcePath);
