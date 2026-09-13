@@ -64,6 +64,7 @@
 @import "./settings/plugin-settings.css";
 @import "./settings/agent-settings.css";
 @import "./settings/agent-skills.css";
+@import "./settings/paper-cache.css";
 @import "./settings/provider-model-picker.css";
 
 /* Accessibility */

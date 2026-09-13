@@ -2,6 +2,7 @@ import type { App, WorkspaceLeaf } from 'obsidian';
 
 import type { SharedAppStorage } from '../core/bootstrap/storage';
 import type { CollabComposerReferencePort } from '../core/collab';
+import type { PaperLibraryEntry, PaperLibraryQuery } from '../core/library/PaperLibrary';
 import type { ProviderHost } from '../core/providers/ProviderHost';
 import type { AppTabManagerState, ProviderId } from '../core/providers/types';
 import type {
@@ -98,6 +99,8 @@ export interface FeatureHost {
   getAgentSkillResourceGeneration(): number;
   notifyAgentSkillsChanged(): Promise<void>;
   notifyProviderChatOptionsChanged(providerId: ProviderId): void;
+  listPapers(query?: PaperLibraryQuery): Promise<readonly PaperLibraryEntry[]>;
+  rebuildPaperCache(sourcePath: string): Promise<void>;
 
   createConversation(options?: {
     providerId?: ProviderId;

@@ -17,7 +17,10 @@ const BIBLIOGRAPHY_INDEX = '论文/索引/bibliography.json';
 const MAX_REPORTED_CITEKEYS = 25;
 
 interface ParsedManifest {
+  readonly manifestPath: string;
   readonly sourcePdf: string | null;
+  readonly cachePath: string | null;
+  readonly jsonPath: string | null;
   readonly pages: number | null;
   readonly parsedAt: string | null;
   readonly status: string | null;
@@ -153,7 +156,10 @@ async function scanManifests(app: App): Promise<Map<string, ParsedManifest>> {
     const citekey = readText(data, 'citekey')
       ?? path.slice(PARSED_ROOT.length).split('/')[0];
     manifests.set(citekey, {
+      manifestPath: path,
       sourcePdf: readText(data, 'source_pdf'),
+      cachePath: readText(data, 'paged_md') ?? readText(data, 'output'),
+      jsonPath: readText(data, 'json_output'),
       pages: readPageCount(data),
       parsedAt: readText(data, 'parsed_at'),
       status: readText(data, 'status'),
@@ -255,6 +261,9 @@ export function createVaultPaperLibrary(app: App): PaperLibraryPort {
           pages: manifest?.pages ?? null,
           cache: resolveCacheStatus(manifest, pdf),
           parsedAt: manifest?.parsedAt ?? null,
+          manifestPath: manifest?.manifestPath ?? null,
+          cachePath: manifest?.cachePath ?? null,
+          jsonPath: manifest?.jsonPath ?? null,
         };
       });
 

@@ -19,6 +19,7 @@ import type { Locale, TranslationKey } from '../../i18n/types';
 import { renderCopyableCodeFence } from '../../shared/components/CopyableCodeFence';
 import { AgentSkillSettings } from '../../shared/settings/AgentSkillSettings';
 import { renderEnvironmentSettingsSection } from '../../shared/settings/EnvironmentSettingsSection';
+import { PaperCacheSettings } from '../../shared/settings/PaperCacheSettings';
 import { formatContextLimit, parseContextLimit, parseEnvironmentVariables } from '../../utils/env';
 import {
   MAX_WARM_AGENT_PROCESSES,
@@ -538,6 +539,9 @@ export class ClaudianSettingTab extends PluginSettingTab {
     // --- Content ---
 
     new Setting(container).setName(t('settings.content')).setHeading();
+
+    new Setting(container).setName(t('settings.paperCache.sectionTitle')).setHeading();
+    new PaperCacheSettings(container, this.plugin, this.app);
 
     new Setting(container)
       .setName(t('settings.userName.name'))

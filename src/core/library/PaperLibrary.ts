@@ -22,6 +22,10 @@ export interface PaperLibraryEntry {
   readonly pages: number | null;
   readonly cache: PaperCacheStatus;
   readonly parsedAt: string | null;
+  /** Manifest-derived paths exposed for cache management UI and diagnostics. */
+  readonly manifestPath?: string | null;
+  readonly cachePath?: string | null;
+  readonly jsonPath?: string | null;
 }
 
 export interface PaperLibraryQuery {

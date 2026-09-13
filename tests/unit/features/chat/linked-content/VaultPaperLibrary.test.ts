@@ -101,12 +101,15 @@ describe('createVaultPaperLibrary', () => {
 
       await expect(library.listPapers()).resolves.toEqual([{
         cache: 'ready',
+        cachePath: null,
         cardPath: CARD_PATH,
         citekey: 'asilehanlightdriven2025',
         domain: '液晶与软物质',
         pages: 13,
         parsedAt: '2026-09-12T22:30:52.778582+08:00',
         pdfPath: PDF_PATH,
+        jsonPath: null,
+        manifestPath: MANIFEST_PATH,
         status: 'unread',
         subfield: '液晶斯格明子',
         title: 'Light-driven dancing of nematic colloids in fractional skyrmions and bimerons',

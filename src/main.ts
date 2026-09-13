@@ -121,6 +121,7 @@ import {
   readEmbeddingConfigFile,
   resolveEmbeddingCachePath,
 } from './features/chat/linked-content/EmbeddingVectorCache';
+import { createVaultMineruCacheEnsurer } from './features/chat/linked-content/MineruPaperCacheParser';
 import { PaperReader } from './features/chat/linked-content/PaperReader';
 import { createVaultPaperContentResolver } from './features/chat/linked-content/VaultPaperContentResolver';
 import { createVaultPaperLibrary } from './features/chat/linked-content/VaultPaperLibrary';
@@ -264,6 +265,7 @@ export default class ClaudianPlugin extends Plugin {
   private tabWorkspaceMigrationCoordinator!: TabWorkspaceMigrationCoordinator;
   private paperReader: PaperReader | null = null;
   private paperLibrary: PaperLibraryPort | null = null;
+  private paperCacheEnsurer: ((sourcePath: string) => Promise<void>) | null = null;
   private paperSearch: PaperSearchPort | null = null;
   private paperNoteWriter: (PaperNoteWritePort & PaperFieldEditPort) | null = null;
 
@@ -282,6 +284,11 @@ export default class ClaudianPlugin extends Plugin {
 
   listPapers(query: PaperLibraryQuery = {}): Promise<readonly PaperLibraryEntry[]> {
     return this.getPaperLibrary().listPapers(query);
+  }
+
+  rebuildPaperCache(sourcePath: string): Promise<void> {
+    this.paperCacheEnsurer ??= createVaultMineruCacheEnsurer(this.app);
+    return this.paperCacheEnsurer(sourcePath);
   }
 
   citePaper(citekey: string): Promise<PaperCitation> {
