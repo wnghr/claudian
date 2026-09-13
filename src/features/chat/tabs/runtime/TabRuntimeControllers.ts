@@ -10,10 +10,10 @@ import { BrowserSelectionController } from '../../controllers/BrowserSelectionCo
 import { CanvasSelectionController } from '../../controllers/CanvasSelectionController';
 import { ConversationController } from '../../controllers/ConversationController';
 import { InputController } from '../../controllers/InputController';
-import { createVaultPaperContentResolver } from '../../linked-content/PaperContentResolver';
 import { NavigationController } from '../../controllers/NavigationController';
 import { SelectionController } from '../../controllers/SelectionController';
 import { StreamController } from '../../controllers/StreamController';
+import { createVaultPaperContentResolver } from '../../linked-content/VaultPaperContentResolver';
 import { MessageRenderer } from '../../rendering/MessageRenderer';
 import { getTabProviderId } from '../providerResolution';
 import {

@@ -1,6 +1,3 @@
-import type { App, TFile } from 'obsidian';
-import { TFile as ObsidianFile } from 'obsidian';
-
 const PAPER_CACHE_ROOT = '论文/MD/';
 
 export type PaperContentStatus = 'ready' | 'missing' | 'stale' | 'invalid';
@@ -33,7 +30,7 @@ export interface PaperContentResolveOptions {
 }
 
 async function sha256Hex(binary: ArrayBuffer): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', binary);
+  const digest = await window.crypto.subtle.digest('SHA-256', binary);
   return [...new Uint8Array(digest)]
     .map(byte => byte.toString(16).padStart(2, '0'))
     .join('')
@@ -162,24 +159,4 @@ export class PaperContentResolver {
     }
     return null;
   }
-}
-
-export function createVaultPaperContentResolver(app: App): PaperContentResolver {
-  const getVaultFile = (path: string): TFile => {
-    const file = app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof ObsidianFile)) {
-      throw new Error(`Vault file is unavailable: ${path}`);
-    }
-    return file;
-  };
-
-  return new PaperContentResolver({
-    getFile: path => {
-      const file = app.vault.getAbstractFileByPath(path);
-      return file instanceof ObsidianFile ? file : null;
-    },
-    getFiles: () => app.vault.getFiles(),
-    read: file => app.vault.read(getVaultFile(file.path)),
-    readBinary: file => app.vault.readBinary(getVaultFile(file.path)),
-  });
 }

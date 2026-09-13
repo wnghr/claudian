@@ -582,6 +582,34 @@ describe('InputController coordinator execution', () => {
     }));
   });
 
+  it('injects validated cached Markdown when the linked content is a PDF', async () => {
+    const linkedContentController = {
+      getSnapshot: () => ({ mode: 'locked', path: '论文/PDF/current.pdf' }),
+    };
+    const fixture = createFixture({
+      getLinkedContentController: () => linkedContentController,
+      resolvePaperContent: jest.fn().mockResolvedValue({
+        status: 'ready',
+        sourcePath: '论文/PDF/current.pdf',
+        cachePath: '论文/MD/current/current.paged.md',
+        content: '## Cached paper\n\n<!-- p.1 -->\nBody',
+        complete: true,
+      }),
+    });
+
+    await fixture.controller.sendMessage({ content: 'Summarize this paper' });
+
+    expect(fixture.deps.resolvePaperContent).toHaveBeenCalledWith('论文/PDF/current.pdf');
+    expect(fixture.coordinator.execute).toHaveBeenCalledWith(expect.objectContaining({
+      context: {
+        linkedContent: {
+          path: '论文/PDF/current.pdf',
+          content: '## Cached paper\n\n<!-- p.1 -->\nBody',
+        },
+      },
+    }));
+  });
+
   it('restores composer input and rolls back the local turn on definite pre-handoff failure', async () => {
     const image: ImageAttachment = {
       id: 'image-1',
