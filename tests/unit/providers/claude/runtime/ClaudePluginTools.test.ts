@@ -24,6 +24,7 @@ function createContext(): { context: PluginToolContext; listPapers: jest.Mock } 
   const listPapers = jest.fn().mockResolvedValue([]);
   return {
     context: {
+      confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields: jest.fn() } as unknown as PaperFieldEditPort,
       getLinkedPdfPath: () => null,
       library: { citePaper: jest.fn(), listPapers } as unknown as PaperLibraryPort,
@@ -85,5 +86,20 @@ describe('createClaudePluginToolServers', () => {
     const browse = exposedTools(servers.claudian).find(tool => tool.name === 'browse');
 
     await expect(browse?.handler({})).rejects.toThrow('vault unavailable');
+  });
+
+  it('does not invoke a write tool when plugin confirmation is denied', async () => {
+    const fake = createContext();
+    const confirmToolAction = (fake.context as unknown as {
+      confirmToolAction: jest.Mock;
+    }).confirmToolAction;
+    confirmToolAction.mockResolvedValue(false);
+    const servers = createClaudePluginToolServers(fake.context);
+    const writeNote = exposedTools(servers.claudian).find(tool => tool.name === 'write_note');
+
+    await expect(writeNote?.handler({
+      content: '这段内容不应写入',
+      target: 'current',
+    })).rejects.toThrow('User denied claudian.write_note');
   });
 });

@@ -108,7 +108,7 @@ describe('createVaultPaperNoteWriter', () => {
     expect(backup).toBe(CARD_TEXT);
   });
 
-  it('resolves a note by bare name and reports ambiguous matches', async () => {
+  it('rejects an ambiguous bare name instead of writing the first match', async () => {
     content = {
       [TWIN_PATH]: '# one\n',
       [TWIN_PATH_2]: '# two\n',
@@ -116,13 +116,12 @@ describe('createVaultPaperNoteWriter', () => {
     const app = buildApp();
     const writer = createVaultPaperNoteWriter({ app });
 
-    const result = await writer.appendToNote({
+    await expect(writer.appendToNote({
       content: '写进同名笔记之一。',
       target: '两个同名',
-    });
-
-    expect(result.path).toBe(TWIN_PATH);
-    expect(result.alternates).toEqual([TWIN_PATH_2]);
+    })).rejects.toThrow(`目标笔记不唯一：两个同名`);
+    expect(content[TWIN_PATH]).toBe('# one\n');
+    expect(content[TWIN_PATH_2]).toBe('# two\n');
   });
 
   it('skips a duplicate without touching the file and without a backup', async () => {
@@ -207,7 +206,7 @@ describe('createVaultPaperNoteWriter', () => {
     expect(processCalls).toBe(0);
   });
 
-  it('reports ambiguous card matches without guessing silently', async () => {
+  it('rejects ambiguous card matches without guessing', async () => {
     content = {
       [TWIN_PATH]: '---\nstatus: unread\n---\n',
       [TWIN_PATH_2]: '---\nstatus: unread\n---\n',
@@ -215,9 +214,23 @@ describe('createVaultPaperNoteWriter', () => {
     const app = buildApp();
     const writer = createVaultPaperNoteWriter({ app });
 
-    const result = await writer.setPaperFields({ status: 'reading', target: '两个同名' });
+    await expect(writer.setPaperFields({ status: 'reading', target: '两个同名' }))
+      .rejects.toThrow(`目标笔记不唯一：两个同名`);
+    expect(content[TWIN_PATH]).toContain('status: unread');
+    expect(content[TWIN_PATH_2]).toContain('status: unread');
+  });
 
-    expect(result.path).toBe(TWIN_PATH);
-    expect(result.alternates).toEqual([TWIN_PATH_2]);
+  it('stops before writing when the backup cannot be created', async () => {
+    const fs = await import('node:fs/promises');
+    await fs.writeFile(join(vaultRoot, 'note-edit-backups'), 'not a directory', 'utf8');
+    const app = buildApp();
+    const writer = createVaultPaperNoteWriter({ app });
+
+    await expect(writer.appendToNote({
+      content: '备份失败时不能继续写入。',
+      target: CARD_PATH,
+    })).rejects.toThrow('无法创建写入备份');
+    expect(content[CARD_PATH]).toBe(CARD_TEXT);
+    expect(processCalls).toBe(0);
   });
 });

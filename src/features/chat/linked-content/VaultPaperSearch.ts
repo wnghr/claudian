@@ -52,7 +52,7 @@ import { embeddingVectorKey, type EmbeddingVectorStore } from './EmbeddingVector
 export function buildSkipDirectoryParts(app: App): ReadonlySet<string> {
   const parts = new Set<string>([
     '.git', '.trash', '.claudian', '.agents', '.claude',
-    '.workbuddy', '.kb', 'node_modules', '__pycache__', 'Templates', 'Images',
+    '.workbuddy', 'node_modules', '__pycache__', 'Templates', 'Images',
   ]);
   const configDirectory = (app.vault as { configDir?: unknown }).configDir;
   if (typeof configDirectory === 'string' && configDirectory.length > 0) {
@@ -101,7 +101,7 @@ function isIndexableFile(file: TFile): boolean {
     && file.extension.toLocaleLowerCase() === 'md';
 }
 
-function selectIndexableFiles(app: App): readonly TFile[] {
+function selectIndexableFiles(app: App, scope?: string): readonly TFile[] {
   const markdown = app.vault.getFiles().filter(file => isIndexableFile(file));
   const present = new Set(markdown.map(file => normalizePath(file.path)));
   const skipParts = buildSkipDirectoryParts(app);
@@ -110,6 +110,7 @@ function selectIndexableFiles(app: App): readonly TFile[] {
   for (const file of markdown) {
     const path = normalizePath(file.path);
     if (isSkipped(path, skipParts)) continue;
+    if (scope && !isInScope(path, scope)) continue;
     if (!path.endsWith('.paged.md')) {
       const anchoredTwin = `${path.slice(0, -'.md'.length)}.paged.md`;
       if (present.has(anchoredTwin)) continue;
@@ -151,7 +152,7 @@ function isInScope(path: string, scope: string | undefined): boolean {
   if (!wanted) return true;
   return path === wanted
     || path.startsWith(`${wanted}/`)
-    || path.split('/').includes(wanted);
+    || path.split('/').some(part => part === wanted);
 }
 
 interface SemanticRanking {
@@ -237,8 +238,12 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
       const mode: PaperSearchMode = request.mode ?? 'hybrid';
       const limit = request.limit ?? PAPER_SEARCH_DEFAULT_LIMIT;
 
-      const files = selectIndexableFiles(app);
-      const corpus = await buildCorpus(app, files);
+      const files = selectIndexableFiles(app, request.scope);
+      const corpus = (await buildCorpus(app, files)).filter(chunk => (
+        (!request.kind || chunk.kind === request.kind)
+        && !(chunk.kind === 'md'
+          && ENTRY_DIRECTORY_PARTS.some(part => chunk.path.includes(part)))
+      ));
       const queryTokens = tokenize(request.query);
 
       if (corpus.length === 0) {
@@ -293,11 +298,6 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
       const hits: PaperSearchHit[] = [];
       for (const candidate of ordered) {
         const chunk = corpus[candidate.position];
-        if (request.kind && chunk.kind !== request.kind) continue;
-        if (!isInScope(chunk.path, request.scope)) continue;
-        if (chunk.kind === 'md'
-          && ENTRY_DIRECTORY_PARTS.some(part => chunk.path.includes(part))) continue;
-
         hits.push({
           body: chunk.body,
           heading: chunk.heading,

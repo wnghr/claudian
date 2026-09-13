@@ -665,6 +665,7 @@ export class CodexExecutionSession
         createCodexWorkspaceDependencyTool(this.runtimeContext),
       );
       for (const registration of createCodexPluginTools({
+        confirmToolAction: request => this.serverRequestRouter.confirmPluginTool(request),
         fields: this.plugin,
         getLinkedPdfPath: () => this.linkedPdfPath,
         library: this.plugin,

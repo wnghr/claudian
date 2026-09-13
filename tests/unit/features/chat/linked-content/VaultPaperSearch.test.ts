@@ -238,6 +238,19 @@ describe('createVaultPaperSearch', () => {
     );
   });
 
+  it('does not embed files outside the requested scope', async () => {
+    const embedding = recordingEmbedding();
+    await withVault(
+      { content: { [PAGGED_PATH]: PAGGED_TEXT, [REGULAR_NOTE_PATH]: NOTE_TEXT }, embedding },
+      async impl => {
+        await impl.searchPapers({ query: 'research', scope: '论文/MD' });
+        // The scoped search has only the paper's chunks available to semantic search.
+        expect(embedding.embedCalls).toBeGreaterThan(0);
+        expect(embedding.embedCalls).toBeLessThanOrEqual(3);
+      },
+    );
+  });
+
   it('reuses cached vectors on a second search and does not re-embed', async () => {
     const memoryStore = new Map<string, string>();
     const store = {

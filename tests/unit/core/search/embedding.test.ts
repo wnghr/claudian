@@ -20,13 +20,13 @@ function jsonResponse(embeddings: readonly (readonly number[])[]): Response {
 describe('resolveEmbeddingConfig', () => {
   it('returns null when any required part is missing', () => {
     expect(resolveEmbeddingConfig({})).toBeNull();
-    expect(resolveEmbeddingConfig({ KB_EMBED_URL: 'https://api.example.com' })).toBeNull();
+    expect(resolveEmbeddingConfig({ CLAUDIAN_EMBED_URL: 'https://api.example.com' })).toBeNull();
   });
 
-  it('prefers KB_EMBED_* over PHYSICS_KB_EMBEDDING_* over a file', () => {
+  it('prefers CLAUDIAN_EMBED_* over the file config', () => {
     const config = resolveEmbeddingConfig(
-      { KB_EMBED_KEY: 'primary', KB_EMBED_MODEL: 'env-model', KB_EMBED_URL: 'env-url' },
-      { KB_EMBED_KEY: 'from-file' },
+      { CLAUDIAN_EMBED_KEY: 'primary', CLAUDIAN_EMBED_MODEL: 'env-model', CLAUDIAN_EMBED_URL: 'env-url' },
+      { CLAUDIAN_EMBED_KEY: 'from-file' },
     );
     expect(config).toEqual({
       apiKey: 'primary',
@@ -35,35 +35,31 @@ describe('resolveEmbeddingConfig', () => {
     });
   });
 
-  it('falls back to the PHYSICS_KB_* names when KB_EMBED_* is unset', () => {
+  it('does not accept legacy embedding environment names', () => {
     const config = resolveEmbeddingConfig(
       { PHYSICS_KB_EMBEDDING_MODEL: 'BAAI/bge-m3' },
-      { KB_EMBED_KEY: 'file-key', KB_EMBED_URL: 'file-url' },
+      { CLAUDIAN_EMBED_KEY: 'file-key', CLAUDIAN_EMBED_URL: 'file-url' },
     );
-    expect(config).toEqual({
-      apiKey: 'file-key',
-      model: 'BAAI/bge-m3',
-      url: 'file-url',
-    });
+    expect(config).toBeNull();
   });
 
   it('reads from a config file when no environment variable is set', () => {
     const config = resolveEmbeddingConfig({}, {
-      KB_EMBED_KEY: 'k',
-      KB_EMBED_MODEL: 'm',
-      KB_EMBED_URL: 'u',
+      CLAUDIAN_EMBED_KEY: 'k',
+      CLAUDIAN_EMBED_MODEL: 'm',
+      CLAUDIAN_EMBED_URL: 'u',
     });
     expect(config).toEqual({ apiKey: 'k', model: 'm', url: 'u' });
   });
 
   it('ignores blank environment values', () => {
-    expect(resolveEmbeddingConfig({ KB_EMBED_KEY: '   ' })).toBeNull();
+    expect(resolveEmbeddingConfig({ CLAUDIAN_EMBED_KEY: '   ' })).toBeNull();
   });
 
-  it('exposes the same env keys the engine has used historically', () => {
-    expect(EMBEDDING_ENV_KEYS.apiKey).toEqual(['KB_EMBED_KEY', 'PHYSICS_KB_EMBEDDING_API_KEY']);
-    expect(EMBEDDING_ENV_KEYS.url).toEqual(['KB_EMBED_URL', 'PHYSICS_KB_EMBEDDING_URL']);
-    expect(EMBEDDING_ENV_KEYS.model).toEqual(['KB_EMBED_MODEL', 'PHYSICS_KB_EMBEDDING_MODEL']);
+  it('exposes only Claudian-owned environment keys', () => {
+    expect(EMBEDDING_ENV_KEYS.apiKey).toEqual(['CLAUDIAN_EMBED_KEY']);
+    expect(EMBEDDING_ENV_KEYS.url).toEqual(['CLAUDIAN_EMBED_URL']);
+    expect(EMBEDDING_ENV_KEYS.model).toEqual(['CLAUDIAN_EMBED_MODEL']);
   });
 });
 

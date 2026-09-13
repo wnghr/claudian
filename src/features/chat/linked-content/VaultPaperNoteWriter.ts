@@ -23,9 +23,9 @@ import { buildSkipDirectoryParts, SKIP_NAME_PREFIXES } from './VaultPaperSearch'
  * Vault-backed write capabilities, the successor of `kb.py append/status/classify`.
  *
  * Target resolution follows the old resolver so existing habits keep working:
- * an exact vault path wins, then the note name (with or without `.md`), then a
- * case-insensitive name substring — but unlike the old resolver, an ambiguous
- * match is *reported* in the result instead of only warned to stderr.
+ * an exact vault path wins, then a unique note name (with or without `.md`),
+ * then a unique case-insensitive name substring. Ambiguous matches stop with
+ * candidates instead of guessing a file.
  *
  * Two safety rails are non-negotiable:
  *
@@ -111,11 +111,21 @@ function resolveTargetFile(app: App, ref: string): { file: TFile; alternates: re
     return fileStem === lowerStem || file.path.toLowerCase() === normalized.toLowerCase();
   });
   if (byStem.length > 0) {
+    if (byStem.length > 1) {
+      throw new Error(
+        `目标笔记不唯一：${ref}\n请使用精确路径。候选：${byStem.map(file => file.path).join(', ')}`,
+      );
+    }
     return { file: byStem[0], alternates: byStem.slice(1) };
   }
 
   const bySubstring = candidates.filter(file => file.name.toLowerCase().includes(lowerStem));
   if (bySubstring.length > 0) {
+    if (bySubstring.length > 1) {
+      throw new Error(
+        `目标笔记不唯一：${ref}\n请使用精确路径。候选：${bySubstring.slice(0, 6).map(file => file.path).join(', ')}`,
+      );
+    }
     return { file: bySubstring[0], alternates: bySubstring.slice(1, 6) };
   }
   return null;
@@ -124,17 +134,17 @@ function resolveTargetFile(app: App, ref: string): { file: TFile; alternates: re
 /**
  * Copies the pre-write text to `<vault-parent>/note-edit-backups/<day>-<slug>/`,
  * skipping the copy when this run already produced one. Returns the backup
- * file's absolute path, or null when the vault root could not be determined —
- * a skipped backup is never silent: the tool's answer says so.
+ * file's absolute path. A backup failure aborts the write so the safety rail
+ * fails closed.
  */
 async function backupNote(
   app: App,
   file: TFile,
   originalText: string,
   now: Date,
-): Promise<string | null> {
+): Promise<string> {
   const root = vaultRootPath(app);
-  if (!root) return null;
+  if (!root) throw new Error('无法确定 vault 路径，已停止写入以避免无备份修改。');
   const directory = join(dirname(root), BACKUP_DIRECTORY_NAME, `${formatDateStamp(now)}-${backupSlug(file.basename)}`);
   const destination = join(directory, file.name);
   try {
@@ -143,8 +153,10 @@ async function backupNote(
     return destination;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') return destination;
-    // A failed backup must not fail the write, but must not be hidden either.
-    return null;
+    throw new Error(
+      `无法创建写入备份，已停止修改：${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -186,7 +198,7 @@ export function createVaultPaperNoteWriter(
       return {
         action: 'appended',
         alternates: resolved.alternates.map(alternate => alternate.path),
-        backupPath: backupPath ?? undefined,
+        backupPath,
         link,
         location: preview.location,
         path,
@@ -219,7 +231,7 @@ export function createVaultPaperNoteWriter(
       return {
         action: 'updated',
         alternates: resolved.alternates.map(alternate => alternate.path),
-        backupPath: backupPath ?? undefined,
+        backupPath,
         changed: preview.changed,
         link,
         path,

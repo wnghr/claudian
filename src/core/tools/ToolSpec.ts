@@ -109,7 +109,30 @@ export function defineTool<Input, Context>(spec: ToolSpec<Input, Context>): Eras
     fields: spec.fields,
     jsonSchema: toJsonSchema(spec.fields),
     instructions: spec.instructions ?? null,
-    invoke: (context, args) => spec.handler(context as Context, spec.parse(args)),
+    invoke: async (context, args) => {
+      const input = spec.parse(args);
+      if (spec.requiresConfirmation) {
+        const confirmation = (context as {
+          confirmToolAction?: (request: {
+            toolName: string;
+            actionLabel: string;
+            description: string;
+            input: Readonly<Record<string, unknown>>;
+          }) => Promise<boolean>;
+        }).confirmToolAction;
+        if (typeof confirmation !== 'function') {
+          throw new Error(`Tool ${spec.namespace}.${spec.name} has no confirmation handler.`);
+        }
+        const approved = await confirmation({
+          toolName: `${spec.namespace}.${spec.name}`,
+          actionLabel: spec.actionLabel,
+          description: spec.describeAction(input),
+          input: input as unknown as Readonly<Record<string, unknown>>,
+        });
+        if (!approved) throw new Error(`User denied ${spec.namespace}.${spec.name}.`);
+      }
+      return spec.handler(context as Context, input);
+    },
     describeAction: args => {
       try {
         return spec.describeAction(spec.parse(args));

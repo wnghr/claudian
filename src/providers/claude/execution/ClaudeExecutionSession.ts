@@ -146,8 +146,11 @@ ClaudeExecutionStrategySink {
       ?? forkSource?.resumeAt;
     this.encoder = new ClaudeExecutionRequestEncoder({
       host,
+      interactionPort: config.interactionPort,
       pluginManager: services.pluginManager,
       getLinkedPdfPath: () => this.linkedPdfPath,
+      sessionInstanceId: this.sessionInstanceId,
+      getTurnId: () => this.getInteractionTurnId(),
     });
     this.interactionHandler = new ClaudeInteractionHandler({
       interactionPort: config.interactionPort,

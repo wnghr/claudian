@@ -4,6 +4,13 @@ import type { PaperNoteWritePort } from '../note/PaperNoteWrite';
 import type { PaperReadPort } from '../paper/PaperRead';
 import type { PaperSearchPort } from '../search/PaperSearch';
 
+export interface PluginToolConfirmationRequest {
+  readonly toolName: string;
+  readonly actionLabel: string;
+  readonly description: string;
+  readonly input: Readonly<Record<string, unknown>>;
+}
+
 /**
  * Runtime services every plugin tool may draw on.
  *
@@ -18,4 +25,8 @@ export interface PluginToolContext {
   readonly writer: PaperNoteWritePort;
   readonly fields: PaperFieldEditPort;
   readonly getLinkedPdfPath: () => string | null;
+  /** Plugin-owned confirmation; host/provider approval is not a safety net. */
+  readonly confirmToolAction: (
+    request: PluginToolConfirmationRequest,
+  ) => Promise<boolean>;
 }

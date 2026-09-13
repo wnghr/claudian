@@ -327,9 +327,8 @@ export default class ClaudianPlugin extends Plugin {
     const config = resolveEmbeddingConfig(process.env, readEmbeddingConfigFile(this.app));
     if (!config) {
       return createDisabledEmbeddingClient(
-        'Semantic search is off: set KB_EMBED_URL / KB_EMBED_KEY / KB_EMBED_MODEL '
-        + '(or PHYSICS_KB_EMBEDDING_URL / _API_KEY / _MODEL), or add .kb/embed.json '
-        + 'beside the vault.',
+        'Semantic search is off: set CLAUDIAN_EMBED_URL / CLAUDIAN_EMBED_KEY / '
+        + 'CLAUDIAN_EMBED_MODEL, or add .claudian/embedding.json in the vault.',
       );
     }
     return createEmbeddingClient({ config });

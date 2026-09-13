@@ -55,9 +55,11 @@ function readYear(record: Readonly<Record<string, unknown>>): number | null {
   }
   const issued = record.issued;
   if (!issued || typeof issued !== 'object' || Array.isArray(issued)) return null;
-  const dateParts = (issued as Record<string, unknown>)['date-parts'];
-  if (!Array.isArray(dateParts) || !Array.isArray(dateParts[0])) return null;
-  const year = dateParts[0][0];
+  const dateParts: unknown = (issued as Record<string, unknown>)['date-parts'];
+  if (!Array.isArray(dateParts)) return null;
+  const firstDatePart: unknown = dateParts[0];
+  if (!Array.isArray(firstDatePart)) return null;
+  const year: unknown = firstDatePart[0];
   return typeof year === 'number' && Number.isFinite(year) ? year : null;
 }
 

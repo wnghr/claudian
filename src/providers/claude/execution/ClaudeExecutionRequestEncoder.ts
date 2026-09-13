@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type {
   HookCallbackMatcher,
   Options,
@@ -8,10 +10,12 @@ import type {
   ProviderExecutionRequest,
   ProviderSessionConfig,
 } from '../../../core/execution';
+import type { ProviderInteractionPort } from '../../../core/execution';
 import { buildSystemPrompt } from '../../../core/prompt/mainAgent';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import type { AppPluginManager } from '../../../core/providers/types';
+import type { PluginToolConfirmationRequest } from '../../../core/tools/PluginToolContext';
 import { PLUGIN_TOOL_INSTRUCTIONS } from '../../../core/tools/pluginToolSpecs';
 import {
   isReadOnlyTool,
@@ -92,6 +96,9 @@ export interface ClaudeExecutionRequestEncoderDeps {
   readonly host: ProviderHost;
   readonly pluginManager: AppPluginManager;
   readonly getLinkedPdfPath: () => string | null;
+  readonly interactionPort: ProviderInteractionPort;
+  readonly sessionInstanceId: string;
+  readonly getTurnId: () => string | null;
 }
 
 export class ClaudeExecutionRequestEncoder {
@@ -184,6 +191,7 @@ export class ClaudeExecutionRequestEncoder {
         ? {}
         : {
             mcpServers: createClaudePluginToolServers({
+              confirmToolAction: request => this.confirmPluginTool(request, abortController.signal),
               fields: this.deps.host,
               getLinkedPdfPath: this.deps.getLinkedPdfPath,
               library: this.deps.host,
@@ -248,6 +256,34 @@ export class ClaudeExecutionRequestEncoder {
       }),
       allowedTools: policy.allowedTools,
     };
+  }
+
+  private async confirmPluginTool(
+    request: PluginToolConfirmationRequest,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const turnId = this.deps.getTurnId();
+    if (!turnId) return false;
+    const interactionId = `claude:${this.deps.sessionInstanceId}:plugin:${randomUUID()}`;
+    try {
+      const response = await this.deps.interactionPort.requestApproval({
+        interactionId,
+        sessionInstanceId: this.deps.sessionInstanceId,
+        turnId,
+        kind: 'approval',
+        toolName: request.toolName,
+        input: request.input,
+        description: `${request.actionLabel}: ${request.description}`,
+        nativeContext: { kind: 'claudian-plugin-tool' },
+      }, signal);
+      return response.interactionId === interactionId
+        && (response.decision === 'allow' || response.decision === 'allow-always');
+    } finally {
+      this.deps.interactionPort.dismissInteraction(
+        interactionId,
+        signal.aborted ? 'cancelled' : 'resolved',
+      );
+    }
   }
 
   private resolveSettings(request: ProviderExecutionRequest): ClaudianSettings {

@@ -18,9 +18,9 @@ export const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 /** Environment variable names, in the same precedence order as the engine. */
 export const EMBEDDING_ENV_KEYS = {
-  url: ['KB_EMBED_URL', 'PHYSICS_KB_EMBEDDING_URL'],
-  apiKey: ['KB_EMBED_KEY', 'PHYSICS_KB_EMBEDDING_API_KEY'],
-  model: ['KB_EMBED_MODEL', 'PHYSICS_KB_EMBEDDING_MODEL'],
+  url: ['CLAUDIAN_EMBED_URL'],
+  apiKey: ['CLAUDIAN_EMBED_KEY'],
+  model: ['CLAUDIAN_EMBED_MODEL'],
 } as const;
 
 export interface EmbeddingConfig {
@@ -63,9 +63,9 @@ export function resolveEmbeddingConfig(
   environment: Environment,
   fileConfig: Readonly<Record<string, unknown>> = {},
 ): EmbeddingConfig | null {
-  const url = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.url, 'KB_EMBED_URL');
-  const apiKey = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.apiKey, 'KB_EMBED_KEY');
-  const model = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.model, 'KB_EMBED_MODEL');
+  const url = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.url, 'CLAUDIAN_EMBED_URL');
+  const apiKey = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.apiKey, 'CLAUDIAN_EMBED_KEY');
+  const model = firstNonEmpty(environment, fileConfig, EMBEDDING_ENV_KEYS.model, 'CLAUDIAN_EMBED_MODEL');
   if (!url || !apiKey || !model) return null;
   return { url, apiKey, model };
 }

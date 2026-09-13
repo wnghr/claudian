@@ -45,8 +45,8 @@ describe('embeddingVectorKey', () => {
 describe('resolveEmbeddingCachePath', () => {
   it('joins the workspace-derived state directory onto the vault base path', () => {
     const path = resolveEmbeddingCachePath(fakeApp('D:/research/research'));
-    expect(path).toMatch(/[\\/]\.kb[\\/]index[\\/]claudian-search-embeddings\.json$/u);
-    expect(path).toMatch(/^D:[\\/]research[\\/]\.kb[\\/]index/u);
+    expect(path).toMatch(/[\\/]\.claudian[\\/]paper-search[\\/]claudian-search-embeddings\.json$/u);
+    expect(path).toMatch(/^D:[\\/]research[\\/]research[\\/]\.claudian[\\/]paper-search/u);
   });
 
   it('returns null when the adapter has no filesystem backing', () => {
@@ -63,13 +63,13 @@ describe('readEmbeddingConfigFile', () => {
   it('parses an object-shaped JSON config', async () => {
     await withTempDir(async dir => {
       const fs = await import('node:fs/promises');
-      await fs.mkdir(join(dir, '.kb'), { recursive: true });
-      await fs.writeFile(join(dir, '.kb/embed.json'),
-        JSON.stringify({ KB_EMBED_KEY: 'k', KB_EMBED_MODEL: 'm' }), 'utf8');
+      await fs.mkdir(join(dir, 'vault', '.claudian'), { recursive: true });
+      await fs.writeFile(join(dir, 'vault', '.claudian/embedding.json'),
+        JSON.stringify({ CLAUDIAN_EMBED_KEY: 'k', CLAUDIAN_EMBED_MODEL: 'm' }), 'utf8');
 
       expect(readEmbeddingConfigFile(fakeApp(join(dir, 'vault')))).toEqual({
-        KB_EMBED_KEY: 'k',
-        KB_EMBED_MODEL: 'm',
+        CLAUDIAN_EMBED_KEY: 'k',
+        CLAUDIAN_EMBED_MODEL: 'm',
       });
     });
   });
@@ -77,8 +77,8 @@ describe('readEmbeddingConfigFile', () => {
   it('returns empty for malformed JSON or non-object content', async () => {
     await withTempDir(async dir => {
       const fs = await import('node:fs/promises');
-      await fs.mkdir(join(dir, '.kb'), { recursive: true });
-      const bad = join(dir, '.kb/embed.json');
+      await fs.mkdir(join(dir, 'vault', '.claudian'), { recursive: true });
+      const bad = join(dir, 'vault', '.claudian/embedding.json');
       await fs.writeFile(bad, 'not json', 'utf8');
       expect(readEmbeddingConfigFile(fakeApp(join(dir, 'vault')))).toEqual({});
       await fs.writeFile(bad, '[]', 'utf8');
@@ -133,6 +133,40 @@ describe('createFileEmbeddingVectorStore', () => {
       // The saved file declares its version so a future migration can detect it.
       const parsed = JSON.parse(await fs.readFile(path, 'utf8')) as { version: number };
       expect(parsed.version).toBe(EMBEDDING_CACHE_VERSION);
+    });
+  });
+
+  it('bounds the persisted cache instead of growing forever', async () => {
+    await withTempDir(async dir => {
+      const fs = await import('node:fs/promises');
+      const path = join(dir, 'cache.json');
+      const vectors = new Map<string, string>();
+      for (let index = 0; index < 5005; index += 1) {
+        vectors.set(`key-${index}`, 'AAAA');
+      }
+      const store = createFileEmbeddingVectorStore(path);
+      await store.save(vectors, 'model');
+      const loaded = await store.load();
+      expect(loaded.size).toBe(5000);
+      expect(loaded.has('key-0')).toBe(false);
+      expect(loaded.has('key-5004')).toBe(true);
+      expect((JSON.parse(await fs.readFile(path, 'utf8')) as { vectors: Record<string, string> }).vectors)
+        .toHaveProperty('key-5004');
+    });
+  });
+
+  it('serializes concurrent saves and leaves no shared temp file', async () => {
+    await withTempDir(async dir => {
+      const fs = await import('node:fs/promises');
+      const path = join(dir, 'cache.json');
+      const store = createFileEmbeddingVectorStore(path);
+      await Promise.all([
+        store.save(new Map([['first', 'AAAA']]), 'model'),
+        store.save(new Map([['second', 'BBBB']]), 'model'),
+      ]);
+      const entries = await fs.readdir(dir);
+      expect(entries).toEqual(['cache.json']);
+      expect((await store.load()).size).toBe(1);
     });
   });
 });

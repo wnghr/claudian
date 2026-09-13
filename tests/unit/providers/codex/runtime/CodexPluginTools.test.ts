@@ -94,6 +94,7 @@ function createFakeContext(): FakeContext {
     appendToNote,
     citePaper,
     context: {
+      confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields } as unknown as PaperFieldEditPort,
       getLinkedPdfPath: () => '论文/PDF/current.pdf',
       library: { citePaper, listPapers } as unknown as PaperLibraryPort,
@@ -263,6 +264,21 @@ describe('createCodexPluginTools', () => {
       status: 'read',
       target: 'current',
     });
+  });
+
+  it('does not invoke a write tool when plugin confirmation is denied', async () => {
+    const fake = createFakeContext();
+    const confirmToolAction = (fake.context as unknown as {
+      confirmToolAction: jest.Mock;
+    }).confirmToolAction;
+    confirmToolAction.mockResolvedValue(false);
+    const registration = findRegistration(createCodexPluginTools(fake.context), 'write_note');
+
+    await expect(registration.handler(callParams('write_note', {
+      content: '这段内容不应写入',
+      target: 'current',
+    }))).resolves.toEqual(expect.objectContaining({ success: false }));
+    expect(fake.appendToNote).not.toHaveBeenCalled();
   });
 
   it('reaches every port it declares through the shared context', async () => {

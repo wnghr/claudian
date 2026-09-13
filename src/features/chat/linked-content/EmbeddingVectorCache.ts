@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs,readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -13,17 +13,18 @@ import type { App, DataAdapter } from 'obsidian';
  * and the exact chunk text, which makes the cache self-invalidating: edited
  * text simply misses, and vectors from a different model can never collide.
  *
- * Everything here lives beside the vault, under the same derived-data directory
- * the rest of the toolchain uses, so the Markdown layer stays free of build
- * output.
+ * Everything here lives inside Claudian's own vault data directory, so the
+ * Markdown layer stays free of build output and the old external cache path is
+ * no longer part of the runtime.
  */
 
 export const EMBEDDING_CACHE_VERSION = 1;
 export const EMBEDDING_CACHE_FILENAME = 'claudian-search-embeddings.json';
-export const EMBEDDING_CONFIG_FILENAME = 'embed.json';
-export const DERIVED_STATE_DIRECTORY = ['.kb', 'index'] as const;
-/** The credentials file is shared with the rest of the toolchain, one level up. */
-export const SHARED_CONFIG_DIRECTORY = ['.kb'] as const;
+export const EMBEDDING_CONFIG_FILENAME = 'embedding.json';
+export const DERIVED_STATE_DIRECTORY = ['.claudian', 'paper-search'] as const;
+/** The credentials file is scoped to Claudian's own vault data directory. */
+export const SHARED_CONFIG_DIRECTORY = ['.claudian'] as const;
+export const MAX_EMBEDDING_CACHE_VECTORS = 5000;
 
 /** SHA-1 of `model\0text`, matching the retired engine's cache key. */
 export function embeddingVectorKey(model: string, text: string): string {
@@ -39,12 +40,12 @@ export interface EmbeddingVectorStore {
   save(vectors: ReadonlyMap<string, string>, model: string): Promise<void>;
 }
 
-function resolveBesideVault(app: App, segments: readonly string[]): string | null {
+function resolveVaultPath(app: App, segments: readonly string[]): string | null {
   const adapter = app.vault.adapter as Partial<DesktopDataAdapter>;
   if (typeof adapter.getBasePath !== 'function') return null;
   const basePath = adapter.getBasePath().trim();
   if (!basePath) return null;
-  return path.resolve(basePath, '..', ...segments);
+  return path.resolve(basePath, ...segments);
 }
 
 /**
@@ -52,7 +53,7 @@ function resolveBesideVault(app: App, segments: readonly string[]): string | nul
  * backing (in which case search still works, just without persistence).
  */
 export function resolveEmbeddingCachePath(app: App): string | null {
-  return resolveBesideVault(app, [...DERIVED_STATE_DIRECTORY, EMBEDDING_CACHE_FILENAME]);
+  return resolveVaultPath(app, [...DERIVED_STATE_DIRECTORY, EMBEDDING_CACHE_FILENAME]);
 }
 
 /**
@@ -61,7 +62,7 @@ export function resolveEmbeddingCachePath(app: App): string | null {
  * already carry everything needed.
  */
 export function readEmbeddingConfigFile(app: App): Readonly<Record<string, unknown>> {
-  const configPath = resolveBesideVault(app, [...SHARED_CONFIG_DIRECTORY, EMBEDDING_CONFIG_FILENAME]);
+  const configPath = resolveVaultPath(app, [...SHARED_CONFIG_DIRECTORY, EMBEDDING_CONFIG_FILENAME]);
   if (!configPath) return {};
   try {
     const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -79,6 +80,11 @@ interface CacheFileShape {
 }
 
 export function createFileEmbeddingVectorStore(cachePath: string): EmbeddingVectorStore {
+  let writeTail = Promise.resolve();
+  const trimEntries = (entries: readonly [string, string][]): Map<string, string> => (
+    new Map(entries.slice(-MAX_EMBEDDING_CACHE_VECTORS))
+  );
+
   return {
     async load(): Promise<Map<string, string>> {
       try {
@@ -87,7 +93,7 @@ export function createFileEmbeddingVectorStore(cachePath: string): EmbeddingVect
         const vectors = parsed.vectors ?? {};
         const entries = Object.entries(vectors)
           .filter((entry): entry is [string, string] => typeof entry[1] === 'string');
-        return new Map(entries);
+        return trimEntries(entries);
       } catch {
         // A missing or unreadable cache is not an error: it just misses.
         return new Map();
@@ -95,17 +101,22 @@ export function createFileEmbeddingVectorStore(cachePath: string): EmbeddingVect
     },
 
     async save(vectors: ReadonlyMap<string, string>, model: string): Promise<void> {
-      await fs.mkdir(path.dirname(cachePath), { recursive: true });
-      const body = JSON.stringify({
-        version: EMBEDDING_CACHE_VERSION,
-        model,
-        vectors: Object.fromEntries(vectors),
+      const operation = writeTail.then(async () => {
+        await fs.mkdir(path.dirname(cachePath), { recursive: true });
+        const bounded = trimEntries([...vectors.entries()]);
+        const body = JSON.stringify({
+          version: EMBEDDING_CACHE_VERSION,
+          model,
+          vectors: Object.fromEntries(bounded),
+        });
+        // Serialize saves and use a unique temporary path so concurrent tabs
+        // cannot rename each other's file.
+        const temporary = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
+        await fs.writeFile(temporary, body, 'utf8');
+        await fs.rename(temporary, cachePath);
       });
-      // Write through a temporary file so an interrupted save cannot leave a
-      // truncated cache behind: a corrupt cache would look like a cache miss.
-      const temporary = `${cachePath}.${process.pid}.tmp`;
-      await fs.writeFile(temporary, body, 'utf8');
-      await fs.rename(temporary, cachePath);
+      writeTail = operation.catch(() => undefined);
+      await operation;
     },
   };
 }

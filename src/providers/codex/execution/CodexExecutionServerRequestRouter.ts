@@ -4,6 +4,7 @@ import type {
   ProviderInteractionPort,
   ProviderToolPolicy,
 } from '../../../core/execution';
+import type { PluginToolConfirmationRequest } from '../../../core/tools/PluginToolContext';
 import type { ApprovalDecision } from '../../../core/types';
 import { normalizeCodexToolName } from '../normalization/codexToolNormalization';
 import type {
@@ -57,6 +58,36 @@ export class CodexExecutionServerRequestRouter {
 
   setDynamicToolRegistry(registry: CodexDynamicToolRegistry | null): void {
     this.dynamicToolRegistry = registry;
+  }
+
+  async confirmPluginTool(request: PluginToolConfirmationRequest): Promise<boolean> {
+    const turn = this.activeTurn;
+    if (!turn) return false;
+
+    const pending = this.createPending(
+      `plugin:${this.sessionInstanceId}:${++this.interactionCounter}`,
+      turn.nativeThreadId,
+    );
+    try {
+      const response = await this.interactionPort.requestApproval({
+        interactionId: pending.interactionId,
+        sessionInstanceId: this.sessionInstanceId,
+        turnId: turn.localTurnId,
+        kind: 'approval',
+        toolName: request.toolName,
+        input: request.input,
+        description: `${request.actionLabel}: ${request.description}`,
+        nativeContext: {
+          kind: 'claudian-plugin-tool',
+          threadId: turn.nativeThreadId,
+          nativeTurnId: turn.nativeTurnId,
+        },
+      }, pending.controller.signal);
+      return response.interactionId === pending.interactionId
+        && (response.decision === 'allow' || response.decision === 'allow-always');
+    } finally {
+      this.removePending(pending);
+    }
   }
 
   async handleServerRequest(
