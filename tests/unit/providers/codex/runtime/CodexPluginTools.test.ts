@@ -1,4 +1,3 @@
-import type { PaperCitation, PaperLibraryPort } from '@/core/library/PaperLibrary';
 import type {
   PaperFieldEditPort,
   PaperFieldEditResult,
@@ -13,19 +12,6 @@ import type { PluginToolContext } from '@/core/tools/PluginToolContext';
 import { PLUGIN_TOOL_SPECS } from '@/core/tools/pluginToolSpecs';
 import type { CodexDynamicToolRegistration } from '@/providers/codex/runtime/CodexDynamicToolRegistry';
 import { createCodexPluginTools } from '@/providers/codex/runtime/CodexPluginTools';
-
-const CITATION: PaperCitation = {
-  authors: [{ family: 'Asilehan', given: 'Zhawure' }],
-  citekey: 'asilehanlightdriven2025',
-  doi: '10.1038/s41467-025-56263-5',
-  issue: '1',
-  pages: '1148',
-  title: 'Light-driven dancing of nematic colloids',
-  url: 'https://www.nature.com/articles/s41467-025-56263-5',
-  venue: 'Nature Communications',
-  volume: '16',
-  year: 2025,
-};
 
 const SEARCH_RESULT: PaperSearchResult = {
   degraded: null,
@@ -45,9 +31,7 @@ const SEARCH_RESULT: PaperSearchResult = {
 
 interface FakeContext {
   readonly appendToNote: jest.Mock;
-  readonly citePaper: jest.Mock;
   readonly context: PluginToolContext;
-  readonly listPapers: jest.Mock;
   readonly readPaper: jest.Mock;
   readonly searchPapers: jest.Mock;
   readonly setPaperFields: jest.Mock;
@@ -57,24 +41,12 @@ function createFakeContext(): FakeContext {
   const readPaper = jest.fn().mockResolvedValue({
     cachePath: '论文/MD/current/current.paged.md',
     content: '<!-- p.2 -->\nFocused body',
+    fidelity: 'mineru-md',
     selection: 'p.2',
     sourcePath: '论文/PDF/current.pdf',
     truncated: false,
+    warnings: [],
   });
-  const listPapers = jest.fn().mockResolvedValue([{
-    cache: 'ready',
-    cardPath: '论文/卡片/Current.md',
-    citekey: 'current',
-    domain: '液晶与软物质',
-    pages: 13,
-    parsedAt: '2026-09-12T22:30:52+08:00',
-    pdfPath: '论文/PDF/current.pdf',
-    status: 'unread',
-    subfield: '液晶斯格明子',
-    title: 'Current paper',
-    year: 2025,
-  }]);
-  const citePaper = jest.fn().mockResolvedValue(CITATION);
   const searchPapers = jest.fn().mockResolvedValue(SEARCH_RESULT);
   const appendToNote = jest.fn().mockResolvedValue({
     action: 'appended',
@@ -92,17 +64,14 @@ function createFakeContext(): FakeContext {
 
   return {
     appendToNote,
-    citePaper,
     context: {
       confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields } as unknown as PaperFieldEditPort,
-      getLinkedPdfPath: () => '论文/PDF/current.pdf',
-      library: { citePaper, listPapers } as unknown as PaperLibraryPort,
+      getLinkedPaperPath: () => '论文/PDF/current.pdf',
       reader: { readPaper } as unknown as PaperReadPort,
       search: { searchPapers } as unknown as PaperSearchPort,
       writer: { appendToNote } as unknown as PaperNoteWritePort,
     },
-    listPapers,
     readPaper,
     searchPapers,
     setPaperFields,
@@ -181,35 +150,8 @@ describe('createCodexPluginTools', () => {
     expect(fake.readPaper).toHaveBeenCalledWith({
       pages: '2',
       sourcePath: '论文/PDF/current.pdf',
+      preferActiveReader: true,
     });
-  });
-
-  it('lists the paper library through the browse tool', async () => {
-    const fake = createFakeContext();
-    const registration = findRegistration(createCodexPluginTools(fake.context), 'browse');
-
-    await expect(registration.handler(callParams('browse', { query: 'skyrmion' })))
-      .resolves.toEqual(expect.objectContaining({
-        success: true,
-        contentItems: [expect.objectContaining({
-          text: expect.stringContaining('current | 2025 | 液晶与软物质 / 液晶斯格明子'),
-        })],
-      }));
-    expect(fake.listPapers).toHaveBeenCalledWith({ query: 'skyrmion' });
-  });
-
-  it('formats a reference through the cite tool', async () => {
-    const fake = createFakeContext();
-    const registration = findRegistration(createCodexPluginTools(fake.context), 'cite');
-
-    await expect(registration.handler(callParams('cite', { citekey: 'asilehanlightdriven2025' })))
-      .resolves.toEqual(expect.objectContaining({
-        success: true,
-        contentItems: [expect.objectContaining({
-          text: expect.stringContaining('Nature Communications, 16(1), 1148'),
-        })],
-      }));
-    expect(fake.citePaper).toHaveBeenCalledWith('asilehanlightdriven2025');
   });
 
   it('returns citable passages through the search tool', async () => {
@@ -313,17 +255,4 @@ describe('createCodexPluginTools', () => {
       }));
   });
 
-  it('rejects an invalid argument instead of calling the port', async () => {
-    const fake = createFakeContext();
-    const registration = findRegistration(createCodexPluginTools(fake.context), 'cite');
-
-    await expect(registration.handler(callParams('cite', {})))
-      .resolves.toEqual(expect.objectContaining({
-        success: false,
-        contentItems: [expect.objectContaining({
-          text: expect.stringContaining('citekey is required'),
-        })],
-      }));
-    expect(fake.citePaper).not.toHaveBeenCalled();
-  });
 });

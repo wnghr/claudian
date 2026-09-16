@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import { type App,TFile } from 'obsidian';
+import { type App, TFile } from 'obsidian';
 
 import {
   editFrontmatterFields,
@@ -12,12 +12,15 @@ import {
 } from '../../../core/note/PaperFieldEdit';
 import {
   appendToNoteText,
+  appendToPersistRegionText,
+  DEFAULT_APPEND_SECTION,
   type PaperNoteWritePort,
   type PaperNoteWriteRequest,
   type PaperNoteWriteResult,
 } from '../../../core/note/PaperNoteWrite';
-import { DEFAULT_APPEND_SECTION } from '../../../core/note/PaperNoteWrite';
-import { buildSkipDirectoryParts, SKIP_NAME_PREFIXES } from './VaultPaperSearch';
+import { buildSkipDirectoryParts, SKIP_NAME_PREFIXES } from './VaultPathPolicy';
+import { parseZoteroAttachmentReference } from './ZoteroAttachmentReference';
+import { parseAttachmentLinks } from './ZotFlowLocator';
 
 /**
  * Vault-backed write capabilities, the successor of `kb.py append/status/classify`.
@@ -64,6 +67,30 @@ export interface VaultPaperNoteWriterOptions {
   readonly app: App;
   /** Injectable for tests; defaults to the wall clock. */
   readonly now?: () => Date;
+}
+
+/** Resolve a linked ZotFlow attachment reference to its generated source note. */
+export async function resolvePaperNoteTarget(app: App, reference: string): Promise<string | null> {
+  const normalized = normalizeRef(reference);
+  const direct = app.vault.getAbstractFileByPath(normalized.endsWith('.md') ? normalized : `${normalized}.md`);
+  if (direct instanceof TFile) return direct.path;
+
+  const attachmentKey = parseZoteroAttachmentReference(normalized);
+  if (!attachmentKey) return null;
+  const files = (app.vault.getMarkdownFiles?.() ?? app.vault.getFiles())
+    .filter(file => isMarkdownFile(file))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const matches: string[] = [];
+  for (const file of files) {
+    const text = await app.vault.read(file);
+    if (parseAttachmentLinks(text).some(link => link.key === attachmentKey)) {
+      matches.push(file.path);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error(`ZotFlow 论文笔记不唯一：${attachmentKey}\n请在关联上下文中选择具体笔记。`);
+  }
+  return matches[0] ?? null;
 }
 
 function normalizeRef(ref: string): string {
@@ -178,22 +205,36 @@ export function createVaultPaperNoteWriter(
 
       const original = await app.vault.read(file);
       const stampDate = now();
-      const preview = appendToNoteText(original, request.content, {
-        section: request.section ?? DEFAULT_APPEND_SECTION,
-        now: stampDate,
-        allowDuplicate: request.allowDuplicate,
-      });
+      const preview = request.persistRegionId
+        ? appendToPersistRegionText(original, request.content, {
+          regionId: request.persistRegionId,
+          now: stampDate,
+          allowDuplicate: request.allowDuplicate,
+        })
+        : appendToNoteText(original, request.content, {
+          section: request.section ?? DEFAULT_APPEND_SECTION,
+          now: stampDate,
+          allowDuplicate: request.allowDuplicate,
+        });
 
       if (preview.action === 'duplicate_skipped') {
         return { action: 'duplicate_skipped', link, location: preview.location, path };
       }
 
       const backupPath = await backupNote(app, file, original, stampDate);
-      await app.vault.process(file, latest => appendToNoteText(latest, request.content, {
-        section: request.section ?? DEFAULT_APPEND_SECTION,
-        now: stampDate,
-        allowDuplicate: request.allowDuplicate,
-      }).text);
+      await app.vault.process(file, latest => (
+        request.persistRegionId
+          ? appendToPersistRegionText(latest, request.content, {
+            regionId: request.persistRegionId,
+            now: stampDate,
+            allowDuplicate: request.allowDuplicate,
+          }).text
+          : appendToNoteText(latest, request.content, {
+            section: request.section ?? DEFAULT_APPEND_SECTION,
+            now: stampDate,
+            allowDuplicate: request.allowDuplicate,
+          }).text
+      ));
 
       return {
         action: 'appended',

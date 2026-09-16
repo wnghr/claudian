@@ -76,7 +76,7 @@ test('the plugin tool catalog keeps exactly one owner per capability', () => {
 test('provider adapters derive every tool definition from the shared specification', () => {
   // The model-facing contract is written once, in the owning specification module.
   assert.deepEqual(
-    findSourceFilesMatching(/Read a focused excerpt from the currently linked vault PDF/u),
+    findSourceFilesMatching(/Read a focused excerpt from the paper the user is working on/u),
     ['src/core/paper/PaperReadTool.ts'],
   );
 
@@ -196,4 +196,3 @@ test('the .claude/skills mirror stays identical to .agents/skills', (t) => {
   };
   assert.deepEqual(digest(mirror), digest(canonical));
 });
-

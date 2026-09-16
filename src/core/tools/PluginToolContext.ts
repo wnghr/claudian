@@ -1,4 +1,3 @@
-import type { PaperLibraryPort } from '../library/PaperLibrary';
 import type { PaperFieldEditPort } from '../note/PaperFieldEdit';
 import type { PaperNoteWritePort } from '../note/PaperNoteWrite';
 import type { PaperReadPort } from '../paper/PaperRead';
@@ -20,11 +19,10 @@ export interface PluginToolConfirmationRequest {
  */
 export interface PluginToolContext {
   readonly reader: PaperReadPort;
-  readonly library: PaperLibraryPort;
   readonly search: PaperSearchPort;
   readonly writer: PaperNoteWritePort;
   readonly fields: PaperFieldEditPort;
-  readonly getLinkedPdfPath: () => string | null;
+  readonly getLinkedPaperPath: () => string | null;
   /** Plugin-owned confirmation; host/provider approval is not a safety net. */
   readonly confirmToolAction: (
     request: PluginToolConfirmationRequest,

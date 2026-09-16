@@ -216,9 +216,11 @@ function createPlugin(): ProviderHost {
     readPaper: jest.fn().mockResolvedValue({
       cachePath: '论文/MD/current/current.paged.md',
       content: '<!-- p.2 -->\nFocused body',
+      fidelity: 'mineru-md',
       selection: 'p.2',
       sourcePath: '论文/PDF/current.pdf',
       truncated: false,
+      warnings: [],
     }),
   } as unknown as ProviderHost;
 }

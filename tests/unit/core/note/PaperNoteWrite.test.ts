@@ -1,5 +1,6 @@
 import {
   appendToNoteText,
+  appendToPersistRegionText,
   DEFAULT_APPEND_SECTION,
   findSection,
   isDuplicateText,
@@ -123,5 +124,44 @@ describe('appendToNoteText', () => {
       section: DEFAULT_APPEND_SECTION,
       now: STAMPED_AT,
     })).toThrow();
+  });
+});
+
+describe('appendToPersistRegionText', () => {
+  it('appends inside a ZotFlow persist region and leaves managed text untouched', () => {
+    const note = [
+      '---',
+      'zotflow-locked: true',
+      '---',
+      '',
+      '## Annotations',
+      '',
+      'managed annotation',
+      '',
+      '<!-- ZF_PERSIST_BEG_claudian-discussion -->',
+      '人类写下的讨论。',
+      '<!-- ZF_PERSIST_END_claudian-discussion -->',
+      '',
+    ].join('\n');
+
+    const outcome = appendToPersistRegionText(note, '这次回答补充了一个机制。', {
+      regionId: 'claudian-discussion',
+      now: STAMPED_AT,
+    });
+
+    expect(outcome.action).toBe('appended');
+    expect(outcome.text).toContain('managed annotation');
+    expect(outcome.text).toContain(`${STAMP}\n这次回答补充了一个机制。`);
+    expect(outcome.text.indexOf('这次回答补充')).toBeLessThan(
+      outcome.text.indexOf('<!-- ZF_PERSIST_END_claudian-discussion -->'),
+    );
+    expect(outcome.location).toContain('claudian-discussion');
+  });
+
+  it('fails closed when the template has no matching persist region', () => {
+    expect(() => appendToPersistRegionText('# Paper\n', '内容', {
+      regionId: 'claudian-discussion',
+      now: STAMPED_AT,
+    })).toThrow('找不到 ZotFlow 持久化区域');
   });
 });

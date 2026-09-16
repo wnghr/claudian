@@ -1,5 +1,6 @@
 /**
- * Search-level capabilities: hybrid retrieval over the vault's paper library.
+ * Search-level capabilities: hybrid retrieval over Obsidian notes and the
+ * external Zotero MinerU paper cache.
  *
  * This is the port the search tool talks to. The implementation decides where
  * the corpus comes from; the tool only shapes the request and the answer.
@@ -19,7 +20,7 @@ export interface PaperSearchRequest {
   readonly query: string;
   readonly mode?: PaperSearchMode;
   readonly limit?: number;
-  /** Vault-relative path prefix, file name, or path segment to search within. */
+  /** Obsidian path or path segment, or a Zotero attachment key. */
   readonly scope?: string;
   readonly kind?: PaperSearchKind;
 }

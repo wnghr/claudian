@@ -23,6 +23,17 @@ import {
 } from '../../../core/search/ranking';
 import { tokenize } from '../../../core/search/tokenize';
 import { embeddingVectorKey, type EmbeddingVectorStore } from './EmbeddingVectorCache';
+import {
+  buildSkipDirectoryParts,
+  SKIP_NAME_PREFIXES,
+} from './VaultPathPolicy';
+
+export { buildSkipDirectoryParts, SKIP_NAME_PREFIXES } from './VaultPathPolicy';
+
+export interface ExternalPaperSearchDocument {
+  readonly path: string;
+  readonly content: string;
+}
 
 /**
  * Hybrid search over the vault's readable text.
@@ -38,33 +49,10 @@ import { embeddingVectorKey, type EmbeddingVectorStore } from './EmbeddingVector
  *    `<name>.md` is skipped. Otherwise the same paper is indexed twice with
  *    different locator formats and a hit cannot be cited reliably.
  *
- * The index is rebuilt per search: the corpus is Markdown files read through
- * Obsidian's cache, which is fast, and an always-fresh index removes any need
- * to detect staleness. Only embedding vectors are persisted.
+ * The corpus stays fresh per search, while unchanged files reuse their parsed
+ * chunks in memory. Only embedding vectors are persisted; text remains owned
+ * by the vault or the external Zotero cache.
  */
-
-/**
- * Path-segment filter that ignores the user-configurable configuration folder
- * plus the rest of the build-output directories. The config folder name is
- * resolved at runtime through Obsidian's `Vault#configDir` so the filter
- * follows the user if they renamed it.
- */
-export function buildSkipDirectoryParts(app: App): ReadonlySet<string> {
-  const parts = new Set<string>([
-    '.git', '.trash', '.claudian', '.agents', '.claude',
-    '.workbuddy', 'node_modules', '__pycache__', 'Templates', 'Images',
-  ]);
-  const configDirectory = (app.vault as { configDir?: unknown }).configDir;
-  if (typeof configDirectory === 'string' && configDirectory.length > 0) {
-    // The config directory is reported as a path; the filter only needs its
-    // final segment so a nested layout does not over-match.
-    const name = configDirectory.split('/').filter(Boolean).pop();
-    if (name) parts.add(name);
-  }
-  return parts;
-}
-
-export const SKIP_NAME_PREFIXES: readonly string[] = ['~$', '.'];
 
 /** Dashboard-style entry notes; searchable with an explicit scope instead. */
 const ENTRY_DIRECTORY_PARTS: readonly string[] = ['00-入口'];
@@ -77,11 +65,17 @@ interface CorpusChunk {
   readonly body: string;
 }
 
+interface CachedChunks {
+  readonly fingerprint: string;
+  readonly chunks: readonly CorpusChunk[];
+}
+
 export interface VaultPaperSearchOptions {
   readonly app: App;
   readonly embedding: EmbeddingClient;
   /** Omitted when the vault has no filesystem backing; search still works. */
   readonly vectorStore?: EmbeddingVectorStore | null;
+  readonly externalDocuments?: () => Promise<readonly ExternalPaperSearchDocument[]>;
 }
 
 function normalizePath(path: string): string {
@@ -122,10 +116,38 @@ function selectIndexableFiles(app: App, scope?: string): readonly TFile[] {
   );
 }
 
-async function buildCorpus(app: App, files: readonly TFile[]): Promise<readonly CorpusChunk[]> {
+function chunkText(text: string, path: string): readonly CorpusChunk[] {
+  return chunkMarkdown(text, path).map(chunk => ({
+    path,
+    kind: chunk.kind,
+    heading: chunk.heading,
+    locator: chunk.locator,
+    body: chunk.body,
+  }));
+}
+
+function fileFingerprint(file: TFile): string | null {
+  const stat = (file as TFile & { stat?: { mtime?: unknown; size?: unknown } }).stat;
+  if (!stat || typeof stat.mtime !== 'number' || typeof stat.size !== 'number') return null;
+  return `${stat.mtime}:${stat.size}`;
+}
+
+async function buildCorpus(
+  app: App,
+  files: readonly TFile[],
+  externalDocuments: readonly ExternalPaperSearchDocument[] = [],
+  fileCache: Map<string, CachedChunks> = new Map(),
+  externalCache: Map<string, CachedChunks> = new Map(),
+): Promise<readonly CorpusChunk[]> {
   const corpus: CorpusChunk[] = [];
   for (const file of files) {
     const path = normalizePath(file.path);
+    const fingerprint = fileFingerprint(file);
+    const cached = fingerprint === null ? undefined : fileCache.get(path);
+    if (cached?.fingerprint === fingerprint) {
+      corpus.push(...cached.chunks);
+      continue;
+    }
     let text: string;
     try {
       text = await app.vault.cachedRead(file);
@@ -133,15 +155,23 @@ async function buildCorpus(app: App, files: readonly TFile[]): Promise<readonly 
       // An unreadable file must not abort the whole search.
       continue;
     }
-    for (const chunk of chunkMarkdown(text, path)) {
-      corpus.push({
-        path,
-        kind: chunk.kind,
-        heading: chunk.heading,
-        locator: chunk.locator,
-        body: chunk.body,
-      });
+    const chunks = chunkText(text, path);
+    if (fingerprint !== null) {
+      fileCache.set(path, { fingerprint, chunks });
     }
+    corpus.push(...chunks);
+  }
+  for (const document of externalDocuments) {
+    const path = normalizePath(document.path);
+    const fingerprint = document.content;
+    const cached = externalCache.get(path);
+    if (cached?.fingerprint === fingerprint) {
+      corpus.push(...cached.chunks);
+      continue;
+    }
+    const chunks = chunkText(document.content, path);
+    externalCache.set(path, { fingerprint, chunks });
+    corpus.push(...chunks);
   }
   return corpus;
 }
@@ -223,8 +253,29 @@ async function computeSemanticRanking(
 }
 
 export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperSearchPort {
-  const { app, embedding, vectorStore } = options;
+  const { app, embedding, vectorStore, externalDocuments } = options;
   let cachePromise: Promise<Map<string, string>> | null = null;
+  const fileChunkCache = new Map<string, CachedChunks>();
+  const externalChunkCache = new Map<string, CachedChunks>();
+  const lexicalIndexCache = new Map<string, ReturnType<typeof buildLexicalIndex>>();
+  const chunkIds = new WeakMap<object, number>();
+  let nextChunkId = 1;
+
+  const lexicalIndexFor = (corpus: readonly CorpusChunk[]): ReturnType<typeof buildLexicalIndex> => {
+    const key = corpus.map(chunk => {
+      let id = chunkIds.get(chunk);
+      if (id === undefined) {
+        id = nextChunkId++;
+        chunkIds.set(chunk, id);
+      }
+      return id;
+    }).join(',');
+    const cached = lexicalIndexCache.get(key);
+    if (cached !== undefined) return cached;
+    const index = buildLexicalIndex(corpus);
+    lexicalIndexCache.set(key, index);
+    return index;
+  };
 
   const loadCache = async (): Promise<Map<string, string>> => {
     if (!vectorStore) return new Map();
@@ -239,7 +290,21 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
       const limit = request.limit ?? PAPER_SEARCH_DEFAULT_LIMIT;
 
       const files = selectIndexableFiles(app, request.scope);
-      const corpus = (await buildCorpus(app, files)).filter(chunk => (
+      let external: readonly ExternalPaperSearchDocument[] = [];
+      let externalFailure: string | null = null;
+      if (externalDocuments) {
+        try {
+          external = await externalDocuments();
+        } catch (error) {
+          externalFailure = `External paper cache unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      const scopedExternal = external.filter(document => (
+        !request.scope || isInScope(normalizePath(document.path), request.scope)
+      ));
+      const corpus = (await buildCorpus(
+        app, files, scopedExternal, fileChunkCache, externalChunkCache,
+      )).filter(chunk => (
         (!request.kind || chunk.kind === request.kind)
         && !(chunk.kind === 'md'
           && ENTRY_DIRECTORY_PARTS.some(part => chunk.path.includes(part)))
@@ -248,9 +313,9 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
 
       if (corpus.length === 0) {
         return {
-          degraded: null,
+          degraded: externalFailure,
           hits: [],
-          index: { chunks: 0, embedded: 0, files: files.length },
+          index: { chunks: 0, embedded: 0, files: files.length + scopedExternal.length },
           mode,
           query: request.query,
         };
@@ -258,10 +323,10 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
 
       const lexical: readonly ScoredChunk[] = mode === 'semantic'
         ? []
-        : rankByBm25(buildLexicalIndex(corpus), queryTokens);
+        : rankByBm25(lexicalIndexFor(corpus), queryTokens);
 
       let semantic: readonly ScoredChunk[] = [];
-      let degraded: string | null = null;
+      let degraded: string | null = externalFailure;
       let embedded = 0;
 
       if (mode !== 'keyword') {
@@ -274,7 +339,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
           );
           semantic = result.ranking;
           embedded = result.embedded;
-          degraded = result.failure;
+          degraded = [degraded, result.failure].filter(Boolean).join(' ') || null;
         }
         if (mode === 'semantic' && semantic.length === 0) {
           throw new Error(degraded ?? 'Semantic search produced no usable vectors.');
@@ -313,7 +378,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
       return {
         degraded,
         hits,
-        index: { chunks: corpus.length, embedded, files: files.length },
+        index: { chunks: corpus.length, embedded, files: files.length + scopedExternal.length },
         mode,
         query: request.query,
       };

@@ -9,4 +9,4 @@
 export const PLUGIN_TOOL_NAMESPACE = 'claudian';
 
 export const PLUGIN_TOOL_NAMESPACE_DESCRIPTION =
-  'Claudian paper tools: enumerate the vault paper library, cite a paper from the bibliography index, and read the PDF linked to this conversation through its validated Markdown cache.';
+  'Claudian paper tools: read the PDF linked to this conversation, search the Obsidian knowledge base, and save discussion back to the paper note.';

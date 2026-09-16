@@ -18,7 +18,7 @@ describe('plugin tool catalog', () => {
       properties: {
         path: {
           type: 'string',
-          description: expect.stringContaining('Defaults to the PDF linked'),
+          description: expect.stringContaining('Defaults to the attachment open in the ZotFlow reader'),
         },
         pages: { type: 'string', description: expect.stringContaining('page number or range') },
         section: { type: 'string', description: expect.stringContaining('section heading') },
@@ -28,6 +28,10 @@ describe('plugin tool catalog', () => {
           minimum: 1000,
           maximum: 50000,
           description: expect.stringContaining('Defaults to 12000'),
+        },
+        includeImages: {
+          type: 'boolean',
+          description: expect.stringContaining('figure inspection'),
         },
       },
       additionalProperties: false,
@@ -98,12 +102,11 @@ describe('plugin tool catalog', () => {
     expect(inspectToolSpecs(PLUGIN_TOOL_SPECS)).toEqual([]);
     // An explicit list keeps a capability from being added or dropped silently.
     expect(PLUGIN_TOOL_SPECS.map(tool => tool.qualifiedName)).toEqual([
-      'claudian.browse',
-      'claudian.cite',
       'claudian.read_pdf',
       'claudian.search',
       'claudian.set_paper_fields',
       'claudian.write_note',
+      'claudian.write_todo',
     ]);
     for (const retiredName of RETIRED_PLUGIN_TOOL_NAMES) {
       expect(findPluginToolByActionName(retiredName)).toBeNull();
@@ -126,6 +129,17 @@ describe('plugin tool catalog', () => {
     expect(tool?.requiresConfirmation).toBe(true);
     expect(tool?.capability).toBe('paper.write');
     expect(tool?.instructions).toContain('write_note');
+  });
+
+  it('declares write_todo as a fixed-target write capability', () => {
+    const tool = findPluginToolByActionName('write_todo');
+
+    expect(tool?.executionClass).toBe('write');
+    expect(tool?.requiresConfirmation).toBe(true);
+    expect(tool?.capability).toBe('todo.write');
+    expect(tool?.instructions).toContain('write_todo');
+    expect(tool?.instructions).toContain('only after the user explicitly asks');
+    expect(Object.keys(tool?.jsonSchema.properties ?? {})).toEqual(['content', 'due']);
   });
 
   it('declares set_paper_fields as a whitelisted write capability that requires confirmation', () => {

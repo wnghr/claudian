@@ -53,4 +53,5 @@ describe('LinkedContentPickerSource', () => {
     expect(items).toContainEqual(expect.objectContaining({ path: 'Notes/Draft.md' }));
     expect(items).not.toContainEqual(expect.objectContaining({ path: '../outside.md' }));
   });
+
 });

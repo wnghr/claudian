@@ -1,4 +1,3 @@
-import type { PaperLibraryPort } from '@/core/library/PaperLibrary';
 import type { PaperFieldEditPort } from '@/core/note/PaperFieldEdit';
 import type { PaperNoteWritePort } from '@/core/note/PaperNoteWrite';
 import type { PaperReadPort } from '@/core/paper/PaperRead';
@@ -20,19 +19,16 @@ function exposedTools(server: unknown): ExposedTool[] {
   return (server as { __options: { tools: ExposedTool[] } }).__options.tools;
 }
 
-function createContext(): { context: PluginToolContext; listPapers: jest.Mock } {
-  const listPapers = jest.fn().mockResolvedValue([]);
+function createContext(): { context: PluginToolContext } {
   return {
     context: {
       confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields: jest.fn() } as unknown as PaperFieldEditPort,
-      getLinkedPdfPath: () => null,
-      library: { citePaper: jest.fn(), listPapers } as unknown as PaperLibraryPort,
+      getLinkedPaperPath: () => null,
       reader: { readPaper: jest.fn() } as unknown as PaperReadPort,
       search: { searchPapers: jest.fn() } as unknown as PaperSearchPort,
       writer: { appendToNote: jest.fn() } as unknown as PaperNoteWritePort,
     },
-    listPapers,
   };
 }
 
@@ -50,42 +46,6 @@ describe('createClaudePluginToolServers', () => {
       // The derived zod shape is what the SDK turns into the tool's JSON schema.
       expect(Object.keys(tool.inputSchema)).toEqual(spec?.fields.map(field => field.name));
     }
-  });
-
-  it('runs a tool through the shared context', async () => {
-    const fake = createContext();
-    fake.listPapers.mockResolvedValue([{
-      cache: 'missing',
-      cardPath: null,
-      citekey: 'guotopological2026',
-      domain: null,
-      pages: null,
-      parsedAt: null,
-      pdfPath: null,
-      status: null,
-      subfield: null,
-      title: 'Topological robustness',
-      year: 2026,
-    }]);
-    const servers = createClaudePluginToolServers(fake.context);
-    const browse = exposedTools(servers.claudian).find(tool => tool.name === 'browse');
-
-    await expect(browse?.handler({})).resolves.toEqual({
-      content: [expect.objectContaining({
-        type: 'text',
-        text: expect.stringContaining('guotopological2026 | 2026'),
-      })],
-    });
-    expect(fake.listPapers).toHaveBeenCalledWith({});
-  });
-
-  it('surfaces a port failure as a tool error', async () => {
-    const fake = createContext();
-    fake.listPapers.mockRejectedValue(new Error('vault unavailable'));
-    const servers = createClaudePluginToolServers(fake.context);
-    const browse = exposedTools(servers.claudian).find(tool => tool.name === 'browse');
-
-    await expect(browse?.handler({})).rejects.toThrow('vault unavailable');
   });
 
   it('does not invoke a write tool when plugin confirmation is denied', async () => {

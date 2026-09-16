@@ -1,10 +1,5 @@
 import type { ProviderExecutionTransitionScope } from '../../core/execution';
 import type {
-  PaperCitation,
-  PaperLibraryEntry,
-  PaperLibraryQuery,
-} from '../../core/library/PaperLibrary';
-import type {
   PaperFieldEditRequest,
   PaperFieldEditResult,
 } from '../../core/note/PaperFieldEdit';
@@ -45,14 +40,6 @@ export class ClaudianProviderHost implements ProviderHost {
 
   readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
     return this.plugin.readPaper(request);
-  }
-
-  listPapers(query: PaperLibraryQuery = {}): Promise<readonly PaperLibraryEntry[]> {
-    return this.plugin.listPapers(query);
-  }
-
-  citePaper(citekey: string): Promise<PaperCitation> {
-    return this.plugin.citePaper(citekey);
   }
 
   searchPapers(request: PaperSearchRequest): Promise<PaperSearchResult> {

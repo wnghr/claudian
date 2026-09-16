@@ -19,7 +19,6 @@ import type { Locale, TranslationKey } from '../../i18n/types';
 import { renderCopyableCodeFence } from '../../shared/components/CopyableCodeFence';
 import { AgentSkillSettings } from '../../shared/settings/AgentSkillSettings';
 import { renderEnvironmentSettingsSection } from '../../shared/settings/EnvironmentSettingsSection';
-import { PaperCacheSettings } from '../../shared/settings/PaperCacheSettings';
 import { formatContextLimit, parseContextLimit, parseEnvironmentVariables } from '../../utils/env';
 import {
   MAX_WARM_AGENT_PROCESSES,
@@ -29,7 +28,7 @@ import type { FeatureHost } from '../FeatureHost';
 import { AgentSkillManagementCoordinator } from './AgentSkillManagementCoordinator';
 import { buildNavMappingText, parseNavMappings } from './keyboardNavigation';
 
-type SettingsTabId = 'general' | 'paper-cache' | 'collab' | 'providers';
+type SettingsTabId = 'general' | 'collab' | 'providers';
 const CLAUDIAN_COLLAB_READ_MORE_URL =
   'https://claudian.md/docs/collab-mode/';
 type ObsidianHotkey = { modifiers: string[]; key: string };
@@ -176,7 +175,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
     setLocale(this.plugin.settings.locale as Locale);
 
     const providerTabs = ProviderRegistry.getRegisteredProviderIds();
-    const tabIds: SettingsTabId[] = ['general', 'paper-cache', 'collab', 'providers'];
+    const tabIds: SettingsTabId[] = ['general', 'collab', 'providers'];
     const preferredProvider = providerTabs.includes(this.plugin.settings.settingsProvider)
       ? this.plugin.settings.settingsProvider
       : providerTabs[0] ?? null;
@@ -286,7 +285,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
     }
 
     this.renderGeneralTab(tabContents.get('general')!);
-    this.renderPaperCacheTab(tabContents.get('paper-cache')!);
     activateCollabTab = this.renderCollabTab(tabContents.get('collab')!);
 
     for (const providerId of providerTabs) {
@@ -614,6 +612,34 @@ export class ClaudianSettingTab extends PluginSettingTab {
         });
       });
 
+    new Setting(container)
+      .setName('LLM for Zotero MinerU cache')
+      .setDesc('Leave blank to use ~/Zotero/llm-for-zotero-mineru. Claudian reads this cache for Zotero PDF files opened in Obsidian.')
+      .addText((text) => {
+        text
+          .setPlaceholder('D:\\Zotero\\llm-for-zotero-mineru')
+          .setValue(this.plugin.settings.llmForZoteroCacheRoot ?? '')
+          .onChange(async (value) => {
+            await this.plugin.mutateSettings((settings) => {
+              settings.llmForZoteroCacheRoot = value.trim();
+            });
+          });
+      });
+
+    new Setting(container)
+      .setName('Zotero data directory')
+      .setDesc('Leave blank to use ~/Zotero. Claudian reads attachments and their full-text caches from the storage folder inside this directory.')
+      .addText((text) => {
+        text
+          .setPlaceholder('D:\\Zotero')
+          .setValue(this.plugin.settings.zoteroDataDirectory ?? '')
+          .onChange(async (value) => {
+            await this.plugin.mutateSettings((settings) => {
+              settings.zoteroDataDirectory = value.trim();
+            });
+          });
+      });
+
     // --- Input ---
 
     new Setting(container).setName(t('settings.input')).setHeading();
@@ -741,10 +767,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
           });
       });
 
-  }
-
-  private renderPaperCacheTab(container: HTMLElement): void {
-    new PaperCacheSettings(container, this.plugin, this.app);
   }
 
   private renderCollabTab(container: HTMLElement): () => void {

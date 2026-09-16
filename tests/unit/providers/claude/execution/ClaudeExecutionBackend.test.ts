@@ -101,8 +101,10 @@ function createHost(): ProviderHost {
       sourcePath: '论文/PDF/current.pdf',
       cachePath: '论文/MD/current/current.paged.md',
       content: '<!-- p.2 -->\nFocused body',
+      fidelity: 'mineru-md',
       selection: 'p.2',
       truncated: false,
+      warnings: [],
     }),
   } as unknown as ProviderHost;
 }
@@ -506,6 +508,7 @@ describe('ClaudeExecutionBackend', () => {
     expect(host.readPaper).toHaveBeenCalledWith({
       pages: '2',
       sourcePath: '论文/PDF/current.pdf',
+      preferActiveReader: true,
     });
   });
 

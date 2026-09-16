@@ -139,6 +139,28 @@ function normalizeCollabGitPath(value: unknown): string {
     : DEFAULT_CLAUDIAN_SETTINGS.collabGitPath;
 }
 
+function normalizeLlmForZoteroCacheRoot(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_CLAUDIAN_SETTINGS.llmForZoteroCacheRoot ?? '';
+  const trimmed = value.trim();
+  return trimmed.length <= 4_096
+    && !trimmed.includes('\u0000')
+    && !trimmed.includes('\r')
+    && !trimmed.includes('\n')
+    ? trimmed
+    : DEFAULT_CLAUDIAN_SETTINGS.llmForZoteroCacheRoot ?? '';
+}
+
+function normalizeZoteroDataDirectory(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_CLAUDIAN_SETTINGS.zoteroDataDirectory ?? '';
+  const trimmed = value.trim();
+  return trimmed.length <= 4_096
+    && !trimmed.includes('\u0000')
+    && !trimmed.includes('\r')
+    && !trimmed.includes('\n')
+    ? trimmed
+    : DEFAULT_CLAUDIAN_SETTINGS.zoteroDataDirectory ?? '';
+}
+
 function normalizeCollabEnabled(value: unknown): boolean {
   return typeof value === 'boolean'
     ? value
@@ -491,6 +513,8 @@ export class ClaudianSettingsStorage {
     const collabEnabled = normalizeCollabEnabled(stored.collabEnabled);
     const collabProjectsFolder = normalizeCollabProjectsFolder(stored.collabProjectsFolder);
     const collabGitPath = normalizeCollabGitPath(stored.collabGitPath);
+    const llmForZoteroCacheRoot = normalizeLlmForZoteroCacheRoot(stored.llmForZoteroCacheRoot);
+    const zoteroDataDirectory = normalizeZoteroDataDirectory(stored.zoteroDataDirectory);
     const hasCanonicalPinnedPaths = Object.prototype.hasOwnProperty.call(
       stored,
       'pinnedLinkedContentPaths',
@@ -526,6 +550,8 @@ export class ClaudianSettingsStorage {
       collabEnabled,
       collabProjectsFolder,
       collabGitPath,
+      llmForZoteroCacheRoot,
+      zoteroDataDirectory,
       sessionManagerOrganization,
       pinnedLinkedContentPaths,
       lastSelectedChatModel,

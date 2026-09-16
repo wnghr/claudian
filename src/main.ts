@@ -53,12 +53,6 @@ import {
   type ProviderExecutionTransitionScope,
 } from './core/execution';
 import type {
-  PaperCitation,
-  PaperLibraryEntry,
-  PaperLibraryPort,
-  PaperLibraryQuery,
-} from './core/library/PaperLibrary';
-import type {
   PaperFieldEditPort,
   PaperFieldEditRequest,
   PaperFieldEditResult,
@@ -68,7 +62,11 @@ import type {
   PaperNoteWriteRequest,
   PaperNoteWriteResult,
 } from './core/note/PaperNoteWrite';
-import type { PaperReadRequest, PaperReadResult } from './core/paper/PaperRead';
+import type {
+  PaperReadPagePosition,
+  PaperReadRequest,
+  PaperReadResult,
+} from './core/paper/PaperRead';
 import {
   getEnvironmentVariablesForScope as getScopedEnvironmentVariables,
   getRuntimeEnvironmentText,
@@ -121,12 +119,32 @@ import {
   readEmbeddingConfigFile,
   resolveEmbeddingCachePath,
 } from './features/chat/linked-content/EmbeddingVectorCache';
-import { createVaultMineruCacheEnsurer } from './features/chat/linked-content/MineruPaperCacheParser';
+import { LlmForZoteroMineruCache } from './features/chat/linked-content/LlmForZoteroMineruCache';
 import { PaperReader } from './features/chat/linked-content/PaperReader';
-import { createVaultPaperContentResolver } from './features/chat/linked-content/VaultPaperContentResolver';
-import { createVaultPaperLibrary } from './features/chat/linked-content/VaultPaperLibrary';
+import {
+  createVaultPaperContentResolver,
+  resolveLlmForZoteroCacheRoot,
+} from './features/chat/linked-content/VaultPaperContentResolver';
 import { createVaultPaperNoteWriter } from './features/chat/linked-content/VaultPaperNoteWriter';
 import { createVaultPaperSearch } from './features/chat/linked-content/VaultPaperSearch';
+import { parseZoteroAttachmentReference } from './features/chat/linked-content/ZoteroAttachmentReference';
+import { ZoteroReadingPositionReader } from './features/chat/linked-content/ZoteroReadingPosition';
+import {
+  resolveZoteroStorageRoot,
+  ZoteroStorageFullTextCache,
+} from './features/chat/linked-content/ZoteroStorageFullText';
+import {
+  ZOTFLOW_LOCAL_READER_VIEW_TYPE,
+  ZOTFLOW_REMOTE_READER_VIEW_TYPE,
+  ZotFlowLocator,
+  type ZotFlowPageContent,
+  type ZotFlowPageImage,
+  type ZotFlowReaderState,
+} from './features/chat/linked-content/ZotFlowLocator';
+import {
+  readZotFlowStoragePath,
+  resolveZotFlowDataFilePath,
+} from './features/chat/linked-content/ZotFlowPaths';
 import {
   COLLAB_DETAIL_VIEW_TYPE,
   CollabDetailView,
@@ -264,8 +282,11 @@ export default class ClaudianPlugin extends Plugin {
   private applicationShutdownPromise: Promise<void> | null = null;
   private tabWorkspaceMigrationCoordinator!: TabWorkspaceMigrationCoordinator;
   private paperReader: PaperReader | null = null;
-  private paperLibrary: PaperLibraryPort | null = null;
-  private paperCacheEnsurer: ((sourcePath: string) => Promise<void>) | null = null;
+  private paperLocator: ZotFlowLocator | null = null;
+  private readingPosition: ZoteroReadingPositionReader | null = null;
+  private zoteroFullText: ZoteroStorageFullTextCache | null = null;
+  private zoteroStorageRoot: string | null | undefined;
+  private zotFlowStoragePath: Promise<string | null> | undefined;
   private paperSearch: PaperSearchPort | null = null;
   private paperNoteWriter: (PaperNoteWritePort & PaperFieldEditPort) | null = null;
 
@@ -277,27 +298,154 @@ export default class ClaudianPlugin extends Plugin {
     return this.chatModelSelectionCoordinator;
   }
 
-  readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
-    this.paperReader ??= new PaperReader(createVaultPaperContentResolver(this.app));
-    return this.paperReader.read(request);
+  /**
+   * Reading a paper starts by working out *which* paper: a source note path, a
+   * vault PDF and a `zotero/<KEY>.pdf` reference are all valid inputs, and when
+   * the caller names nothing we follow the ZotFlow reader.
+   */
+  async readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
+    const locator = this.getPaperLocator();
+    const explicitTarget = request.sourcePath
+      ? await locator.resolve(request.sourcePath)
+      : null;
+    const activeTarget = locator.resolveActiveReader();
+    const target = request.preferActiveReader
+      ? (activeTarget && (!explicitTarget || this.samePaperIdentity(activeTarget, explicitTarget))
+        ? activeTarget
+        : explicitTarget ?? activeTarget)
+      : explicitTarget ?? activeTarget;
+    if (!target) {
+      throw new Error(
+        'No paper could be located. Name a path, open the paper in the ZotFlow reader, '
+        + 'or link a ZotFlow source note to this conversation.',
+      );
+    }
+    const reader = await this.getPaperReader();
+    return reader.read(
+      { ...request, sourcePath: target.sourcePath },
+      target.readPage,
+      target.readPageImage,
+    );
   }
 
-  listPapers(query: PaperLibraryQuery = {}): Promise<readonly PaperLibraryEntry[]> {
-    return this.getPaperLibrary().listPapers(query);
+  private samePaperIdentity(
+    left: { readonly attachmentKey: string | null; readonly libraryID: number | null },
+    right: { readonly attachmentKey: string | null; readonly libraryID: number | null },
+  ): boolean {
+    if (!left.attachmentKey || !right.attachmentKey) return false;
+    if (left.attachmentKey.toLocaleUpperCase() !== right.attachmentKey.toLocaleUpperCase()) return false;
+    return left.libraryID === null || right.libraryID === null || left.libraryID === right.libraryID;
   }
 
-  rebuildPaperCache(sourcePath: string): Promise<void> {
-    this.paperCacheEnsurer ??= createVaultMineruCacheEnsurer(this.app);
-    return this.paperCacheEnsurer(sourcePath);
+  private async getPaperReader(): Promise<PaperReader> {
+    this.paperReader ??= new PaperReader(
+      createVaultPaperContentResolver(this.app, {
+        llmForZoteroCacheRoot: this.settings.llmForZoteroCacheRoot,
+        zoteroDataDirectory: this.settings.zoteroDataDirectory,
+        zotFlowStoragePath: (await this.getZotFlowStoragePath()) ?? undefined,
+      }),
+      { resolveCurrentPage: sourcePath => this.resolveCurrentPage(sourcePath) },
+    );
+    return this.paperReader;
   }
 
-  citePaper(citekey: string): Promise<PaperCitation> {
-    return this.getPaperLibrary().citePaper(citekey);
+  private getZotFlowStoragePath(): Promise<string | null> {
+    this.zotFlowStoragePath ??= readZotFlowStoragePath(this.app);
+    return this.zotFlowStoragePath;
   }
 
-  private getPaperLibrary(): PaperLibraryPort {
-    this.paperLibrary ??= createVaultPaperLibrary(this.app);
-    return this.paperLibrary;
+  /** ZotFlow's path wins when set, so the storage location is configured once. */
+  private async getZoteroStorageRoot(): Promise<string | null> {
+    if (this.zoteroStorageRoot !== undefined) return this.zoteroStorageRoot;
+    const configured = this.settings.zoteroDataDirectory?.trim();
+    if (configured) {
+      this.zoteroStorageRoot = resolveZoteroStorageRoot(configured);
+      return this.zoteroStorageRoot;
+    }
+    // ZotFlow stores the concrete `.../storage` directory, unlike Claudian's
+    // older data-directory setting. Do not append `/storage` a second time.
+    this.zoteroStorageRoot = await this.getZotFlowStoragePath()
+      || resolveZoteroStorageRoot();
+    return this.zoteroStorageRoot;
+  }
+
+  private getPaperLocator(): ZotFlowLocator {
+    this.paperLocator ??= new ZotFlowLocator({
+      readNote: async notePath => {
+        const file = this.app.vault.getAbstractFileByPath(notePath);
+        return file instanceof TFile ? await this.app.vault.cachedRead(file) : null;
+      },
+      listReaderStates: () => this.listZotFlowReaderStates(),
+      isPdfAttachment: async attachmentKey => {
+        const fullText = await this.getZoteroFullTextCache();
+        return fullText ? await fullText.hasAttachmentFile(attachmentKey) : false;
+      },
+    });
+    return this.paperLocator;
+  }
+
+  /** `getState()` on the ZotFlow reader views; unknown plugin means no reader. */
+  private listZotFlowReaderStates(): readonly ZotFlowReaderState[] {
+    const viewTypes = [ZOTFLOW_REMOTE_READER_VIEW_TYPE, ZOTFLOW_LOCAL_READER_VIEW_TYPE];
+    const states: Array<ZotFlowReaderState & { readonly isActive: boolean }> = [];
+    const activeLeaf = (this.app.workspace as unknown as { activeLeaf?: WorkspaceLeaf }).activeLeaf;
+    for (const viewType of viewTypes) {
+      for (const leaf of this.app.workspace.getLeavesOfType(viewType)) {
+        const view = leaf.view as {
+          getState?: () => unknown;
+          getPageContent?: (pageIndex: number) => Promise<unknown>;
+          getPageImage?: (pageIndex: number, scale?: number) => Promise<unknown>;
+        };
+        if (typeof view.getState !== 'function') continue;
+        try {
+          states.push({
+            isActive: leaf === activeLeaf,
+            state: view.getState(),
+            viewType,
+            ...(view.getPageContent ? { readPage: (pageIndex: number) => view.getPageContent!(pageIndex) as Promise<ZotFlowPageContent | null> } : {}),
+            ...(view.getPageImage ? { readPageImage: (pageIndex: number, scale?: number) => view.getPageImage!(pageIndex, scale) as Promise<ZotFlowPageImage | null> } : {}),
+          });
+        } catch {
+          // The reader view is mid-teardown; skip it rather than fail the read.
+        }
+      }
+    }
+    states.sort((left, right) => Number(right.isActive) - Number(left.isActive));
+    return states.map(({ isActive: _isActive, ...state }) => state);
+  }
+
+  private async getZoteroFullTextCache(): Promise<ZoteroStorageFullTextCache | null> {
+    if (this.zoteroFullText) return this.zoteroFullText;
+    const storageRoot = await this.getZoteroStorageRoot();
+    if (!storageRoot) return null;
+    this.zoteroFullText = new ZoteroStorageFullTextCache({ storageRoot });
+    return this.zoteroFullText;
+  }
+
+  private async getReadingPosition(): Promise<ZoteroReadingPositionReader | null> {
+    if (this.readingPosition) return this.readingPosition;
+    const storageRoot = await this.getZoteroStorageRoot();
+    if (!storageRoot) return null;
+    this.readingPosition = new ZoteroReadingPositionReader({
+      storageRoot,
+      zotFlowDataFile: resolveZotFlowDataFilePath(this.app),
+    });
+    return this.readingPosition;
+  }
+
+  private async resolveCurrentPage(sourcePath: string): Promise<PaperReadPagePosition | null> {
+    const attachmentKey = parseZoteroAttachmentReference(sourcePath);
+    const positions = await this.getReadingPosition();
+    if (!attachmentKey || !positions) return null;
+    const active = this.getPaperLocator().resolveActiveReader();
+    const position = await positions.read({
+      attachmentKey,
+      libraryID: null,
+      // An open reader for this very attachment keeps its entry current, so it
+      // outranks Zotero's own state even if another paper was read later.
+      preferViewState: active?.attachmentKey === attachmentKey,
+    });
+    return position ? { page: position.page, source: position.source } : null;
   }
 
   searchPapers(request: PaperSearchRequest): Promise<PaperSearchResult> {
@@ -317,10 +465,31 @@ export default class ClaudianPlugin extends Plugin {
   private getPaperSearch(): PaperSearchPort {
     if (this.paperSearch) return this.paperSearch;
     const cachePath = resolveEmbeddingCachePath(this.app);
+    const mineruCache = new LlmForZoteroMineruCache({
+      cacheRoot: resolveLlmForZoteroCacheRoot(this.settings.llmForZoteroCacheRoot) ?? '',
+    });
     this.paperSearch = createVaultPaperSearch({
       app: this.app,
       embedding: this.createEmbeddingClient(),
       vectorStore: cachePath ? createFileEmbeddingVectorStore(cachePath) : null,
+      externalDocuments: async () => {
+        const [mineruDocuments, zoteroDocuments] = await Promise.all([
+          mineruCache.listDocuments(),
+          this.getZoteroFullTextCache().then(cache => cache?.listDocuments() ?? []),
+        ]);
+        // A MinerU parse has richer headings and image references. Keep it as
+        // the canonical external document when both tiers cover one PDF.
+        const mineruPaths = new Set(
+          mineruDocuments.map(document => document.path.toLocaleLowerCase()),
+        );
+        const fullTextDocuments = zoteroDocuments
+          .map(document => ({
+            path: `zotero/${document.attachmentKey}.pdf`,
+            content: document.content,
+          }))
+          .filter(document => !mineruPaths.has(document.path.toLocaleLowerCase()));
+        return [...mineruDocuments, ...fullTextDocuments];
+      },
     });
     return this.paperSearch;
   }

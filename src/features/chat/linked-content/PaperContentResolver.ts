@@ -1,3 +1,4 @@
+import type { PaperReadFidelity } from '../../../core/paper/PaperRead';
 import {
   manifestFullMarkdownPath,
   manifestSourceHash,
@@ -18,6 +19,12 @@ export interface PaperContentResult {
   readonly manifestPath?: string;
   readonly manifest?: PaperCacheManifest;
   readonly reason?: string;
+  /** Which source the text came from; `mineru-md` unless a tier says otherwise. */
+  readonly fidelity?: PaperReadFidelity;
+  /** Pages the returned text covers. */
+  readonly pageCount?: number;
+  /** Caveats the producing tier wants the caller to pass on. */
+  readonly warnings?: readonly string[];
 }
 
 export interface PaperContentResolverOptions {
@@ -26,7 +33,12 @@ export interface PaperContentResolverOptions {
   readonly read: (file: PaperContentFile) => Promise<string>;
   readonly readBinary: (file: PaperContentFile) => Promise<ArrayBuffer>;
   readonly hashBinary?: (binary: ArrayBuffer) => Promise<string>;
-  readonly ensureCache?: (sourcePath: string) => Promise<void>;
+  /**
+   * Tiers to try before the vault's own MinerU cache. The first non-null answer
+   * wins, which is what keeps an unparseable Zotero attachment readable from
+   * Zotero's own full-text cache.
+   */
+  readonly resolveExternalCache?: (sourcePath: string) => Promise<PaperContentResult | null>;
 }
 
 export interface PaperContentFile {
@@ -60,28 +72,14 @@ function normalizeOptionalPath(path: string | null): string | undefined {
 }
 
 export class PaperContentResolver {
-  private readonly pendingCacheEnsures = new Map<string, Promise<void>>();
-
   constructor(private readonly options: PaperContentResolverOptions) {}
 
   async resolve(
     sourcePath: string,
     resolveOptions: PaperContentResolveOptions = {},
   ): Promise<PaperContentResult> {
-    const initial = await this.resolveCurrent(sourcePath, resolveOptions);
-    if (initial.status === 'ready' || !this.options.ensureCache) return initial;
-
-    const normalizedSourcePath = normalizePath(sourcePath);
-    let pending = this.pendingCacheEnsures.get(normalizedSourcePath);
-    if (!pending) {
-      pending = this.options.ensureCache(normalizedSourcePath).finally(() => {
-        if (this.pendingCacheEnsures.get(normalizedSourcePath) === pending) {
-          this.pendingCacheEnsures.delete(normalizedSourcePath);
-        }
-      });
-      this.pendingCacheEnsures.set(normalizedSourcePath, pending);
-    }
-    await pending;
+    const external = await this.options.resolveExternalCache?.(sourcePath);
+    if (external) return external;
     return this.resolveCurrent(sourcePath, resolveOptions);
   }
 
@@ -172,6 +170,7 @@ export class PaperContentResolver {
       manifest: manifest.data,
       content: complete ? fullContent : fullContent.slice(0, maxChars),
       complete,
+      fidelity: 'mineru-md',
       sha256: currentHash,
       ...(complete ? {} : { reason: `The cached Markdown exceeds the ${maxChars}-character read limit.` }),
     };

@@ -17,7 +17,7 @@ export const WRITE_NOTE_TOOL_ACTION_LABEL = 'Write note';
 export const WRITE_NOTE_TOOL_DESCRIPTION =
   "Append a dated block to a note or paper card in this vault, under a section heading (default 讨论与理解). Use it to record an interpretation, a question, or a reading conclusion into the vault so it survives the conversation. Refuses to write the same content twice unless told otherwise, and preserves the note's frontmatter.";
 export const WRITE_NOTE_TOOL_INSTRUCTIONS =
-  'Use the Claudian write_note tool to save conclusions, interpretations, or follow-up questions into vault notes and paper cards. Never edit paper cards or parse products by hand with file tools; write_note appends safely under the right section.';
+  'Use the Claudian write_note tool to save conclusions, interpretations, or follow-up questions into Obsidian research notes. Never edit Zotero metadata or parse products by hand with file tools; write_note appends safely under the right section.';
 
 const WRITE_NOTE_TOOL_FIELDS: readonly ToolFieldSpec[] = [
   {

@@ -22,6 +22,8 @@ import { normalizeForMatch } from '../text/normalize';
 
 /** Section a free-form note lands in when the caller does not pick one. */
 export const DEFAULT_APPEND_SECTION = '讨论与理解';
+/** Stable local-only region id expected in the ZotFlow source-note template. */
+export const CLAUDIAN_DISCUSSION_PERSIST_REGION_ID = 'claudian-discussion';
 
 /**
  * Canonical card sections and the shortened headings users actually type.
@@ -44,6 +46,8 @@ export interface PaperNoteWriteRequest {
   readonly section?: string;
   /** Write even when the content already appears in the note. */
   readonly allowDuplicate?: boolean;
+  /** ZotFlow local-only persist region to write into instead of a heading. */
+  readonly persistRegionId?: string;
 }
 
 export interface PaperNoteWriteResult {
@@ -196,4 +200,47 @@ export function appendToNoteText(
   }
 
   return { text: (rawFrontmatter ?? '') + newBody, action: 'appended', location };
+}
+
+export interface PersistRegionAppendOptions {
+  readonly regionId: string;
+  readonly now: Date;
+  readonly allowDuplicate?: boolean;
+}
+
+/**
+ * Appends a stamped block inside ZotFlow's local-only persist region. The
+ * managed annotation body remains outside the region and is never rewritten.
+ */
+export function appendToPersistRegionText(
+  text: string,
+  content: string,
+  options: PersistRegionAppendOptions,
+): AppendOutcome {
+  const trimmed = content.trim();
+  if (!trimmed) throw new Error('没有要写入的内容。');
+  const regionId = options.regionId.trim();
+  if (!regionId) throw new Error('ZotFlow 持久化区域 ID 不能为空。');
+
+  if (!options.allowDuplicate && isDuplicateText(text, trimmed)) {
+    return { text, action: 'duplicate_skipped', location: `内容已存在于 ZotFlow 区域 ${regionId}` };
+  }
+
+  const begin = `<!-- ZF_PERSIST_BEG_${regionId} -->`;
+  const end = `<!-- ZF_PERSIST_END_${regionId} -->`;
+  const beginIndex = text.indexOf(begin);
+  const endIndex = text.indexOf(end, beginIndex + begin.length);
+  if (beginIndex < 0 || endIndex < 0 || endIndex < beginIndex) {
+    throw new Error(`找不到 ZotFlow 持久化区域：${regionId}`);
+  }
+
+  const block = `${formatStamp(options.now)}\n${trimmed}`;
+  const beforeEnd = text.slice(0, endIndex);
+  const separator = beforeEnd.endsWith('\n') ? '' : '\n';
+  const afterEnd = text.slice(endIndex);
+  return {
+    text: `${beforeEnd}${separator}${block}\n${afterEnd}`,
+    action: 'appended',
+    location: `ZotFlow 持久化区域 ${regionId}`,
+  };
 }

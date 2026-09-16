@@ -19,6 +19,8 @@ export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
 
   excludedTags: [],
   mediaFolder: '',
+  llmForZoteroCacheRoot: '',
+  zoteroDataDirectory: '',
   systemPrompt: '',
 
   sharedEnvironmentVariables: '',

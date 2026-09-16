@@ -1,6 +1,7 @@
 import type { Component } from 'obsidian';
 import { Notice } from 'obsidian';
 
+import { CLAUDIAN_DISCUSSION_PERSIST_REGION_ID } from '../../../../core/note/PaperNoteWrite';
 import { resolveNewConversationModel } from '../../../../core/providers/conversationModel';
 import { getEnabledProviderForModel } from '../../../../core/providers/modelRouting';
 import { ProviderRegistry } from '../../../../core/providers/ProviderRegistry';
@@ -14,6 +15,7 @@ import { NavigationController } from '../../controllers/NavigationController';
 import { SelectionController } from '../../controllers/SelectionController';
 import { StreamController } from '../../controllers/StreamController';
 import { createVaultPaperContentResolver } from '../../linked-content/VaultPaperContentResolver';
+import { resolvePaperNoteTarget } from '../../linked-content/VaultPaperNoteWriter';
 import { MessageRenderer } from '../../rendering/MessageRenderer';
 import { getTabProviderId } from '../providerResolution';
 import {
@@ -112,9 +114,23 @@ export function buildTabRuntimeControllers(
         )
       : undefined,
     () => getTabCapabilities(runtimeRef.requirePublished(), plugin),
+    async (_messageId, markdown) => {
+      const linkedPath = ui.linkedContentController.getSnapshot().path;
+      if (!linkedPath) throw new Error('当前没有关联的 ZotFlow 论文笔记。');
+      const target = await resolvePaperNoteTarget(plugin.app, linkedPath);
+      if (!target) throw new Error('找不到当前论文的 ZotFlow 主笔记，请先打开或导入该论文笔记。');
+      await plugin.appendToNote({
+        target,
+        content: markdown,
+        persistRegionId: CLAUDIAN_DISCUSSION_PERSIST_REGION_ID,
+      });
+      new Notice(`已保存到论文笔记：${target}`);
+    },
   );
   options.registerCleanup('tab message renderer', () => renderer.dispose());
-  const paperContentResolver = createVaultPaperContentResolver(plugin.app);
+  const paperContentResolver = createVaultPaperContentResolver(plugin.app, {
+    llmForZoteroCacheRoot: plugin.settings.llmForZoteroCacheRoot,
+  });
 
   const selectionController = new SelectionController(
     plugin.app,

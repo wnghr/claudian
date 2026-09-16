@@ -15,6 +15,10 @@ import {
   type LinkedContentPresentation,
 } from './LinkedContentPresentation';
 import { LinkedContentSelector } from './LinkedContentSelector';
+import {
+  createZoteroAttachmentReference,
+  isZoteroAttachmentReference,
+} from './ZoteroAttachmentReference';
 
 export type LinkedContentMode = 'auto-draft' | 'explicit-draft' | 'submitting' | 'locked';
 
@@ -24,6 +28,12 @@ export interface LinkedContentSnapshot {
 }
 
 type ExcludedTagState = 'excluded' | 'not-excluded' | 'unknown';
+
+// Legacy reader view identifiers. Keeping these as strings preserves existing
+// conversations while the native Obsidian PDF view is handled below.
+const LEGACY_READER_LOCAL_VIEW_TYPE = 'zotflow-local-zotero-reader-view';
+const LEGACY_READER_VIEW_TYPE = 'zotflow-zotero-reader-view';
+const NATIVE_PDF_VIEW_TYPE = 'pdf';
 
 export interface LinkedContentSubmissionToken {
   readonly path?: string;
@@ -114,7 +124,7 @@ export class LinkedContentController {
     this.assertLive();
     this.activeSubmission = null;
     this.mode = 'auto-draft';
-    this.path = this.eligibleActiveFilePath(this.app.workspace.getActiveFile());
+    this.path = this.resolveActiveContentPath();
     this.publish();
   }
 
@@ -133,14 +143,22 @@ export class LinkedContentController {
 
   handleActiveFileChanged(file: TFile | null, isActiveOwner: boolean): void {
     if (this.destroyed || !isActiveOwner || this.mode !== 'auto-draft') return;
-    this.reconcileAutoDraftPath(file);
+    this.reconcileAutoDraftPath(
+      file ? this.eligibleActiveFilePath(file) : this.resolveActiveContentPath(),
+    );
   }
 
   handleActiveFileMetadataChanged(file: TFile | null): void {
     if (this.destroyed || this.mode !== 'auto-draft') return;
-    const activeFile = this.app.workspace.getActiveFile();
-    if (file !== null && activeFile?.path !== file.path) return;
-    this.reconcileAutoDraftPath(activeFile);
+    const activePath = this.resolveActiveContentPath();
+    if (file !== null && activePath !== null && activePath !== file.path) return;
+    this.reconcileAutoDraftPath(activePath);
+  }
+
+  /** Re-evaluates virtual reader views that do not emit Obsidian file-open. */
+  handleActiveLeafChanged(): void {
+    if (this.destroyed || this.mode !== 'auto-draft') return;
+    this.reconcileAutoDraftPath(this.resolveActiveContentPath());
   }
 
   lock(path: string | undefined): void {
@@ -266,6 +284,14 @@ export class LinkedContentController {
 
   async activateCurrentContent(): Promise<void> {
     if (this.destroyed || !this.path) return;
+    if (isZoteroAttachmentReference(this.path)) {
+      const attachmentKey = this.path.slice('zotero/'.length, -'.pdf'.length);
+      const leaf = this.app.workspace.getLeavesOfType(LEGACY_READER_VIEW_TYPE)
+        .find(candidate => candidate.getViewState().state?.itemKey === attachmentKey);
+      if (leaf) await revealWorkspaceLeaf(this.app.workspace, leaf);
+      else new Notice('Open this Zotero attachment in the reader to reveal it.');
+      return;
+    }
     const content = deriveLinkedContentPresentation(this.app, this.path);
     if (content.missing || !content.target) {
       new Notice(`Linked content is missing: ${this.path}`);
@@ -319,8 +345,8 @@ export class LinkedContentController {
     return true;
   }
 
-  private reconcileAutoDraftPath(file: TFile | null): void {
-    const nextPath = this.eligibleActiveFilePath(file);
+  private reconcileAutoDraftPath(path: string | null): void {
+    const nextPath = path;
     if (nextPath === this.path) return;
     this.path = nextPath;
     this.publish();
@@ -336,6 +362,41 @@ export class LinkedContentController {
       return null;
     }
     return normalizeLinkedContentPath(file.path);
+  }
+
+  private resolveActiveContentFile(): TFile | null {
+    const leaf = this.app.workspace.getMostRecentLeaf?.();
+    const viewState = leaf?.getViewState();
+    if (viewState?.type === LEGACY_READER_LOCAL_VIEW_TYPE
+      || viewState?.type === NATIVE_PDF_VIEW_TYPE) {
+      const path = viewState.state?.file;
+      if (typeof path === 'string' && path.trim().length > 0) {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) return file;
+      }
+    }
+
+    // A remote ZotFlow reader has no vault file. It still outranks the stale
+    // Markdown file Obsidian reports as active, and is handled by the caller.
+    if (viewState?.type === LEGACY_READER_VIEW_TYPE) return null;
+    return this.app.workspace.getActiveFile() ?? null;
+  }
+
+  private resolveActiveContentPath(): string | null {
+    const file = this.resolveActiveContentFile();
+    if (file) return this.eligibleActiveFilePath(file);
+
+    const leaf = this.app.workspace.getMostRecentLeaf?.();
+    const viewState = leaf?.getViewState();
+    if (viewState?.type === NATIVE_PDF_VIEW_TYPE) {
+      const statePath = viewState.state?.file;
+      return typeof statePath === 'string' && isZoteroAttachmentReference(statePath)
+        ? statePath
+        : null;
+    }
+    if (viewState?.type !== LEGACY_READER_VIEW_TYPE) return null;
+    const itemKey = viewState.state?.itemKey;
+    return typeof itemKey === 'string' ? createZoteroAttachmentReference(itemKey) : null;
   }
 
   private getExcludedTagState(file: TFile): ExcludedTagState {

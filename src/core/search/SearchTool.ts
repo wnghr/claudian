@@ -21,7 +21,7 @@ export const SEARCH_TOOL_VERSION = 1;
 export const SEARCH_TOOL_CAPABILITY = 'paper.search';
 export const SEARCH_TOOL_ACTION_LABEL = 'Search papers';
 export const SEARCH_TOOL_DESCRIPTION =
-  "Search the vault's papers, cards, and research notes for passages that answer a question. Combines keyword ranking with embedding-based semantic ranking, and returns every hit with a vault path, heading, and page locator so the answer can be cited. Use it instead of grepping the vault: it finds passages with no literal keyword match and reports the page a passage came from.";
+  "Search the Zotero MinerU paper cache and Obsidian research notes for passages that answer a question. Combines keyword ranking with embedding-based semantic ranking, and returns every hit with a source path, heading, and page locator so the answer can be cited. Use it instead of grepping the vault.";
 export const SEARCH_TOOL_INSTRUCTIONS =
   'Use the Claudian search tool to locate relevant passages in the paper library before answering a question about the literature. Cite each hit by its path, heading, and page or line locator. Do not grep vault folders for paper content.';
 
@@ -52,8 +52,8 @@ const SEARCH_TOOL_FIELDS: readonly ToolFieldSpec[] = [
     type: 'string',
     optional: true,
     description:
-      'Optional restriction to a vault-relative folder or path segment, '
-      + 'for example 论文/MD or a citekey.',
+      'Optional restriction to an Obsidian folder/path segment or a Zotero attachment key, '
+      + 'for example 科研笔记 or an attachment key.',
   },
   {
     name: 'kind',
@@ -161,7 +161,7 @@ export function formatPaperSearchResult(result: PaperSearchResult): string {
       ...(result.degraded ? [`Degraded: ${result.degraded}`] : []),
       '',
       'No passages matched. Try different terms, drop scope, or check that the paper '
-      + 'has been parsed into 论文/MD.',
+      + 'has a readable MinerU cache in the configured Zotero cache root.',
     ].join('\n');
   }
 

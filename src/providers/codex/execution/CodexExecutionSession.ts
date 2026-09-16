@@ -305,7 +305,7 @@ export class CodexExecutionSession
   private loadedThreadBaseInstructions: string | null = null;
   private sessionFilePath: string | null;
   private workspaceDependencyToolVersion: number | null;
-  private linkedPdfPath: string | null = null;
+  private linkedPaperPath: string | null = null;
   private pendingFork: CodexProviderState['forkSource'];
   private pendingForkTarget: CodexPendingForkTarget | undefined;
   private nativeConversationContextEstablished: boolean;
@@ -350,10 +350,9 @@ export class CodexExecutionSession
     if (this.activeRun) {
       throw new Error('Codex execution session already has an active requested run.');
     }
-    const linkedContentPath = request.context?.linkedContent?.path;
-    if (linkedContentPath?.toLocaleLowerCase().endsWith('.pdf')) {
-      this.linkedPdfPath = linkedContentPath;
-    }
+    // A ZotFlow source note is the usual linked content, so the path is passed
+    // through as-is and the locator decides whether it names a readable paper.
+    this.linkedPaperPath = request.context?.linkedContent?.path?.trim() || null;
 
     const run = new CodexExecutionRun(
       this.sessionInstanceId,
@@ -667,8 +666,7 @@ export class CodexExecutionSession
       for (const registration of createCodexPluginTools({
         confirmToolAction: request => this.serverRequestRouter.confirmPluginTool(request),
         fields: this.plugin,
-        getLinkedPdfPath: () => this.linkedPdfPath,
-        library: this.plugin,
+        getLinkedPaperPath: () => this.linkedPaperPath,
         reader: this.plugin,
         search: this.plugin,
         writer: this.plugin,

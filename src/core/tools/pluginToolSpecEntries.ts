@@ -1,7 +1,6 @@
-import { BROWSE_TOOL_SPEC } from '../library/BrowseTool';
-import { CITE_TOOL_SPEC } from '../library/CiteTool';
 import { SET_PAPER_FIELDS_TOOL_SPEC } from '../note/SetPaperFieldsTool';
 import { WRITE_NOTE_TOOL_SPEC } from '../note/WriteNoteTool';
+import { WRITE_TODO_TOOL_SPEC } from '../note/WriteTodoTool';
 import { PAPER_READ_TOOL_SPEC } from '../paper/PaperReadTool';
 import { SEARCH_TOOL_SPEC } from '../search/SearchTool';
 import type { ErasedTool } from './ToolSpec';
@@ -14,12 +13,11 @@ import type { ErasedTool } from './ToolSpec';
  * crashing while importing it.
  */
 export const PLUGIN_TOOL_SPEC_ENTRIES: readonly ErasedTool[] = [
-  BROWSE_TOOL_SPEC,
-  CITE_TOOL_SPEC,
   PAPER_READ_TOOL_SPEC,
   SEARCH_TOOL_SPEC,
   SET_PAPER_FIELDS_TOOL_SPEC,
   WRITE_NOTE_TOOL_SPEC,
+  WRITE_TODO_TOOL_SPEC,
 ];
 
 /**

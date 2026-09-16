@@ -21,7 +21,7 @@ export const SET_PAPER_FIELDS_TOOL_DESCRIPTION =
     + 'Only the provided fields are touched; the rest of the card is preserved byte-for-byte.';
 export const SET_PAPER_FIELDS_TOOL_INSTRUCTIONS =
   'Use the Claudian set_paper_fields tool to record reading status and 领域/子领域 classifications '
-    + 'on paper cards. Never edit card frontmatter by hand with file tools; '
+    + 'on Obsidian research notes. Never edit Zotero metadata or note frontmatter by hand with file tools; '
     + 'set_paper_fields writes only the whitelisted fields.';
 
 const SET_PAPER_FIELDS_TOOL_FIELDS: readonly ToolFieldSpec[] = [

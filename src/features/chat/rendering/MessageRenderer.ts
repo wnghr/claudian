@@ -75,6 +75,7 @@ export class MessageRenderer {
   private rewindCallback?: (messageId: string, mode?: ChatRewindMode) => Promise<void>;
   private getCapabilities: () => ProviderCapabilities;
   private forkCallback?: (messageId: string) => Promise<void>;
+  private saveToNoteCallback?: (messageId: string, markdown: string) => Promise<void>;
   private liveMessageEls = new Map<string, HTMLElement>();
   private removeFileLinkHandler: () => void;
   private readonly imagePreviewModal = new ImagePreviewModal();
@@ -87,6 +88,7 @@ export class MessageRenderer {
     rewindCallback?: (messageId: string, mode?: ChatRewindMode) => Promise<void>,
     forkCallback?: (messageId: string) => Promise<void>,
     getCapabilities?: () => ProviderCapabilities,
+    saveToNoteCallback?: (messageId: string, markdown: string) => Promise<void>,
   ) {
     this.app = plugin.app;
     this.plugin = plugin;
@@ -94,6 +96,7 @@ export class MessageRenderer {
     this.messagesEl = messagesEl;
     this.rewindCallback = rewindCallback;
     this.forkCallback = forkCallback;
+    this.saveToNoteCallback = saveToNoteCallback;
     this.getCapabilities = getCapabilities ?? (() => ({
       providerId: DEFAULT_CHAT_PROVIDER_ID,
       supportsNativeHistory: false,
@@ -448,6 +451,9 @@ export class MessageRenderer {
     ).content;
     if (copyText.trim()) this.addTextCopyButton(toolbar, copyText);
     if (this.forkCallback && msg.assistantMessageId) this.addForkButton(msgEl, msg.id);
+    if (this.saveToNoteCallback && copyText.trim()) {
+      this.addSaveToNoteButton(toolbar, msg.id, copyText);
+    }
     this.appendMessageTimestamp(msgEl, msg.role === 'user' ? msg.timestamp : msg.completedAt);
   }
 
@@ -1032,6 +1038,28 @@ export class MessageRenderer {
           await this.forkCallback?.(messageId);
         } catch (err) {
           new Notice(t('chat.fork.failed', { error: err instanceof Error ? err.message : 'Unknown error' }));
+        }
+      });
+    });
+  }
+
+  private addSaveToNoteButton(toolbar: HTMLElement, messageId: string, markdown: string): void {
+    const btn = toolbar.createEl('button', {
+      cls: 'claudian-message-save-note-btn',
+      attr: { type: 'button', 'aria-label': 'Save to note' },
+    });
+    setIcon(btn, 'notebook-pen');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      runRendererAction(async () => {
+        try {
+          await this.saveToNoteCallback?.(messageId, markdown);
+          btn.empty();
+          setIcon(btn, 'check');
+          btn.setAttribute('aria-label', 'Saved to note');
+          btn.classList.add('saved');
+        } catch (err) {
+          new Notice(`Failed to save to note: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
       });
     });

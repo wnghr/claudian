@@ -9,6 +9,14 @@
 
 export const PAPER_CACHE_ROOT = '论文/MD';
 export const PAPER_CACHE_SCHEMA_VERSION = 2;
+
+/** A page anchor on a line of its own; shared with the page-selecting reader. */
+export const PAGE_ANCHOR_PATTERN = /^\s*<!--\s*p\.(\d+)\s*-->\s*$/gm;
+
+export function countPageAnchors(markdown: string): number {
+  return [...markdown.matchAll(PAGE_ANCHOR_PATTERN)].length;
+}
+
 export const PAPER_CACHE_FILES = {
   contentList: 'content_list.json',
   fullMarkdown: 'full.md',

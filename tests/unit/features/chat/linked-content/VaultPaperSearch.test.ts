@@ -2,7 +2,10 @@ import type { App } from 'obsidian';
 import { TFile } from 'obsidian';
 
 import type { EmbeddingClient } from '@/core/search/embedding';
-import { createVaultPaperSearch } from '@/features/chat/linked-content/VaultPaperSearch';
+import {
+  createVaultPaperSearch,
+  type ExternalPaperSearchDocument,
+} from '@/features/chat/linked-content/VaultPaperSearch';
 
 const CARD_PATH = '论文/卡片/Light-driven dancing.md';
 const PAGGED_PATH = '论文/MD/citeX/citeX.paged.md';
@@ -116,7 +119,11 @@ function recordingEmbedding(overrides: Partial<EmbeddingClient> = {}): Embedding
 }
 
 function withVault<T>(
-  options: Parameters<typeof buildApp>[0] & { embedding?: EmbeddingClient; vectorStore?: Parameters<typeof createVaultPaperSearch>[0]['vectorStore'] },
+  options: Parameters<typeof buildApp>[0] & {
+    embedding?: EmbeddingClient;
+    vectorStore?: Parameters<typeof createVaultPaperSearch>[0]['vectorStore'];
+    externalDocuments?: () => Promise<readonly ExternalPaperSearchDocument[]>;
+  },
   callback: (impl: ReturnType<typeof createVaultPaperSearch>, embedding: ReturnType<typeof recordingEmbedding>) => Promise<T>,
 ): Promise<T> {
   const embedding = options.embedding ?? recordingEmbedding();
@@ -124,6 +131,7 @@ function withVault<T>(
     app: buildApp(options),
     embedding,
     ...(options.vectorStore === undefined ? {} : { vectorStore: options.vectorStore }),
+    ...(options.externalDocuments === undefined ? {} : { externalDocuments: options.externalDocuments }),
   });
   return callback(impl, embedding as ReturnType<typeof recordingEmbedding>);
 }
@@ -238,6 +246,22 @@ describe('createVaultPaperSearch', () => {
     );
   });
 
+  it('indexes the external Zotero MinerU document with its PDF path and page locator', async () => {
+    const externalDocuments = async (): Promise<readonly ExternalPaperSearchDocument[]> => [{
+      path: 'zotero/ATTACH01.pdf',
+      content: '<!-- p.7 -->\n## Results\nThe measured skyrmion radius remains stable under turbulence.\n',
+    }];
+    await withVault(
+      { externalDocuments },
+      async impl => {
+        const result = await impl.searchPapers({ query: 'skyrmion radius turbulence' });
+        expect(result.hits[0]?.path).toBe('zotero/ATTACH01.pdf');
+        expect(result.hits[0]?.locator).toBe('p.7');
+        expect(result.index.files).toBe(1);
+      },
+    );
+  });
+
   it('does not embed files outside the requested scope', async () => {
     const embedding = recordingEmbedding();
     await withVault(
@@ -275,6 +299,17 @@ describe('createVaultPaperSearch', () => {
     // must not call the embedding endpoint again.
     await impl.searchPapers({ query: 'nematic skyrmion turbulence' });
     expect(embedding.embedCalls).toBe(firstCalls);
+  });
+
+  it('reuses parsed vault chunks on a second search of an unchanged file', async () => {
+    const app = buildApp({ content: { [PAGGED_PATH]: PAGGED_TEXT } });
+    const cachedRead = (app.vault as unknown as { cachedRead: jest.Mock }).cachedRead;
+    const impl = createVaultPaperSearch({ app, embedding: recordingEmbedding() });
+
+    await impl.searchPapers({ mode: 'keyword', query: 'skyrmion' });
+    await impl.searchPapers({ mode: 'keyword', query: 'turbulence' });
+
+    expect(cachedRead).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to keyword search when the embedding endpoint is disabled', async () => {

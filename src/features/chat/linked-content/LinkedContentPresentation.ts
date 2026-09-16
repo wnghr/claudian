@@ -1,6 +1,8 @@
 import type { App, TAbstractFile } from 'obsidian';
 import { TFile, TFolder } from 'obsidian';
 
+import { parseZoteroAttachmentReference } from './ZoteroAttachmentReference';
+
 export type LinkedContentKind = 'file' | 'folder' | 'missing';
 
 export interface LinkedContentPresentation {
@@ -25,6 +27,17 @@ export function deriveLinkedContentPresentation(
   app: App,
   path: string,
 ): LinkedContentPresentation {
+  const attachmentKey = parseZoteroAttachmentReference(path);
+  if (attachmentKey) {
+    return {
+      path,
+      kind: 'file',
+      label: `Zotero ${attachmentKey}`,
+      icon: 'book-open',
+      missing: false,
+      target: null,
+    };
+  }
   const target = app.vault.getAbstractFileByPath(path);
   if (target instanceof TFile) {
     return {

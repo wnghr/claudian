@@ -95,7 +95,7 @@ export interface ClaudeEncodedExecutionRequest {
 export interface ClaudeExecutionRequestEncoderDeps {
   readonly host: ProviderHost;
   readonly pluginManager: AppPluginManager;
-  readonly getLinkedPdfPath: () => string | null;
+  readonly getLinkedPaperPath: () => string | null;
   readonly interactionPort: ProviderInteractionPort;
   readonly sessionInstanceId: string;
   readonly getTurnId: () => string | null;
@@ -193,8 +193,7 @@ export class ClaudeExecutionRequestEncoder {
             mcpServers: createClaudePluginToolServers({
               confirmToolAction: request => this.confirmPluginTool(request, abortController.signal),
               fields: this.deps.host,
-              getLinkedPdfPath: this.deps.getLinkedPdfPath,
-              library: this.deps.host,
+              getLinkedPaperPath: this.deps.getLinkedPaperPath,
               reader: this.deps.host,
               search: this.deps.host,
               writer: this.deps.host,

@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import type { App } from 'obsidian';
 import { TFile } from 'obsidian';
 
-import { createVaultPaperNoteWriter } from '@/features/chat/linked-content/VaultPaperNoteWriter';
+import {
+  createVaultPaperNoteWriter,
+  resolvePaperNoteTarget,
+} from '@/features/chat/linked-content/VaultPaperNoteWriter';
 
 const CARD_PATH = '论文/卡片/Light-driven dancing.md';
 const TWIN_PATH = '科研笔记/两个同名.md';
@@ -106,6 +109,35 @@ describe('createVaultPaperNoteWriter', () => {
     // The backup holds the pre-write text.
     const backup = await readFile(result.backupPath ?? '', 'utf-8');
     expect(backup).toBe(CARD_TEXT);
+  });
+
+  it('writes assistant discussion into a ZotFlow persist region', async () => {
+    content[CARD_PATH] = [
+      '---', 'zotflow-locked: true', '---', '',
+      '## Annotations', '', 'managed annotation', '',
+      '<!-- ZF_PERSIST_BEG_claudian-discussion -->',
+      '<!-- ZF_PERSIST_END_claudian-discussion -->', '',
+    ].join('\n');
+    const app = buildApp();
+    const writer = createVaultPaperNoteWriter({ app, now: () => new Date(2026, 8, 13, 18, 30, 0) });
+
+    const result = await writer.appendToNote({
+      content: '回答中的讨论。',
+      target: CARD_PATH,
+      persistRegionId: 'claudian-discussion',
+    });
+
+    expect(result.location).toContain('claudian-discussion');
+    expect(content[CARD_PATH]).toContain('managed annotation');
+    expect(content[CARD_PATH]).toContain('<!-- kb:20260913-183000 -->\n回答中的讨论。');
+  });
+
+  it('maps a linked ZotFlow attachment to its generated source note', async () => {
+    content[CARD_PATH] = '---\nzotero-key: PARENT01\n---\n\n'
+      + '[PDF](obsidian://zotflow?type=open-attachment&libraryID=1&key=HKN2KF9N)';
+    const app = buildApp();
+
+    await expect(resolvePaperNoteTarget(app, 'zotero/HKN2KF9N.pdf')).resolves.toBe(CARD_PATH);
   });
 
   it('rejects an ambiguous bare name instead of writing the first match', async () => {

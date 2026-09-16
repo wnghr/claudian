@@ -84,6 +84,31 @@ it('collapses completed history above the answer and puts copy, fork, time below
   renderer.dispose();
 });
 
+it('offers a save to note action below a completed assistant answer', async () => {
+  const save = jest.fn().mockResolvedValue(undefined);
+  const settings = { mediaFolder: '', showMessageTimestamps: true };
+  const messagesEl = document.body.createDiv();
+  const renderer = new MessageRenderer(
+    { app: {}, settings } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl,
+    undefined,
+    undefined,
+    () => ProviderRegistry.getCapabilities('claude'),
+    save,
+  );
+
+  renderer.renderStoredMessage({
+    id: 'save-me', role: 'assistant', content: '讨论结论', timestamp: 1,
+    completedAt: 2, assistantMessageId: 'native-save',
+  });
+  const button = within(messagesEl).getByRole('button', { name: 'Save to note' });
+  fireEvent.click(button);
+  await Promise.resolve();
+  expect(save).toHaveBeenCalledWith('save-me', '讨论结论');
+  renderer.dispose();
+});
+
 it('keeps live output in place until completion, then preserves the same content elements', async () => {
   const { renderer, messagesEl } = setup();
   const msg: ChatMessage = { id: 'live', role: 'assistant', content: 'Done.', timestamp: 4,

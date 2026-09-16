@@ -2543,6 +2543,12 @@ export class ClaudianView extends ItemView {
       })
     );
     this.registerEvent(
+      this.plugin.app.workspace.on('active-leaf-change', () => {
+        this.tabManager?.getActiveTab()?.ui.linkedContentController
+          .handleActiveLeafChanged();
+      })
+    );
+    this.registerEvent(
       this.plugin.app.metadataCache.on('changed', (file) => {
         this.handleLinkedContentMetadataChanged(file);
       })

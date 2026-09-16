@@ -109,7 +109,7 @@ ClaudeExecutionStrategySink {
   private readonly pendingProviderStateDeletes = new Set<string>();
   private lastEncodedRequest: ClaudeEncodedExecutionRequest | null = null;
   private lastAllowedTools: ReadonlySet<string> | null = null;
-  private linkedPdfPath: string | null = null;
+  private linkedPaperPath: string | null = null;
   private readonly eventNormalizer = new ClaudeExecutionEventNormalizer();
   private nativeQuery: Query | null = null;
   private authoritativeContextWindow: {
@@ -148,7 +148,7 @@ ClaudeExecutionStrategySink {
       host,
       interactionPort: config.interactionPort,
       pluginManager: services.pluginManager,
-      getLinkedPdfPath: () => this.linkedPdfPath,
+      getLinkedPaperPath: () => this.linkedPaperPath,
       sessionInstanceId: this.sessionInstanceId,
       getTurnId: () => this.getInteractionTurnId(),
     });
@@ -697,10 +697,9 @@ ClaudeExecutionStrategySink {
     request: ProviderExecutionRequest,
   ): Promise<void> {
     try {
-      const linkedPath = request.context?.linkedContent?.path;
-      this.linkedPdfPath = linkedPath?.toLocaleLowerCase().endsWith('.pdf')
-        ? linkedPath
-        : null;
+      // A ZotFlow source note is the usual linked content, so the path is passed
+      // through as-is and the locator decides whether it names a readable paper.
+      this.linkedPaperPath = request.context?.linkedContent?.path?.trim() || null;
       const nativeResume = this.getNativeResume();
       active.nativeFork = nativeResume.fork === true;
       const replayConversationHistory = this.shouldReplayConversationHistory(

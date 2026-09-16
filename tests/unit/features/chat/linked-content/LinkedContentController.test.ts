@@ -140,6 +140,92 @@ describe('LinkedContentController', () => {
     });
   });
 
+  it('auto-links the vault PDF displayed by ZotFlow Local Reader', () => {
+    const pdf = createFile('论文/PDF/Current-paper-supplement.pdf');
+    const harness = createHarness([pdf]);
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        state: { file: pdf.path },
+        type: 'zotflow-local-zotero-reader-view',
+      }),
+    }));
+
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      mode: 'auto-draft',
+      path: '论文/PDF/Current-paper-supplement.pdf',
+    });
+  });
+
+  it('auto-links a vault PDF displayed by the native Obsidian PDF view', () => {
+    const pdf = createFile('Papers/Current-paper.pdf');
+    const harness = createHarness([pdf]);
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        state: { file: pdf.path },
+        type: 'pdf',
+      }),
+    }));
+
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      mode: 'auto-draft',
+      path: 'Papers/Current-paper.pdf',
+    });
+  });
+
+  it('auto-links the attachment displayed by the native ZotFlow reader', () => {
+    const harness = createHarness();
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        state: { itemKey: 'HKN2KF9N', libraryID: 1 },
+        type: 'zotflow-zotero-reader-view',
+      }),
+    }));
+
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      mode: 'auto-draft',
+      path: 'zotero/HKN2KF9N.pdf',
+    });
+  });
+
+  it('prefers the most recent ZotFlow reader over a stale active Markdown file', () => {
+    const markdown = createFile('Notes/Previous.md');
+    const harness = createHarness([markdown]);
+    harness.setActiveFile(markdown);
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        state: { itemKey: 'HKN2KF9N', libraryID: 1 },
+        type: 'zotflow-zotero-reader-view',
+      }),
+    }));
+
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot().path).toBe('zotero/HKN2KF9N.pdf');
+  });
+
+  it('auto-links a virtual Zotero attachment displayed by the native PDF view', () => {
+    const harness = createHarness();
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        state: { file: 'zotero/HKN2KF9N.pdf' },
+        type: 'pdf',
+      }),
+    }));
+
+    harness.controller.resetAutoDraft();
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      mode: 'auto-draft',
+      path: 'zotero/HKN2KF9N.pdf',
+    });
+  });
+
   it('waits for metadata before auto-linking when excluded tags are configured', () => {
     const markdown = createFile('Notes/Startup.md');
     const harness = createHarness([markdown]);

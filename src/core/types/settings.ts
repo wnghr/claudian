@@ -143,6 +143,13 @@ export interface ClaudianSettings {
   // Content settings
   excludedTags: string[];
   mediaFolder: string;
+  llmForZoteroCacheRoot?: string;
+  /**
+   * Zotero's data directory (the folder holding `zotero.sqlite`). Its `storage`
+   * subfolder is where attachments and their full-text caches live; empty means
+   * `%USERPROFILE%/Zotero`.
+   */
+  zoteroDataDirectory?: string;
   systemPrompt: string;
 
   // Environment
