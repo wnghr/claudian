@@ -99,6 +99,7 @@ export interface FeatureHost {
   getAgentSkillResourceGeneration(): number;
   notifyAgentSkillsChanged(): Promise<void>;
   notifyProviderChatOptionsChanged(providerId: ProviderId): void;
+  setZoteroSupportEnabled(enabled: boolean): Promise<void>;
   appendToNote(request: PaperNoteWriteRequest): Promise<PaperNoteWriteResult>;
 
   createConversation(options?: {

@@ -1,6 +1,30 @@
 import { PaperContentResolver } from '@/features/chat/linked-content/PaperContentResolver';
+import { createVaultPaperContentResolver } from '@/features/chat/linked-content/VaultPaperContentResolver';
 
 describe('PaperContentResolver', () => {
+  it('does not consult Zotero sources when the optional integration is disabled', async () => {
+    const app = {
+      vault: {
+        getAbstractFileByPath: jest.fn().mockReturnValue(null),
+        getFiles: jest.fn().mockReturnValue([]),
+        read: jest.fn(),
+        readBinary: jest.fn(),
+      },
+    };
+
+    const resolver = createVaultPaperContentResolver(app as never, {
+      enableZoteroSupport: false,
+      llmForZoteroCacheRoot: 'D:/Zotero/llm-for-zotero-mineru',
+      zoteroDataDirectory: 'D:/Zotero',
+    });
+
+    await expect(resolver.resolve('zotero/ABCD2345.pdf')).resolves.toMatchObject({
+      status: 'missing',
+    });
+    expect(app.vault.getAbstractFileByPath).toHaveBeenCalledWith('zotero/ABCD2345.pdf');
+    expect(app.vault.read).not.toHaveBeenCalled();
+  });
+
   it('returns the current MinerU cache only when the PDF hash and output are valid', async () => {
     const pdf = { path: '论文/PDF/Current-paper.pdf', extension: 'pdf' };
     const manifest = {

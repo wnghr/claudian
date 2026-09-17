@@ -143,6 +143,8 @@ export interface ClaudianSettings {
   // Content settings
   excludedTags: string[];
   mediaFolder: string;
+  /** Whether Claudian's optional Zotero/ZotFlow integration is active. */
+  enableZoteroSupport?: boolean;
   llmForZoteroCacheRoot?: string;
   /**
    * Zotero's data directory (the folder holding `zotero.sqlite`). Its `storage`

@@ -129,7 +129,9 @@ export function buildTabRuntimeControllers(
   );
   options.registerCleanup('tab message renderer', () => renderer.dispose());
   const paperContentResolver = createVaultPaperContentResolver(plugin.app, {
+    enableZoteroSupport: plugin.settings.enableZoteroSupport,
     llmForZoteroCacheRoot: plugin.settings.llmForZoteroCacheRoot,
+    zoteroDataDirectory: plugin.settings.zoteroDataDirectory,
   });
 
   const selectionController = new SelectionController(

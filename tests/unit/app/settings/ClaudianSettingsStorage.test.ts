@@ -20,6 +20,27 @@ function createAdapter(
 }
 
 describe('ClaudianSettingsStorage Linked content migration', () => {
+  it('preserves an explicitly disabled Zotero extension flag', async () => {
+    const adapter = createAdapter({ enableZoteroSupport: false });
+    const storage = new ClaudianSettingsStorage(adapter);
+
+    await expect(storage.load()).resolves.toMatchObject({
+      enableZoteroSupport: false,
+    });
+    expect(adapter.write).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(adapter.write.mock.calls[0][1])).toMatchObject({
+      enableZoteroSupport: false,
+    });
+  });
+
+  it('keeps Zotero support enabled for legacy settings without the flag', async () => {
+    const storage = new ClaudianSettingsStorage(createAdapter({}));
+
+    await expect(storage.load()).resolves.toMatchObject({
+      enableZoteroSupport: true,
+    });
+  });
+
   it('imports legacy organization and pinned paths before defaults and awaits canonical persistence', async () => {
     const adapter = createAdapter({
       sessionManagerOrganization: 'linked-note',

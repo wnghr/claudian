@@ -613,6 +613,20 @@ export class ClaudianSettingTab extends PluginSettingTab {
       });
 
     new Setting(container)
+      .setName('Zotero support')
+      .setDesc('Enable zotflow reader integration, Zotero attachment/full-text caches, and Zotero paper search.')
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.enableZoteroSupport !== false)
+          .onChange(async (value) => {
+            await this.plugin.setZoteroSupportEnabled(value);
+            new Notice(value
+              ? 'Zotero support enabled.'
+              : 'Zotero support disabled. Existing chats remain available.');
+          });
+      });
+
+    new Setting(container)
       .setName('LLM for Zotero MinerU cache')
       .setDesc('Leave blank to use ~/Zotero/llm-for-zotero-mineru. Claudian reads this cache for Zotero PDF files opened in Obsidian.')
       .addText((text) => {

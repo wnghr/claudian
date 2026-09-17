@@ -304,11 +304,16 @@ export default class ClaudianPlugin extends Plugin {
    * the caller names nothing we follow the ZotFlow reader.
    */
   async readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
+    if (!this.settings.enableZoteroSupport && !this.isVaultPaperRequest(request.sourcePath)) {
+      throw new Error('Zotero support is disabled. Enable it in Claudian settings to read Zotero papers.');
+    }
     const locator = this.getPaperLocator();
     const explicitTarget = request.sourcePath
       ? await locator.resolve(request.sourcePath)
       : null;
-    const activeTarget = locator.resolveActiveReader();
+    const activeTarget = this.settings.enableZoteroSupport
+      ? locator.resolveActiveReader()
+      : null;
     const target = request.preferActiveReader
       ? (activeTarget && (!explicitTarget || this.samePaperIdentity(activeTarget, explicitTarget))
         ? activeTarget
@@ -340,9 +345,12 @@ export default class ClaudianPlugin extends Plugin {
   private async getPaperReader(): Promise<PaperReader> {
     this.paperReader ??= new PaperReader(
       createVaultPaperContentResolver(this.app, {
+        enableZoteroSupport: this.settings.enableZoteroSupport,
         llmForZoteroCacheRoot: this.settings.llmForZoteroCacheRoot,
         zoteroDataDirectory: this.settings.zoteroDataDirectory,
-        zotFlowStoragePath: (await this.getZotFlowStoragePath()) ?? undefined,
+        ...(this.settings.enableZoteroSupport
+          ? { zotFlowStoragePath: (await this.getZotFlowStoragePath()) ?? undefined }
+          : {}),
       }),
       { resolveCurrentPage: sourcePath => this.resolveCurrentPage(sourcePath) },
     );
@@ -452,6 +460,28 @@ export default class ClaudianPlugin extends Plugin {
     return this.getPaperSearch().searchPapers(request);
   }
 
+  async setZoteroSupportEnabled(enabled: boolean): Promise<void> {
+    if (this.settings.enableZoteroSupport === enabled) return;
+    await this.mutateSettings(settings => {
+      settings.enableZoteroSupport = enabled;
+    });
+    this.paperReader = null;
+    this.paperLocator = null;
+    this.readingPosition = null;
+    this.zoteroFullText = null;
+    this.zoteroStorageRoot = undefined;
+    this.zotFlowStoragePath = undefined;
+    this.paperSearch = null;
+  }
+
+  private isVaultPaperRequest(sourcePath?: string): boolean {
+    const value = sourcePath?.trim();
+    if (!value) return false;
+    return value.toLocaleLowerCase().endsWith('.pdf')
+      && !value.toLocaleLowerCase().startsWith('zotero/')
+      && !value.toLocaleLowerCase().startsWith('obsidian://zotflow');
+  }
+
   appendToNote(request: PaperNoteWriteRequest): Promise<PaperNoteWriteResult> {
     this.paperNoteWriter ??= createVaultPaperNoteWriter({ app: this.app });
     return this.paperNoteWriter.appendToNote(request);
@@ -473,6 +503,7 @@ export default class ClaudianPlugin extends Plugin {
       embedding: this.createEmbeddingClient(),
       vectorStore: cachePath ? createFileEmbeddingVectorStore(cachePath) : null,
       externalDocuments: async () => {
+        if (!this.settings.enableZoteroSupport) return [];
         const [mineruDocuments, zoteroDocuments] = await Promise.all([
           mineruCache.listDocuments(),
           this.getZoteroFullTextCache().then(cache => cache?.listDocuments() ?? []),

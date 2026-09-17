@@ -161,6 +161,12 @@ function normalizeZoteroDataDirectory(value: unknown): string {
     : DEFAULT_CLAUDIAN_SETTINGS.zoteroDataDirectory ?? '';
 }
 
+function normalizeEnableZoteroSupport(value: unknown): boolean {
+  return typeof value === 'boolean'
+    ? value
+    : DEFAULT_CLAUDIAN_SETTINGS.enableZoteroSupport !== false;
+}
+
 function normalizeCollabEnabled(value: unknown): boolean {
   return typeof value === 'boolean'
     ? value
@@ -515,6 +521,7 @@ export class ClaudianSettingsStorage {
     const collabGitPath = normalizeCollabGitPath(stored.collabGitPath);
     const llmForZoteroCacheRoot = normalizeLlmForZoteroCacheRoot(stored.llmForZoteroCacheRoot);
     const zoteroDataDirectory = normalizeZoteroDataDirectory(stored.zoteroDataDirectory);
+    const enableZoteroSupport = normalizeEnableZoteroSupport(stored.enableZoteroSupport);
     const hasCanonicalPinnedPaths = Object.prototype.hasOwnProperty.call(
       stored,
       'pinnedLinkedContentPaths',
@@ -552,6 +559,7 @@ export class ClaudianSettingsStorage {
       collabGitPath,
       llmForZoteroCacheRoot,
       zoteroDataDirectory,
+      enableZoteroSupport,
       sessionManagerOrganization,
       pinnedLinkedContentPaths,
       lastSelectedChatModel,
@@ -605,6 +613,10 @@ export class ClaudianSettingsStorage {
       || (
         'collabGitPath' in stored
         && stored.collabGitPath !== collabGitPath
+      )
+      || (
+        'enableZoteroSupport' in stored
+        && stored.enableZoteroSupport !== enableZoteroSupport
       )
       || (
         'sessionManagerOrganization' in stored

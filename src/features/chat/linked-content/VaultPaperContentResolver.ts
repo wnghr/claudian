@@ -10,6 +10,8 @@ import { createZoteroPdfTextResolver } from './ZoteroPdfText';
 import { resolveZoteroStorageRoot, ZoteroStorageFullTextCache } from './ZoteroStorageFullText';
 
 export interface VaultPaperContentResolverOptions {
+  /** Enables external Zotero/ZotFlow content sources. */
+  readonly enableZoteroSupport?: boolean;
   readonly llmForZoteroCacheRoot?: string;
   /** Zotero's data directory; its `storage` subfolder holds the attachments. */
   readonly zoteroDataDirectory?: string;
@@ -52,7 +54,10 @@ export function createVaultPaperContentResolver(
     return file;
   };
 
-  const externalCacheRoot = resolveLlmForZoteroCacheRoot(options.llmForZoteroCacheRoot);
+  const zoteroEnabled = options.enableZoteroSupport !== false;
+  const externalCacheRoot = zoteroEnabled
+    ? resolveLlmForZoteroCacheRoot(options.llmForZoteroCacheRoot)
+    : null;
   const externalCache = externalCacheRoot
     ? new LlmForZoteroMineruCache({ cacheRoot: externalCacheRoot })
     : null;
@@ -61,9 +66,11 @@ export function createVaultPaperContentResolver(
   // `/storage` appended. ZotFlow's setting already points at that concrete
   // storage folder (it joins `<path>/<attachment-key>/<filename>` itself).
   const configuredDataDirectory = options.zoteroDataDirectory?.trim();
-  const storageRoot = configuredDataDirectory
-    ? resolveZoteroStorageRoot(configuredDataDirectory)
-    : options.zotFlowStoragePath?.trim() || resolveZoteroStorageRoot();
+  const storageRoot = zoteroEnabled
+    ? (configuredDataDirectory
+      ? resolveZoteroStorageRoot(configuredDataDirectory)
+      : options.zotFlowStoragePath?.trim() || resolveZoteroStorageRoot())
+    : null;
   // Both fallback tiers consult the same metadata/text cache. Apart from
   // avoiding duplicate file reads, this guarantees that a direct PDF fallback
   // and the plain-text tier observe the same attachment directory snapshot.
