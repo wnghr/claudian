@@ -389,6 +389,20 @@ describe('ClaudianView tab controls', () => {
     expect(handleActiveFileChanged).toHaveBeenLastCalledWith(null, true);
   });
 
+  it('refreshes the active Linked content owner when the workspace layout changes', () => {
+    const handleActiveLeafChanged = jest.fn();
+    const view = Object.create(ClaudianView.prototype) as any;
+    view.tabManager = {
+      getActiveTab: jest.fn().mockReturnValue({
+        ui: { linkedContentController: { handleActiveLeafChanged } },
+      }),
+    };
+
+    view.handleWorkspaceLayoutChanged();
+
+    expect(handleActiveLeafChanged).toHaveBeenCalledTimes(1);
+  });
+
   it('fans Vault path events to every tab Linked content owner', () => {
     const first = {
       handleCreated: jest.fn(),

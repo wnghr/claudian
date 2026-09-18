@@ -62,7 +62,46 @@ describe('PaperReader', () => {
       });
     expect(pageReader).toHaveBeenCalledWith(99);
     expect(pageImageReader).toHaveBeenCalledWith(99, 1.25);
-    expect(resolver.resolve).not.toHaveBeenCalled();
+    expect(resolver.resolve).toHaveBeenCalled();
+  });
+
+  it('uses a paged MinerU cache before ZotFlow Reader when it covers the request', async () => {
+    const { reader, resolver } = createReader([
+      '<!-- p.2 -->',
+      'MinerU page with LaTeX $\\alpha$',
+    ].join('\n'));
+    const pageReader = jest.fn().mockResolvedValue({
+      pageIndex: 1,
+      pageCount: 407,
+      blocks: [{ type: 'heading', level: 2, content: [{ text: 'Reader page' }] }],
+      pageData: null,
+    });
+
+    await expect(reader.read({ sourcePath: 'zotero/CACHEKEY.pdf', pages: '2' }, pageReader))
+      .resolves.toMatchObject({
+        content: '<!-- p.2 -->\nMinerU page with LaTeX $\\alpha$',
+        fidelity: 'mineru-md',
+        selection: 'p.2',
+      });
+    expect(resolver.resolve).toHaveBeenCalled();
+    expect(pageReader).not.toHaveBeenCalled();
+  });
+
+  it('falls back to ZotFlow Reader when the cache does not cover the full range', async () => {
+    const { reader } = createReader('<!-- p.2 -->\nOnly one cached page');
+    const pageReader = jest.fn().mockImplementation(async (pageIndex: number) => ({
+      pageIndex,
+      pageCount: 407,
+      blocks: [{ type: 'paragraph', content: [{ text: `Reader page ${pageIndex + 1}` }] }],
+      pageData: null,
+    }));
+
+    await expect(reader.read({ sourcePath: 'zotero/PARTIALKEY.pdf', pages: '1-2' }, pageReader))
+      .resolves.toMatchObject({
+        fidelity: 'zotflow-reader',
+        selection: 'p.1-p.2',
+      });
+    expect(pageReader).toHaveBeenCalledTimes(2);
   });
 
   it('returns only the requested page range from a paged cache', async () => {

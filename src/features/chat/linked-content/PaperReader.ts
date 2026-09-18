@@ -52,7 +52,12 @@ function parsePageRange(value: string): { start: number; end: number } {
   return { end, start };
 }
 
-function selectPages(content: string, pages: string, pageCount?: number): SelectedContent {
+function selectPages(
+  content: string,
+  pages: string,
+  pageCount?: number,
+  requireComplete = false,
+): SelectedContent {
   const range = parsePageRange(pages);
   if (pageCount !== undefined && range.start > pageCount) {
     throw new Error(
@@ -78,6 +83,9 @@ function selectPages(content: string, pages: string, pageCount?: number): Select
         ? `The cache has no content for pages ${pages}.`
         : `The cache has no content for pages ${pages}; it covers ${pageCount} pages.`,
     );
+  }
+  if (requireComplete && selected.length !== range.end - range.start + 1) {
+    throw new Error(`The cache has incomplete content for pages ${pages}.`);
   }
   return {
     content: selected.join('\n\n'),
@@ -172,6 +180,60 @@ export class PaperReader {
 
     const currentPage = (await this.options.resolveCurrentPage?.(request.sourcePath)) ?? undefined;
     const readerPages = this.resolvePagesSelector(request.pages, currentPage);
+
+    // A complete MinerU page cache preserves formulas and layout better than
+    // the live PDF text layer. Probe it first for page reads, then fall back to
+    // ZotFlow when the cache is missing or does not cover every requested page.
+    if (readerPages) {
+      try {
+        const cached = await this.resolver.resolve(request.sourcePath, {
+          maxChars: Number.MAX_SAFE_INTEGER,
+        });
+        if (cached.status === 'ready' && cached.content) {
+          const selected = selectPages(cached.content, readerPages, cached.pageCount, true);
+          const range = parsePageRange(readerPages);
+          const pageIndexes = Array.from({ length: range.end - range.start + 1 }, (_, offset) => (
+            range.start - 1 + offset
+          ));
+          const resolvedCurrentPage = cached.sourcePath === request.sourcePath
+            ? currentPage
+            : (await this.options.resolveCurrentPage?.(cached.sourcePath)) ?? currentPage;
+          const warnings = [...(cached.warnings ?? [])];
+          if (
+            resolvedCurrentPage
+            && cached.pageCount !== undefined
+            && resolvedCurrentPage.page > cached.pageCount
+          ) {
+            warnings.push(
+              `The reader is on page ${resolvedCurrentPage.page}, but the readable text stops at page ${cached.pageCount}.`,
+            );
+          }
+          const maxChars = clampMaxChars(request.maxChars);
+          const truncated = selected.content.length > maxChars;
+          const images = request.includeImages && pageImageReader
+            ? (await Promise.all(pageIndexes.map(index => pageImageReader(index, 1.25))))
+              .filter((image): image is NonNullable<Awaited<ReturnType<PageImageReader>>> => image !== null)
+              .map(image => ({ page: image.pageIndex + 1, width: image.width, height: image.height, dataUrl: image.dataUrl } satisfies PaperReadImage))
+            : [];
+          return {
+            ...(cached.cachePath ? { cachePath: cached.cachePath } : {}),
+            content: truncated ? selected.content.slice(0, maxChars) : selected.content,
+            fidelity: cached.fidelity ?? 'mineru-md',
+            ...(resolvedCurrentPage ? { currentPage: resolvedCurrentPage } : {}),
+            ...(cached.pageCount !== undefined ? { pageCount: cached.pageCount } : {}),
+            selection: selected.selection,
+            sourcePath: cached.sourcePath,
+            truncated,
+            ...(images.length > 0 ? { images } : {}),
+            warnings,
+          };
+        }
+      } catch {
+        // Missing or partial caches are expected for some attachments; use the
+        // reader below, which can fetch the requested pages directly.
+      }
+    }
+
     if (pageReader && readerPages) {
       const selected = await this.readReaderPages(readerPages, pageReader);
       if (selected) {

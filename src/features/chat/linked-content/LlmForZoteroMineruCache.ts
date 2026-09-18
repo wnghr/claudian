@@ -4,7 +4,6 @@ import path from 'node:path';
 import {
   buildCacheNavigationIndex,
   buildPageAnchoredMarkdown,
-  countPageAnchors,
 } from './PaperCachePackage';
 import type { PaperContentResult } from './PaperContentResolver';
 import { parseZoteroAttachmentReference } from './ZoteroAttachmentReference';
@@ -240,6 +239,8 @@ export class LlmForZoteroMineruCache {
         const manifest = await this.readManifest(matchingEntry.cacheDirectory);
         const content = buildPageAnchoredMarkdown(rawMarkdown, contentList);
         const navigation = buildCacheNavigationIndex(content, contentList);
+        const manifestPages = optionalPageCount(manifest?.totalPages) ?? 0;
+        const pageCount = Math.max(manifestPages, navigation.totalPages ?? 0);
         const cachePath = `llm-for-zotero-mineru/${matchingEntry.source.directory}/${FULL_MARKDOWN_FILE}`;
         return {
           status: 'ready',
@@ -248,7 +249,7 @@ export class LlmForZoteroMineruCache {
           content,
           complete: Boolean(contentList && manifest),
           fidelity: 'mineru-md',
-          ...(countPageAnchors(content) > 0 ? { pageCount: countPageAnchors(content) } : {}),
+          ...(pageCount > 0 ? { pageCount } : {}),
           manifest: {
             ...manifest,
             ...navigation,

@@ -1676,6 +1676,11 @@ export class ClaudianView extends ItemView {
       .handleActiveFileChanged(file, true);
   }
 
+  handleWorkspaceLayoutChanged(): void {
+    this.tabManager?.getActiveTab()?.ui.linkedContentController
+      .handleActiveLeafChanged();
+  }
+
   private handleLinkedContentMetadataChanged(file: TFile | null): void {
     this.tabManager?.getActiveTab()?.ui.linkedContentController
       .handleActiveFileMetadataChanged(file);
@@ -2544,8 +2549,12 @@ export class ClaudianView extends ItemView {
     );
     this.registerEvent(
       this.plugin.app.workspace.on('active-leaf-change', () => {
-        this.tabManager?.getActiveTab()?.ui.linkedContentController
-          .handleActiveLeafChanged();
+        this.handleWorkspaceLayoutChanged();
+      })
+    );
+    this.registerEvent(
+      this.plugin.app.workspace.on('layout-change', () => {
+        this.handleWorkspaceLayoutChanged();
       })
     );
     this.registerEvent(

@@ -102,4 +102,31 @@ describe('LlmForZoteroMineruCache', () => {
     expect(fullTextPath).toBeDefined();
     expect(reads.get(fullTextPath as string)).toBe(1);
   });
+
+  it('keeps the real page number when a merged cache crosses page 100', async () => {
+    const cache = new LlmForZoteroMineruCache({
+      cacheRoot: 'C:/Users/test/Zotero/llm-for-zotero-mineru',
+      listDirectories: async () => ['190'],
+      readText: async filePath => {
+        if (filePath.endsWith('_llm_source.json')) {
+          return JSON.stringify({ attachmentKey: 'LONGPAPR' });
+        }
+        if (filePath.endsWith('content_list.json')) {
+          return JSON.stringify([
+            { page_idx: 0, text: 'First chunk' },
+            { page_idx: 100, text: 'Second chunk' },
+          ]);
+        }
+        if (filePath.endsWith('full.md')) return 'First chunk\n\nSecond chunk';
+        if (filePath.endsWith('manifest.json')) return JSON.stringify({ totalPages: 101 });
+        throw new Error(`Unexpected path: ${filePath}`);
+      },
+    });
+
+    await expect(cache.resolve('zotero/LONGPAPR.pdf')).resolves.toMatchObject({
+      status: 'ready',
+      pageCount: 101,
+      content: expect.stringContaining('<!-- p.101 -->'),
+    });
+  });
 });
