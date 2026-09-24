@@ -83,6 +83,40 @@ describe('BrowserSelectionController', () => {
     expect(contextTray.setItems.mock.calls[0][1][0]).not.toHaveProperty('title');
   });
 
+  it('captures the exact ZotFlow attachment and selected PDF page', async () => {
+    const page = containerEl.createDiv();
+    page.setAttribute('data-page-number', '7');
+    const selectionAnchor = page.createSpan({ text: 'selected paper text' });
+    getSelectionSpy.mockImplementation(() => ({
+      toString: () => selectionText,
+      anchorNode: selectionAnchor,
+      focusNode: selectionAnchor,
+    } as unknown as Selection));
+    const view = {
+      getViewType: () => 'zotflow-zotero-reader-view',
+      getDisplayText: () => 'Main paper PDF',
+      getState: () => ({ libraryID: 1, itemKey: 'PAPER123' }),
+      containerEl,
+    };
+    app.workspace.getMostRecentLeaf.mockReturnValue({ view });
+
+    controller.start();
+    jest.advanceTimersByTime(250);
+    await flushMicrotasks();
+
+    expect(controller.getContext()).toMatchObject({
+      source: 'pdf:zotero/PAPER123.pdf',
+      selectedText: selectionText,
+      pdfPath: 'zotero/PAPER123.pdf',
+      page: 7,
+      libraryID: 1,
+    });
+    expect(controller.getContext()?.url).toContain('key=PAPER123');
+    expect(contextTray.setItems).toHaveBeenLastCalledWith('browser-selection', [
+      expect.objectContaining({ label: 'PDF · p.7 · 1 line selected' }),
+    ]);
+  });
+
   it('shows line-based indicator text for multi-line browser selection', async () => {
     selectionText = 'line 1\nline 2';
     controller.start();

@@ -5,6 +5,13 @@ import {
 } from '../../../src/utils/browser';
 
 describe('formatBrowserContext', () => {
+  it('includes the captured PDF identity and page in the prompt', () => {
+    expect(formatBrowserContext({
+      source: 'pdf:zotero/PAPER123.pdf', selectedText: 'equation',
+      pdfPath: 'zotero/PAPER123.pdf', page: 7,
+    })).toContain('pdf_path="zotero/PAPER123.pdf" page="7"');
+  });
+
   it('formats browser selection as XML', () => {
     const context: BrowserSelectionContext = {
       source: 'surfing-view',

@@ -5,6 +5,11 @@ export interface BrowserSelectionContext {
   selectedText: string;
   title?: string;
   url?: string;
+  /** Exact PDF attachment or vault file captured when the selection was made. */
+  pdfPath?: string;
+  /** One-based PDF page, when the selection's page is available. */
+  page?: number;
+  libraryID?: number;
 }
 
 function buildAttributeList(context: BrowserSelectionContext): string {
@@ -18,6 +23,12 @@ function buildAttributeList(context: BrowserSelectionContext): string {
 
   if (context.url?.trim()) {
     attrs.push(`url="${escapePromptXmlAttribute(context.url.trim())}"`);
+  }
+  if (context.pdfPath?.trim()) {
+    attrs.push(`pdf_path="${escapePromptXmlAttribute(context.pdfPath.trim())}"`);
+  }
+  if (context.page && Number.isSafeInteger(context.page) && context.page > 0) {
+    attrs.push(`page="${context.page}"`);
   }
 
   return attrs.join(' ');

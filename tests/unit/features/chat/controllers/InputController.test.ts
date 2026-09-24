@@ -219,6 +219,24 @@ function createFixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe('composer wikilinks', () => {
+  it('keeps a PDF question in the composer when another attachment is bound', async () => {
+    const fixture = createFixture();
+    fixture.linkedContentController.getSnapshot.mockReturnValue({
+      mode: 'locked', path: 'zotero/MAIN.pdf',
+    });
+    (fixture.deps.browserSelectionController?.getContext as jest.Mock).mockReturnValue({
+      source: 'pdf:zotero/SUPP.pdf', selectedText: 'supplement',
+      pdfPath: 'zotero/SUPP.pdf', page: 2,
+    });
+    fixture.input.value = '解释这段';
+
+    await fixture.controller.sendMessage();
+
+    expect(fixture.input.value).toBe('解释这段');
+    expect(fixture.coordinator.execute).not.toHaveBeenCalled();
+    expect(Notice).toHaveBeenCalledWith(expect.stringContaining('附件不同'));
+  });
+
   it('sends exact aliased wikilinks and retains them in displayed messages', async () => {
     const fixture = createFixture();
     const content = 'Compare [[DEMO.md|DEMO]] and [[- Bases/DEMO.md|DEMO]]';

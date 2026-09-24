@@ -29,10 +29,13 @@ export function deriveLinkedContentPresentation(
 ): LinkedContentPresentation {
   const attachmentKey = parseZoteroAttachmentReference(path);
   if (attachmentKey) {
+    const readerLeaf = app.workspace.getLeavesOfType('zotflow-zotero-reader-view')
+      .find(leaf => leaf.getViewState().state?.itemKey === attachmentKey);
+    const readerTitle = readerLeaf?.view.getDisplayText?.().trim();
     return {
       path,
       kind: 'file',
-      label: `Zotero ${attachmentKey}`,
+      label: readerTitle ? `${readerTitle} · ${attachmentKey}` : `Zotero ${attachmentKey}`,
       icon: 'book-open',
       missing: false,
       target: null,

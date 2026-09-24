@@ -54,6 +54,9 @@ export interface ExecutionInputBrowserSnapshot {
   selectedText: string;
   title?: string;
   url?: string;
+  pdfPath?: string;
+  page?: number;
+  libraryID?: number;
 }
 
 export interface ExecutionInputCanvasSnapshot {

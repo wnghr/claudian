@@ -146,6 +146,7 @@ interface PendingProviderUserMessage {
   persistedContent?: string;
   linkedContentPath?: string;
   images?: ChatMessage['images'];
+  browserSelection?: BrowserSelectionContext | null;
 }
 
 type PendingSteerProviderDisposition =
@@ -329,6 +330,20 @@ export class InputController {
       return;
     }
 
+    const selectedPdf = options?.turnRequestOverride?.browserSelection
+      ?? options?.browserContextOverride
+      ?? browserSelectionController?.getContext();
+    const boundPath = this.deps.getLinkedContentController().getSnapshot().path;
+    if (
+      selectedPdf?.pdfPath?.startsWith('zotero/')
+      && boundPath?.startsWith('zotero/')
+      && selectedPdf.pdfPath !== boundPath
+    ) {
+      new Notice('选中的 PDF 与当前对话绑定的附件不同。请回到原附件，或新建对话后再提问。');
+      this.reportDeferredReviewableSettlement();
+      return;
+    }
+
     // If agent is working, queue the message instead of dropping it
     if (state.isStreaming) {
       const images = hasImages
@@ -419,6 +434,13 @@ export class InputController {
       displayContent,                // Original user input (for UI display)
       timestamp: Date.now(),
       images: imagesForMessage,
+      ...(turnRequest.browserSelection?.pdfPath ? {
+        executionInput: {
+          schemaVersion: 1,
+          canonicalText: turnRequest.text,
+          context: { browserSelection: turnRequest.browserSelection },
+        },
+      } : {}),
     };
     state.addMessage(userMsg);
     state.hasPendingConversationSave = true;
@@ -460,6 +482,7 @@ export class InputController {
       displayContent,
       linkedContentPath: admittedTurnRequest.linkedContentPath,
       images: imagesForMessage,
+      browserSelection: admittedTurnRequest.browserSelection,
     }];
     this.sawInitialProviderUserMessage = false;
     this.awaitingProviderAssistantStart = true;
@@ -1302,6 +1325,7 @@ export class InputController {
           ? undefined
           : request.linkedContentPath,
         images: request.images,
+        browserSelection: request.browserSelection,
       },
       inputRecordId: submission.inputRecordId,
       message: queuedMessage,
@@ -1434,6 +1458,13 @@ export class InputController {
         timestamp: Date.now(),
         linkedContentPath: expected?.linkedContentPath,
         images,
+        ...(expected?.browserSelection?.pdfPath ? {
+          executionInput: {
+            schemaVersion: 1,
+            canonicalText: persistedContent,
+            context: { browserSelection: expected.browserSelection },
+          },
+        } : {}),
         ...(chunk.itemId ? { userMessageId: chunk.itemId } : {}),
       };
       this.deps.state.addMessage(userMessage);

@@ -114,17 +114,28 @@ export function buildTabRuntimeControllers(
         )
       : undefined,
     () => getTabCapabilities(runtimeRef.requirePublished(), plugin),
-    async (_messageId, markdown) => {
+    async (messageId, markdown) => {
       const linkedPath = ui.linkedContentController.getSnapshot().path;
       if (!linkedPath) throw new Error('当前没有关联的 ZotFlow 论文笔记。');
       const target = await resolvePaperNoteTarget(plugin.app, linkedPath);
       if (!target) throw new Error('找不到当前论文的 ZotFlow 主笔记，请先打开或导入该论文笔记。');
+      const messageIndex = state.messages.findIndex(message => message.id === messageId);
+      const userMessage = messageIndex < 0 ? undefined : state.messages.slice(0, messageIndex)
+        .reverse().find(message => message.role === 'user' && !message.isRebuiltContext);
+      const source = userMessage?.executionInput?.context?.browserSelection;
+      const pdfPath = source?.pdfPath ?? (linkedPath.startsWith('zotero/') ? linkedPath : null);
+      const sourceLine = pdfPath
+        ? `> 来源附件：\`${pdfPath}\`${source?.page ? ` · PDF 第 ${source.page} 页` : ''}`
+          + (source?.url ? ` · [回到原页](${source.url})` : '')
+          + '\n\n'
+        : '';
       await plugin.appendToNote({
         target,
-        content: markdown,
+        content: `${sourceLine}${markdown}`,
         persistRegionId: CLAUDIAN_DISCUSSION_PERSIST_REGION_ID,
       });
       new Notice(`已保存到论文笔记：${target}`);
+      return target;
     },
   );
   options.registerCleanup('tab message renderer', () => renderer.dispose());

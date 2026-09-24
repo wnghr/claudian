@@ -22,6 +22,7 @@ import type {
 } from '../../../core/types';
 import { t } from '../../../i18n/i18n';
 import { enhanceRenderedCodeFence } from '../../../shared/components/CopyableCodeFence';
+import type { BrowserSelectionContext } from '../../../utils/browser';
 import { extractUserDisplayContent } from '../../../utils/context';
 import { processFileLinks, registerFileLinkHandler } from '../../../utils/fileLink';
 import { replaceImageEmbedsWithHtml } from '../../../utils/imageEmbed';
@@ -32,6 +33,7 @@ import {
   normalizeLatexMathDelimiters,
 } from '../../../utils/markdownMath';
 import type { FeatureHost } from '../../FeatureHost';
+import { openPdfSelectionSource } from '../linked-content/PdfSelectionNavigation';
 import { findRewindContext } from '../rewind';
 import { ImagePreviewModal } from '../ui/ImagePreviewModal';
 import { formatConversationDirectoryTitle } from '../utils/conversationDirectoryTitle';
@@ -75,7 +77,7 @@ export class MessageRenderer {
   private rewindCallback?: (messageId: string, mode?: ChatRewindMode) => Promise<void>;
   private getCapabilities: () => ProviderCapabilities;
   private forkCallback?: (messageId: string) => Promise<void>;
-  private saveToNoteCallback?: (messageId: string, markdown: string) => Promise<void>;
+  private saveToNoteCallback?: (messageId: string, markdown: string) => Promise<string | void>;
   private liveMessageEls = new Map<string, HTMLElement>();
   private removeFileLinkHandler: () => void;
   private readonly imagePreviewModal = new ImagePreviewModal();
@@ -88,7 +90,7 @@ export class MessageRenderer {
     rewindCallback?: (messageId: string, mode?: ChatRewindMode) => Promise<void>,
     forkCallback?: (messageId: string) => Promise<void>,
     getCapabilities?: () => ProviderCapabilities,
-    saveToNoteCallback?: (messageId: string, markdown: string) => Promise<void>,
+    saveToNoteCallback?: (messageId: string, markdown: string) => Promise<string | void>,
   ) {
     this.app = plugin.app;
     this.plugin = plugin;
@@ -454,6 +456,11 @@ export class MessageRenderer {
     if (this.saveToNoteCallback && copyText.trim()) {
       this.addSaveToNoteButton(toolbar, msg.id, copyText);
     }
+    const messageIndex = messages.indexOf(msg);
+    const precedingUser = messageIndex < 0 ? undefined : messages.slice(0, messageIndex)
+      .reverse().find(message => message.role === 'user' && !message.isRebuiltContext);
+    const pdfSource = precedingUser?.executionInput?.context?.browserSelection;
+    if (pdfSource?.pdfPath) this.addPdfSourceButton(toolbar, pdfSource);
     this.appendMessageTimestamp(msgEl, msg.role === 'user' ? msg.timestamp : msg.completedAt);
   }
 
@@ -1044,6 +1051,7 @@ export class MessageRenderer {
   }
 
   private addSaveToNoteButton(toolbar: HTMLElement, messageId: string, markdown: string): void {
+    let savedTarget: string | null = null;
     const btn = toolbar.createEl('button', {
       cls: 'claudian-message-save-note-btn',
       attr: { type: 'button', 'aria-label': 'Save to note' },
@@ -1053,13 +1061,39 @@ export class MessageRenderer {
       e.stopPropagation();
       runRendererAction(async () => {
         try {
-          await this.saveToNoteCallback?.(messageId, markdown);
+          if (savedTarget) {
+            await this.app.workspace.openLinkText(savedTarget, '', 'tab');
+            return;
+          }
+          savedTarget = await this.saveToNoteCallback?.(messageId, markdown) ?? null;
           btn.empty();
           setIcon(btn, 'check');
-          btn.setAttribute('aria-label', 'Saved to note');
+          btn.setAttribute('aria-label', savedTarget ? '打开已保存笔记' : 'Saved to note');
+          if (savedTarget) btn.setAttribute('title', savedTarget);
           btn.classList.add('saved');
         } catch (err) {
           new Notice(`Failed to save to note: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      });
+    });
+  }
+
+  private addPdfSourceButton(toolbar: HTMLElement, context: BrowserSelectionContext): void {
+    const label = context.page ? `回到 PDF 第 ${context.page} 页` : '回到引用 PDF';
+    const btn = toolbar.createEl('button', {
+      cls: 'claudian-message-pdf-source-btn',
+      attr: { type: 'button', 'aria-label': label, title: context.pdfPath ?? label },
+    });
+    setIcon(btn, 'file-search');
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      runRendererAction(async () => {
+        try {
+          if (!await openPdfSelectionSource(this.app, context)) {
+            new Notice('请先在阅读器中打开该附件，再返回来源。');
+          }
+        } catch (error) {
+          new Notice(`无法返回 PDF：${error instanceof Error ? error.message : String(error)}`);
         }
       });
     });

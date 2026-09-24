@@ -1,6 +1,8 @@
 import type { App, ItemView } from 'obsidian';
+import { Notice } from 'obsidian';
 
 import type { BrowserSelectionContext } from '../../../utils/browser';
+import { openPdfSelectionSource } from '../linked-content/PdfSelectionNavigation';
 import type { ComposerContextTray } from '../ui/ComposerContextTray';
 
 const BROWSER_SELECTION_POLL_INTERVAL = 250;
@@ -79,8 +81,9 @@ export class BrowserSelectionController {
   private getActiveBrowserView(): { view: ItemView; viewType: string; containerEl: HTMLElement } | null {
     const activeLeaf = this.app.workspace.getMostRecentLeaf?.();
     const activeView = activeLeaf?.view as ItemView | undefined;
+    if (!activeView) return null;
     const containerEl = (activeView as unknown as { containerEl?: HTMLElement }).containerEl;
-    if (!activeView || !containerEl) return null;
+    if (!containerEl) return null;
 
     const viewType = activeView.getViewType?.() ?? '';
     if (!this.isBrowserLikeView(viewType, containerEl)) return null;
@@ -91,7 +94,10 @@ export class BrowserSelectionController {
   private isBrowserLikeView(viewType: string, containerEl: HTMLElement): boolean {
     const normalized = viewType.toLowerCase();
     if (
-      normalized.includes('surfing')
+      normalized === 'pdf'
+      || normalized === 'zotflow-zotero-reader-view'
+      || normalized === 'zotflow-local-zotero-reader-view'
+      || normalized.includes('surfing')
       || normalized.includes('browser')
       || normalized.includes('webview')
     ) {
@@ -181,6 +187,24 @@ export class BrowserSelectionController {
     selectedText: string
   ): BrowserSelectionContext {
     const title = this.extractViewTitle(view);
+    const pdf = this.pdfIdentity(view, viewType);
+    if (pdf) {
+      const page = this.selectedPdfPage(containerEl);
+      const navigation = page ? { position: { pageIndex: page - 1 } } : undefined;
+      const url = pdf.attachmentKey && pdf.libraryID !== undefined
+        ? `obsidian://zotflow?type=open-attachment&libraryID=${pdf.libraryID}&key=${pdf.attachmentKey}`
+          + (navigation ? `&navigation=${encodeURIComponent(JSON.stringify(navigation))}` : '')
+        : undefined;
+      return {
+        source: `pdf:${pdf.path}`,
+        selectedText,
+        title,
+        pdfPath: pdf.path,
+        ...(page ? { page } : {}),
+        ...(pdf.libraryID !== undefined ? { libraryID: pdf.libraryID } : {}),
+        ...(url ? { url } : {}),
+      };
+    }
     const url = this.extractViewUrl(view, containerEl);
     const source = url ? `browser:${url}` : `browser:${viewType || 'unknown'}`;
 
@@ -190,6 +214,50 @@ export class BrowserSelectionController {
       title,
       url,
     };
+  }
+
+  private pdfIdentity(view: ItemView, viewType: string): {
+    path: string;
+    attachmentKey?: string;
+    libraryID?: number;
+  } | null {
+    if (!['pdf', 'zotflow-zotero-reader-view', 'zotflow-local-zotero-reader-view'].includes(viewType)) {
+      return null;
+    }
+    const state = view.getState?.() as Record<string, unknown> | undefined;
+    const itemKey = typeof state?.itemKey === 'string' ? state.itemKey.trim() : '';
+    const libraryID = typeof state?.libraryID === 'number' && Number.isFinite(state.libraryID)
+      ? state.libraryID : undefined;
+    if (itemKey) return { path: `zotero/${itemKey}.pdf`, attachmentKey: itemKey, libraryID };
+    const file = typeof state?.file === 'string' ? state.file.trim() : '';
+    return file ? { path: file, libraryID } : null;
+  }
+
+  private selectedPdfPage(containerEl: HTMLElement): number | null {
+    const documents: Document[] = [containerEl.ownerDocument];
+    for (const iframe of Array.from(containerEl.querySelectorAll('iframe'))) {
+      try {
+        if (iframe.contentDocument) documents.push(iframe.contentDocument);
+      } catch {
+        // Cross-origin frames cannot expose a selection or its page.
+      }
+    }
+    for (const doc of documents) {
+      const selection = doc.getSelection();
+      if (!selection?.toString().trim()) continue;
+      const anchor = selection.anchorNode;
+      if (!anchor || (doc === containerEl.ownerDocument && !containerEl.contains(anchor))) continue;
+      const element = anchor.nodeType === 1 ? anchor as Element : anchor.parentElement;
+      const pageEl = element?.closest('[data-page-number], [data-page-index]');
+      if (!pageEl) continue;
+      const pageNumberAttr = pageEl.getAttribute('data-page-number');
+      const pageNumber = pageNumberAttr === null ? null : Number(pageNumberAttr);
+      if (pageNumber !== null && Number.isSafeInteger(pageNumber) && pageNumber > 0) return pageNumber;
+      const pageIndexAttr = pageEl.getAttribute('data-page-index');
+      const pageIndex = pageIndexAttr === null ? null : Number(pageIndexAttr);
+      if (pageIndex !== null && Number.isSafeInteger(pageIndex) && pageIndex >= 0) return pageIndex + 1;
+    }
+    return null;
   }
 
   private extractViewTitle(view: ItemView): string | undefined {
@@ -232,7 +300,9 @@ export class BrowserSelectionController {
     return left.source === right.source
       && left.selectedText === right.selectedText
       && left.title === right.title
-      && left.url === right.url;
+      && left.url === right.url
+      && left.pdfPath === right.pdfPath
+      && left.page === right.page;
   }
 
   private clearWhenInputIsNotFocused(): void {
@@ -248,13 +318,25 @@ export class BrowserSelectionController {
     if (this.storedSelection) {
       const lineCount = this.storedSelection.selectedText.split(/\r?\n/).length;
       const lineLabel = lineCount === 1 ? 'line' : 'lines';
-      const label = `${lineCount} ${lineLabel} selected`;
+      const label = this.storedSelection.pdfPath
+        ? `PDF${this.storedSelection.page ? ` · p.${this.storedSelection.page}` : ''} · ${lineCount} ${lineLabel} selected`
+        : `${lineCount} ${lineLabel} selected`;
       this.contextTray.setItems('browser-selection', [{
         id: 'browser-selection',
         kind: 'selection',
         label,
-        icon: 'globe',
+        icon: this.storedSelection.pdfPath ? 'file-text' : 'globe',
         ariaLabel: label,
+        ...(this.storedSelection.pdfPath ? {
+          title: this.storedSelection.pdfPath,
+          onActivate: () => {
+            const context = this.storedSelection;
+            if (!context) return;
+            void openPdfSelectionSource(this.app, context).then(opened => {
+              if (!opened) new Notice('请先在阅读器中打开该附件，再点击来源。');
+            }).catch(error => new Notice(`无法打开 PDF 来源：${String(error)}`));
+          },
+        } : {}),
         onRemove: () => {
           this.clear();
           this.onUserSelectionChanged?.();

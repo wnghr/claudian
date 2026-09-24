@@ -109,6 +109,67 @@ it('offers a save to note action below a completed assistant answer', async () =
   renderer.dispose();
 });
 
+it('opens the saved note on a second click without saving it twice', async () => {
+  const save = jest.fn().mockResolvedValue('科研笔记/Paper.md');
+  const openLinkText = jest.fn().mockResolvedValue(undefined);
+  const messagesEl = document.body.createDiv();
+  const renderer = new MessageRenderer(
+    { app: { workspace: { openLinkText } }, settings: { mediaFolder: '' } } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined,
+    () => ProviderRegistry.getCapabilities('claude'), save,
+  );
+  renderer.renderStoredMessage({
+    id: 'saved-answer', role: 'assistant', content: '结论', timestamp: 1, completedAt: 2,
+  });
+  const button = within(messagesEl).getByRole('button', { name: 'Save to note' });
+  fireEvent.click(button);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(button.getAttribute('aria-label')).toBe('打开已保存笔记');
+  fireEvent.click(button);
+  await Promise.resolve();
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(openLinkText).toHaveBeenCalledWith('科研笔记/Paper.md', '', 'tab');
+  renderer.dispose();
+});
+
+it('returns from a completed answer to its captured PDF attachment and page', async () => {
+  const readerNavigate = jest.fn();
+  const leaf = {
+    getViewState: () => ({ state: { itemKey: 'PAPER123' } }),
+    view: { readerNavigate },
+  };
+  const revealLeaf = jest.fn().mockResolvedValue(undefined);
+  const messagesEl = document.body.createDiv();
+  const renderer = new MessageRenderer(
+    { app: { workspace: { getLeavesOfType: () => [leaf], revealLeaf } }, settings: { mediaFolder: '' } } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined,
+    () => ProviderRegistry.getCapabilities('claude'),
+  );
+  const user: ChatMessage = {
+    id: 'pdf-question', role: 'user', content: '解释这段', timestamp: 1,
+    executionInput: {
+      schemaVersion: 1, canonicalText: '解释这段',
+      context: { browserSelection: {
+        source: 'pdf:zotero/PAPER123.pdf', selectedText: '原文',
+        pdfPath: 'zotero/PAPER123.pdf', page: 7, libraryID: 1,
+      } },
+    },
+  };
+  const answer: ChatMessage = {
+    id: 'pdf-answer', role: 'assistant', content: '解释', timestamp: 2, completedAt: 3,
+  };
+  renderer.renderStoredMessage(user, [user, answer], 0);
+  renderer.renderStoredMessage(answer, [user, answer], 1);
+  fireEvent.click(within(messagesEl).getByRole('button', { name: '回到 PDF 第 7 页' }));
+  await Promise.resolve();
+  expect(revealLeaf).toHaveBeenCalledWith(leaf);
+  expect(readerNavigate).toHaveBeenCalledWith({ position: { pageIndex: 6 } });
+  renderer.dispose();
+});
+
 it('keeps live output in place until completion, then preserves the same content elements', async () => {
   const { renderer, messagesEl } = setup();
   const msg: ChatMessage = { id: 'live', role: 'assistant', content: 'Done.', timestamp: 4,

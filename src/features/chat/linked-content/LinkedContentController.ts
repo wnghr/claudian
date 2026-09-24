@@ -288,7 +288,9 @@ export class LinkedContentController {
       const attachmentKey = this.path.slice('zotero/'.length, -'.pdf'.length);
       const leaf = this.app.workspace.getLeavesOfType(LEGACY_READER_VIEW_TYPE)
         .find(candidate => candidate.getViewState().state?.itemKey === attachmentKey);
-      if (leaf) await revealWorkspaceLeaf(this.app.workspace, leaf);
+      const nativeLeaf = this.app.workspace.getLeavesOfType(NATIVE_PDF_VIEW_TYPE)
+        .find(candidate => candidate.getViewState().state?.file === this.path);
+      if (leaf ?? nativeLeaf) await revealWorkspaceLeaf(this.app.workspace, (leaf ?? nativeLeaf)!);
       else new Notice('Open this Zotero attachment in the reader to reveal it.');
       return;
     }
