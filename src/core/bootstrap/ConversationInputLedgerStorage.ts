@@ -260,7 +260,7 @@ function isImageAttachment(value: unknown): value is ImageAttachment {
     && typeof value.data === 'string'
     && typeof value.size === 'number'
     && Number.isFinite(value.size)
-    && ['file', 'paste', 'drop'].includes(String(value.source))
+    && ['file', 'paste', 'drop', 'tool'].includes(String(value.source))
   );
 }
 

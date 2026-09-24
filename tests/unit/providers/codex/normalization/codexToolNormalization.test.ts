@@ -367,6 +367,18 @@ describe('Codex MCP normalization helpers', () => {
     });
   });
 
+  it('preserves inline MCP image results as image attachments', () => {
+    expect(normalizeCodexMcpToolState(
+      'completed',
+      { content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }] },
+      undefined,
+      'call_mcp_1',
+    )).toMatchObject({
+      status: 'completed',
+      images: [{ id: 'call_mcp_1-image-0', mediaType: 'image/png', data: 'aGVsbG8=', source: 'tool' }],
+    });
+  });
+
   it('normalizes MCP failed state with error text', () => {
     expect(normalizeCodexMcpToolState(
       'failed',

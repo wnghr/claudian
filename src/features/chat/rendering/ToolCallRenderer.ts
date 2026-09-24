@@ -23,7 +23,7 @@ import {
   TOOL_WRITE,
   TOOL_WRITE_STDIN,
 } from '../../../core/tools/toolNames';
-import type { AskUserQuestionItem, AskUserQuestionOption, ToolCallInfo } from '../../../core/types';
+import type { AskUserQuestionItem, AskUserQuestionOption, ImageAttachment, ToolCallInfo } from '../../../core/types';
 import type { DiffStats } from '../../../core/types/diff';
 import { appendMcpIcon } from '../../../shared/icons';
 import { parseApplyPatchDiffs, parseFileUpdateChangeDiffs } from '../../../utils/diff';
@@ -965,6 +965,23 @@ function contentFallback(container: HTMLElement, text: string): void {
   resultText.setText(text);
 }
 
+function renderToolImages(container: HTMLElement, images?: ImageAttachment[]): void {
+  if (!images || images.length === 0) return;
+  const imagesEl = container.createDiv({ cls: 'claudian-message-images claudian-tool-result-images' });
+  for (const image of images) {
+    const wrapper = imagesEl.createEl('button', {
+      cls: 'claudian-message-image',
+      attr: { type: 'button', 'aria-label': `Preview ${image.name}` },
+    });
+    wrapper.createEl('img', {
+      attr: {
+        alt: image.name,
+        src: `data:${image.mediaType};base64,${image.data}`,
+      },
+    });
+  }
+}
+
 function renderBashContent(
   container: HTMLElement,
   input: Record<string, unknown>,
@@ -1018,6 +1035,7 @@ function renderToolContent(
   toolCall: ToolCallInfo,
   initialText?: string
 ): void {
+  renderToolImages(content, toolCall.images);
   if (toolCall.name === TOOL_TODO_WRITE) {
     content.addClass('claudian-tool-content-todo');
     renderTodoWriteResult(content, toolCall.input);
@@ -1116,6 +1134,7 @@ export function updateToolCallResult(
   const content = toolEl.querySelector('.claudian-tool-content') as HTMLElement;
   if (content) {
     content.empty();
+    renderToolImages(content, toolCall.images);
     renderExpandedContent(content, toolCall.name, toolCall.result, toolCall.input);
   }
 }

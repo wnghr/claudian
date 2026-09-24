@@ -461,6 +461,41 @@ describe('transformSDKMessage', () => {
       ]);
     });
 
+    it('preserves inline MCP images from array-based tool_use_result content', () => {
+      const toolUseResult = [
+        { type: 'text', text: 'Out[1]= ' },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        },
+      ];
+      const message = msg({
+        type: 'user',
+        parent_tool_use_id: 'tool-123',
+        tool_use_result: toolUseResult,
+      });
+
+      const results = [...transformSDKMessage(message)];
+
+      expect(results).toEqual([
+        expect.objectContaining({
+          type: 'subagent_tool_result',
+          subagentId: 'tool-123',
+          id: 'tool-123',
+          content: 'Out[1]= ',
+          images: [expect.objectContaining({
+            mediaType: 'image/png',
+            data: 'iVBORw0KGgo=',
+            source: 'tool',
+          })],
+        }),
+      ]);
+    });
+
     it('yields tool_result from message.content blocks', () => {
       const message = msg({
         type: 'user',

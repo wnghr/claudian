@@ -118,7 +118,15 @@ interface PersistedMcpToolCallPayload {
   call_id?: string;
   status?: string;
   arguments?: string | Record<string, unknown>;
-  result?: { content?: Array<{ type?: string; text?: string }> } | null;
+  result?: {
+    content?: Array<{
+      type?: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+      media_type?: string;
+    }>;
+  } | null;
   error?: string | null;
   duration_ms?: number | null;
 }
@@ -1126,7 +1134,12 @@ function processPersistedMcpToolCall(
   if (bubble.toolIndexesById.has(callId)) return;
 
   const normalizedInput = normalizeCodexMcpToolInput(payload.arguments);
-  const normalizedState = normalizeCodexMcpToolState(payload.status, payload.result, payload.error);
+  const normalizedState = normalizeCodexMcpToolState(
+    payload.status,
+    payload.result,
+    payload.error,
+    callId,
+  );
 
   const toolCall: ToolCallInfo = {
     id: callId,
@@ -1134,6 +1147,7 @@ function processPersistedMcpToolCall(
     input: normalizedInput,
     status: normalizedState.status,
     ...(normalizedState.result ? { result: normalizedState.result } : {}),
+    ...(normalizedState.images ? { images: normalizedState.images } : {}),
   };
 
   pushToolInvocation(bubble, toolCall);

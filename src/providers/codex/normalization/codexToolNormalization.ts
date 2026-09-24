@@ -1,3 +1,6 @@
+import { extractToolResultImages } from '../../../core/tools/toolResultContent';
+import type { ImageAttachment } from '../../../core/types';
+
 /**
  * Shared Codex tool normalization layer.
  *
@@ -634,13 +637,16 @@ function normalizeStringArray(value: unknown): string[] {
 // MCP tool normalization
 // ---------------------------------------------------------------------------
 
+interface CodexMcpResultPayload {
+  content?: CodexMcpResultPart[] | null;
+}
+
 interface CodexMcpResultPart {
   type?: string;
   text?: string;
-}
-
-interface CodexMcpResultPayload {
-  content?: CodexMcpResultPart[] | null;
+  data?: string;
+  mimeType?: string;
+  media_type?: string;
 }
 
 export interface NormalizedCodexMcpToolState {
@@ -648,6 +654,7 @@ export interface NormalizedCodexMcpToolState {
   isError: boolean;
   status: 'running' | 'completed' | 'error';
   result?: string;
+  images?: ImageAttachment[];
 }
 
 export function normalizeCodexMcpToolName(server: unknown, tool: unknown): string {
@@ -673,10 +680,17 @@ export function normalizeCodexMcpToolState(
   rawStatus: unknown,
   resultPayload?: unknown,
   rawError?: unknown,
+  imageIdPrefix = 'mcp-tool',
 ): NormalizedCodexMcpToolState {
   const status = typeof rawStatus === 'string' ? rawStatus : '';
   const error = typeof rawError === 'string' ? rawError : '';
   const resultText = extractCodexMcpResultText(resultPayload);
+  const images = extractToolResultImages(
+    resultPayload && typeof resultPayload === 'object'
+      ? (resultPayload as CodexMcpResultPayload).content
+      : undefined,
+    imageIdPrefix,
+  );
   const isTerminalStatus = status === 'completed'
     || status === 'failed'
     || status === 'error'
@@ -694,6 +708,7 @@ export function normalizeCodexMcpToolState(
     isError,
     status: isTerminal ? (isError ? 'error' : 'completed') : 'running',
     ...(result ? { result } : {}),
+    ...(images.length > 0 ? { images } : {}),
   };
 }
 

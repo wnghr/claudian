@@ -24,7 +24,7 @@ export interface ImageAttachment {
   width?: number;
   height?: number;
   size: number;
-  source: 'file' | 'paste' | 'drop';
+  source: 'file' | 'paste' | 'drop' | 'tool';
 }
 
 export interface ExecutionInputLinkedContentSnapshot {
@@ -254,6 +254,7 @@ export type StreamChunk =
       type: 'tool_result';
       id: string;
       content: string;
+      images?: ImageAttachment[];
       isError?: boolean;
       isBlocked?: boolean;
       toolUseResult?: SDKToolUseResult;
@@ -275,6 +276,7 @@ export type StreamChunk =
       subagentId: string;
       id: string;
       content: string;
+      images?: ImageAttachment[];
       isError?: boolean;
       isBlocked?: boolean;
       toolUseResult?: SDKToolUseResult;

@@ -27,6 +27,7 @@ import {
 import { extractToolResultContent } from '../../../core/tools/toolResultContent';
 import type {
   ChatMessage,
+  ImageAttachment,
   StreamChunk,
   SubagentInfo,
   ToolCallInfo,
@@ -900,6 +901,7 @@ export class StreamController {
       content: string;
       isError?: boolean;
       isBlocked?: boolean;
+      images?: ImageAttachment[];
       toolUseResult?: SDKToolUseResult;
     },
     msg: ChatMessage
@@ -971,6 +973,7 @@ export class StreamController {
         existingToolCall.status = 'completed';
       }
       existingToolCall.result = normalizedContent;
+      if (chunk.images) existingToolCall.images = chunk.images;
 
       if (existingToolCall.name === TOOL_ASK_USER_QUESTION) {
         const answers =
@@ -1288,6 +1291,7 @@ export class StreamController {
             ? 'blocked'
             : (chunk.isError ? 'error' : 'completed');
           toolCall.result = normalizedContent;
+          if (chunk.images) toolCall.images = chunk.images;
           subagentManager.updateSyncToolResult(parentToolUseId, chunk.id, toolCall);
         }
         break;
@@ -1965,6 +1969,7 @@ export function providerOutputEventToStreamChunk(
       return event.toolScope.kind === 'subagent'
         ? {
           content: event.content ?? '',
+          ...(event.images ? { images: event.images } : {}),
           id: event.toolCallId,
           ...(event.isError !== undefined ? { isError: event.isError } : {}),
           ...(event.isBlocked !== undefined ? { isBlocked: event.isBlocked } : {}),
@@ -1974,6 +1979,7 @@ export function providerOutputEventToStreamChunk(
         }
         : {
           content: event.content ?? '',
+          ...(event.images ? { images: event.images } : {}),
           id: event.toolCallId,
           ...(event.isError !== undefined ? { isError: event.isError } : {}),
           ...(event.isBlocked !== undefined ? { isBlocked: event.isBlocked } : {}),

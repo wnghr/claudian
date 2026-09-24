@@ -2639,6 +2639,34 @@ describe('CodexHistoryStore', () => {
       });
     });
 
+    it('restores inline MCP image results', () => {
+      const content = [
+        JSON.stringify({
+          timestamp: '2026-03-27T00:00:01.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'mcp_tool_call',
+            server: 'wolfram',
+            tool: 'evaluate',
+            call_id: 'call_mcp_image',
+            status: 'completed',
+            result: {
+              content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+            },
+          },
+        }),
+      ].join('\n');
+
+      const messages = parseCodexSessionContent(content);
+      const assistant = messages.find(m => m.role === 'assistant' && m.toolCalls);
+      const mcpTool = assistant!.toolCalls!.find(tc => tc.id === 'call_mcp_image');
+
+      expect(mcpTool).toMatchObject({
+        name: 'mcp__wolfram__evaluate',
+        images: [{ mediaType: 'image/png', data: 'aGVsbG8=', source: 'tool' }],
+      });
+    });
+
     it('preserves MCP error output', () => {
       const content = [
         JSON.stringify({

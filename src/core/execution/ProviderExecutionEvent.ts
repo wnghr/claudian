@@ -1,5 +1,6 @@
 import type {
   CitationGroup,
+  ImageAttachment,
   PermissionMode,
   SDKToolUseResult,
   ToolProviderPayload,
@@ -150,6 +151,7 @@ export type ProviderToolCompletedEvent = ProviderEventBase<
 > &
   ProviderToolIdentity & {
     readonly content?: string;
+    readonly images?: ImageAttachment[];
     readonly isError?: boolean;
     /** Authoritative provider outcome; never infer this from result content. */
     readonly isBlocked?: boolean;

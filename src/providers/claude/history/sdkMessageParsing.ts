@@ -13,7 +13,7 @@ import {
   parseImageDataUri,
 } from '../../../utils/imageAttachment';
 import { isCompactionCanceledStderr, isInterruptSignalText } from '../../../utils/interrupt';
-import { extractToolResultContent } from '../sdk/toolResultContent';
+import { extractToolResultContent, extractToolResultImages } from '../sdk/toolResultContent';
 import type {
   AsyncSubagentResult,
   SDKNativeContentBlock,
@@ -80,7 +80,7 @@ function extractImages(
 
 function extractToolCalls(
   content: string | SDKNativeContentBlock[] | undefined,
-  toolResults?: Map<string, { content: string; isError: boolean }>,
+  toolResults?: Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }>,
 ): ToolCallInfo[] | undefined {
   if (!content || typeof content === 'string') {
     return undefined;
@@ -95,13 +95,15 @@ function extractToolCalls(
     return undefined;
   }
 
-  const results = toolResults ?? new Map<string, { content: string; isError: boolean }>();
+  const results = toolResults ?? new Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }>();
   if (!toolResults) {
     for (const block of content) {
       if (block.type === 'tool_result' && block.tool_use_id) {
+        const images = extractToolResultImages(block.content, block.tool_use_id);
         results.set(block.tool_use_id, {
           content: extractToolResultContent(block.content),
           isError: block.is_error ?? false,
+          ...(images.length > 0 ? { images } : {}),
         });
       }
     }
@@ -115,6 +117,7 @@ function extractToolCalls(
       input: block.input ?? {},
       status: result ? (result.isError ? 'error' : 'completed') : 'running',
       result: result?.content,
+      ...(result?.images ? { images: result.images } : {}),
       isExpanded: false,
     };
   });
@@ -157,7 +160,7 @@ function mapContentBlocks(content: string | SDKNativeContentBlock[] | undefined)
 
 export function parseSDKMessageToChat(
   sdkMsg: SDKNativeMessage,
-  toolResults?: Map<string, { content: string; isError: boolean }>,
+  toolResults?: Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }>,
 ): ChatMessage | null {
   if (sdkMsg.type === 'file-history-snapshot') {
     return null;
@@ -227,8 +230,8 @@ export function parseSDKMessageToChat(
 
 export function collectToolResults(
   sdkMessages: SDKNativeMessage[],
-): Map<string, { content: string; isError: boolean }> {
-  const results = new Map<string, { content: string; isError: boolean }>();
+): Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }> {
+  const results = new Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }>();
 
   for (const sdkMsg of sdkMessages) {
     const content = sdkMsg.message?.content;
@@ -238,9 +241,11 @@ export function collectToolResults(
 
     for (const block of content) {
       if (block.type === 'tool_result' && block.tool_use_id) {
+        const images = extractToolResultImages(block.content, block.tool_use_id);
         results.set(block.tool_use_id, {
           content: extractToolResultContent(block.content),
           isError: block.is_error ?? false,
+          ...(images.length > 0 ? { images } : {}),
         });
       }
     }

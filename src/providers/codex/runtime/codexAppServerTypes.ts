@@ -231,7 +231,15 @@ export interface McpToolCallItem {
   tool: string;
   status?: string;
   arguments?: Record<string, unknown>;
-  result?: { content?: Array<{ type?: string; text?: string }> } | null;
+  result?: {
+    content?: Array<{
+      type?: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+      media_type?: string;
+    }>;
+  } | null;
   error?: string | null;
   durationMs?: number | null;
 }

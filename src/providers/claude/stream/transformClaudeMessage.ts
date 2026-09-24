@@ -8,7 +8,10 @@ import {
   isClaudeModelTier,
 } from '../modelTiers';
 import { isBlockedMessage } from '../sdk/messages';
-import { extractToolResultContent } from '../sdk/toolResultContent';
+import {
+  extractToolResultContent,
+  extractToolResultImages,
+} from '../sdk/toolResultContent';
 import type { ClaudeAsyncSubagentCompletionEvent, TransformEvent } from '../sdk/types';
 import { isDefaultClaudeModel, resolveContextWindowSize } from '../types/models';
 import { createTransformStreamState, type TransformStreamState } from './toolInputStreamState';
@@ -17,6 +20,7 @@ type ToolUseFields = { id: string; name: string; input: Record<string, unknown> 
 type ToolResultFields = {
   id: string;
   content: string;
+  images?: ReturnType<typeof extractToolResultImages>;
   isError?: boolean;
   isBlocked?: boolean;
   toolUseResult?: SDKToolUseResult;
@@ -506,10 +510,12 @@ export function* transformSDKMessage(
       // User messages can contain tool results
       if (message.tool_use_result !== undefined && message.parent_tool_use_id) {
         const toolUseResult = (message.tool_use_result ?? undefined) as SDKToolUseResult | undefined;
+        const images = extractToolResultImages(message.tool_use_result, message.parent_tool_use_id);
         yield emitToolResult(parentToolUseId, {
           id: message.parent_tool_use_id,
           content: extractToolResultContent(message.tool_use_result, { fallbackIndent: 2 }),
           isError: false,
+          ...(images.length > 0 ? { images } : {}),
           ...(toolUseResult !== undefined ? { toolUseResult } : {}),
         });
       }
@@ -518,10 +524,12 @@ export function* transformSDKMessage(
         for (const block of message.message.content) {
           if (block.type === 'tool_result') {
             const toolUseResult = (message.tool_use_result ?? undefined) as SDKToolUseResult | undefined;
+            const images = extractToolResultImages(block.content, block.tool_use_id || message.parent_tool_use_id || 'tool');
             yield emitToolResult(parentToolUseId, {
               id: block.tool_use_id || message.parent_tool_use_id || '',
               content: extractToolResultContent(block.content, { fallbackIndent: 2 }),
               isError: block.is_error || false,
+              ...(images.length > 0 ? { images } : {}),
               ...(toolUseResult !== undefined ? { toolUseResult } : {}),
             });
           }

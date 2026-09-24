@@ -478,6 +478,7 @@ function normalizeToolCompleted(
     toolCallId: chunk.id,
     ...identity,
     content: chunk.content,
+    ...(chunk.images ? { images: chunk.images } : {}),
     isError: chunk.isError,
     isBlocked: state.blockedToolIds.has(chunk.id),
     toolUseResult: chunk.toolUseResult,

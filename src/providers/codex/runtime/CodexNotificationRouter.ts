@@ -1,5 +1,6 @@
 import * as path from 'path';
 
+import { extractToolResultImages } from '../../../core/tools/toolResultContent';
 import type { CitationGroup, StreamChunk, UsageInfo } from '../../../core/types';
 import { extractCodexUserVisibleText, joinCodexUserTextParts } from '../codexUserText';
 import {
@@ -1616,11 +1617,14 @@ export class CodexNotificationRouter {
       content = item.status === 'completed' ? 'Completed' : 'Failed';
     }
 
+    const images = extractToolResultImages(item.result?.content, item.id);
+
     this.emit({
       type: 'tool_result',
       id: item.id,
       content,
       isError: item.status === 'failed' || item.status === 'error',
+      ...(images.length > 0 ? { images } : {}),
     });
   }
 

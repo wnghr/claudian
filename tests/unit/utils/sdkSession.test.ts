@@ -20,7 +20,10 @@ import {
   type SDKNativeMessage,
   sdkSessionExists,
 } from '@/providers/claude/history/ClaudeHistoryStore';
-import { extractToolResultContent } from '@/providers/claude/sdk/toolResultContent';
+import {
+  extractToolResultContent,
+  extractToolResultImages,
+} from '@/providers/claude/sdk/toolResultContent';
 
 // Mock fs, fs/promises, and os modules
 jest.mock('fs', () => ({
@@ -2477,6 +2480,33 @@ describe('sdkSession', () => {
       expect(extractToolResultContent(content, { fallbackIndent: 2 })).toBe(
         JSON.stringify(content, null, 2)
       );
+    });
+  });
+
+  describe('extractToolResultImages', () => {
+    it('preserves MCP image content blocks alongside text results', () => {
+      const content = [
+        { type: 'text', text: 'Out[1]= ' },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        },
+      ];
+
+      const images = extractToolResultImages(content, 'tool-1');
+
+      expect(images).toEqual([
+        expect.objectContaining({
+          id: 'tool-1-image-0',
+          mediaType: 'image/png',
+          data: 'iVBORw0KGgo=',
+          source: 'tool',
+        }),
+      ]);
     });
   });
 

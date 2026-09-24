@@ -25,6 +25,7 @@ export interface BuildImageAttachmentOptions {
   id: string;
   mediaType: string;
   name?: string;
+  source?: ImageAttachment['source'];
 }
 
 export function normalizeImageMediaType(value: unknown): ImageMediaType | null {
@@ -69,7 +70,7 @@ export function buildImageAttachmentFromBase64(
     mediaType,
     name: options.name?.trim() || `image.${IMAGE_EXTENSIONS[mediaType]}`,
     size: estimateBase64ByteLength(data),
-    source: 'paste',
+    source: options.source ?? 'paste',
   };
 }
 

@@ -28,6 +28,8 @@ export interface AskUserQuestionItem {
 /** User-provided answers keyed by question text or stable question id. */
 export type AskUserAnswers = Record<string, string | string[]>;
 
+import type { ImageAttachment } from './chat';
+
 /** Provider-owned fields for lossless per-tool replay and persistence. */
 export interface ToolProviderPayload {
   rawInput?: unknown;
@@ -42,6 +44,7 @@ export interface ToolCallInfo {
   input: Record<string, unknown>;
   status: 'running' | 'completed' | 'error' | 'blocked';
   result?: string;
+  images?: ImageAttachment[];
   providerPayload?: ToolProviderPayload;
   isExpanded?: boolean;
   diffData?: ToolDiffData;
