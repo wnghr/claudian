@@ -21,6 +21,7 @@ import {
   type ScoredChunk,
   toDisplayScore,
 } from '../../../core/search/ranking';
+import { decideSearchDocument } from '../../../core/search/searchPolicy';
 import { tokenize } from '../../../core/search/tokenize';
 import { embeddingVectorKey, type EmbeddingVectorStore } from './EmbeddingVectorCache';
 import {
@@ -54,9 +55,6 @@ export interface ExternalPaperSearchDocument {
  * by the vault or the external Zotero cache.
  */
 
-/** Dashboard-style entry notes; searchable with an explicit scope instead. */
-const ENTRY_DIRECTORY_PARTS: readonly string[] = ['00-入口'];
-
 interface CorpusChunk {
   readonly path: string;
   readonly kind: string;
@@ -68,6 +66,12 @@ interface CorpusChunk {
 interface CachedChunks {
   readonly fingerprint: string;
   readonly chunks: readonly CorpusChunk[];
+}
+
+interface IndexableVaultFile {
+  readonly file: TFile;
+  readonly path: string;
+  readonly text: string;
 }
 
 export interface VaultPaperSearchOptions {
@@ -95,12 +99,16 @@ function isIndexableFile(file: TFile): boolean {
     && file.extension.toLocaleLowerCase() === 'md';
 }
 
-function selectIndexableFiles(app: App, scope?: string): readonly TFile[] {
+async function selectIndexableFiles(
+  app: App,
+  scope: string | undefined,
+  textCache: Map<string, { fingerprint: string; text: string }>,
+): Promise<readonly IndexableVaultFile[]> {
   const markdown = app.vault.getFiles().filter(file => isIndexableFile(file));
   const present = new Set(markdown.map(file => normalizePath(file.path)));
   const skipParts = buildSkipDirectoryParts(app);
 
-  const selected: TFile[] = [];
+  const selected: IndexableVaultFile[] = [];
   for (const file of markdown) {
     const path = normalizePath(file.path);
     if (isSkipped(path, skipParts)) continue;
@@ -109,10 +117,24 @@ function selectIndexableFiles(app: App, scope?: string): readonly TFile[] {
       const anchoredTwin = `${path.slice(0, -'.md'.length)}.paged.md`;
       if (present.has(anchoredTwin)) continue;
     }
-    selected.push(file);
+    const fingerprint = fileFingerprint(file);
+    const cachedText = fingerprint === null ? undefined : textCache.get(path);
+    let text: string;
+    if (cachedText?.fingerprint === fingerprint) {
+      text = cachedText.text;
+    } else {
+      try {
+        text = await app.vault.cachedRead(file);
+      } catch {
+        continue;
+      }
+      if (fingerprint !== null) textCache.set(path, { fingerprint, text });
+    }
+    if (!decideSearchDocument(path, text).searchable) continue;
+    selected.push({ file, path, text });
   }
   return selected.sort(
-    (left, right) => normalizePath(left.path).localeCompare(normalizePath(right.path)),
+    (left, right) => left.path.localeCompare(right.path),
   );
 }
 
@@ -133,26 +155,18 @@ function fileFingerprint(file: TFile): string | null {
 }
 
 async function buildCorpus(
-  app: App,
-  files: readonly TFile[],
+  files: readonly IndexableVaultFile[],
   externalDocuments: readonly ExternalPaperSearchDocument[] = [],
   fileCache: Map<string, CachedChunks> = new Map(),
   externalCache: Map<string, CachedChunks> = new Map(),
 ): Promise<readonly CorpusChunk[]> {
   const corpus: CorpusChunk[] = [];
-  for (const file of files) {
-    const path = normalizePath(file.path);
+  for (const entry of files) {
+    const { file, path, text } = entry;
     const fingerprint = fileFingerprint(file);
     const cached = fingerprint === null ? undefined : fileCache.get(path);
     if (cached?.fingerprint === fingerprint) {
       corpus.push(...cached.chunks);
-      continue;
-    }
-    let text: string;
-    try {
-      text = await app.vault.cachedRead(file);
-    } catch {
-      // An unreadable file must not abort the whole search.
       continue;
     }
     const chunks = chunkText(text, path);
@@ -180,9 +194,29 @@ function isInScope(path: string, scope: string | undefined): boolean {
   if (!scope) return true;
   const wanted = normalizePath(scope.trim());
   if (!wanted) return true;
+  const baseName = path.split('/').pop() ?? '';
+  const key = baseName.replace(/\.[^.]+$/u, '');
   return path === wanted
     || path.startsWith(`${wanted}/`)
-    || path.split('/').some(part => part === wanted);
+    || path.split('/').some(part => part === wanted)
+    || (!wanted.includes('/') && key === wanted);
+}
+
+function isExactDocumentScope(
+  scope: string | undefined,
+  files: readonly IndexableVaultFile[],
+  externalDocuments: readonly ExternalPaperSearchDocument[],
+): boolean {
+  if (!scope) return false;
+  const wanted = normalizePath(scope.trim()).toLocaleLowerCase();
+  if (!wanted) return false;
+  if (files.some(entry => entry.path.toLocaleLowerCase() === wanted)) return true;
+  return externalDocuments.some(document => {
+    const path = normalizePath(document.path).toLocaleLowerCase();
+    const baseName = path.split('/').pop() ?? '';
+    const key = baseName.replace(/\.[^.]+$/u, '');
+    return path === wanted || (!wanted.includes('/') && key === wanted);
+  });
 }
 
 interface SemanticRanking {
@@ -257,6 +291,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
   let cachePromise: Promise<Map<string, string>> | null = null;
   const fileChunkCache = new Map<string, CachedChunks>();
   const externalChunkCache = new Map<string, CachedChunks>();
+  const fileTextCache = new Map<string, { fingerprint: string; text: string }>();
   const lexicalIndexCache = new Map<string, ReturnType<typeof buildLexicalIndex>>();
   const chunkIds = new WeakMap<object, number>();
   let nextChunkId = 1;
@@ -289,7 +324,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
       const mode: PaperSearchMode = request.mode ?? 'hybrid';
       const limit = request.limit ?? PAPER_SEARCH_DEFAULT_LIMIT;
 
-      const files = selectIndexableFiles(app, request.scope);
+      const files = await selectIndexableFiles(app, request.scope, fileTextCache);
       let external: readonly ExternalPaperSearchDocument[] = [];
       let externalFailure: string | null = null;
       if (externalDocuments) {
@@ -303,12 +338,8 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
         !request.scope || isInScope(normalizePath(document.path), request.scope)
       ));
       const corpus = (await buildCorpus(
-        app, files, scopedExternal, fileChunkCache, externalChunkCache,
-      )).filter(chunk => (
-        (!request.kind || chunk.kind === request.kind)
-        && !(chunk.kind === 'md'
-          && ENTRY_DIRECTORY_PARTS.some(part => chunk.path.includes(part)))
-      ));
+        files, scopedExternal, fileChunkCache, externalChunkCache,
+      )).filter(chunk => !request.kind || chunk.kind === request.kind);
       const queryTokens = tokenize(request.query);
 
       if (corpus.length === 0) {
@@ -361,8 +392,16 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
         .sort((left, right) => right.score - left.score || left.position - right.position);
 
       const hits: PaperSearchHit[] = [];
+      const perPath = new Map<string, number>();
+      const seenBodies = new Set<string>();
+      const singleFileScope = isExactDocumentScope(request.scope, files, scopedExternal);
       for (const candidate of ordered) {
         const chunk = corpus[candidate.position];
+        const bodyKey = `${chunk.path}\u0000${chunk.body.replace(/\s+/gu, ' ').trim()}`;
+        if (seenBodies.has(bodyKey)) continue;
+        const count = perPath.get(chunk.path) ?? 0;
+        if (!singleFileScope && count >= 3) continue;
+        seenBodies.add(bodyKey);
         hits.push({
           body: chunk.body,
           heading: chunk.heading,
@@ -372,6 +411,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
           score: toDisplayScore(candidate.score),
           snippet: buildSnippet(chunk.body, queryTokens),
         });
+        perPath.set(chunk.path, count + 1);
         if (hits.length >= limit) break;
       }
 

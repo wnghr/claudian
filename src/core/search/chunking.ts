@@ -127,7 +127,7 @@ function headingOf(stack: readonly (readonly [number, string])[]): string {
  * fallback heading, so a heading-less note is still attributable to its file.
  */
 export function chunkMarkdown(text: string, relpath: string): readonly MarkdownChunk[] {
-  const { frontmatter, body } = splitFrontmatter(text);
+  const { frontmatter, body, rawFrontmatter } = splitFrontmatter(text);
   const chunks: MarkdownChunk[] = [];
 
   const meta = buildMetaChunk(frontmatter);
@@ -135,12 +135,14 @@ export function chunkMarkdown(text: string, relpath: string): readonly MarkdownC
 
   const fallbackHeading = relpath.split('/').pop()?.replace(/\.md$/iu, '') ?? relpath;
   // Normalized line endings keep line numbers and every pattern CRLF-proof.
+  const lineOffset = rawFrontmatter?.match(/\n/gu)?.length ?? 0;
   const lines = body.replace(/\r\n?/gu, '\n').split('\n');
   const stack: [number, string][] = [];
   let currentHeading = '';
   let buffer: BufferedLine[] = [];
   let currentPage: number | null = null;
   let bufferPage: number | null = null;
+  let fence: { readonly char: '`' | '~'; readonly length: number; readonly display: boolean } | null = null;
 
   const flush = (endLine: number): void => {
     const paragraphs = toParagraphs(buffer);
@@ -170,7 +172,38 @@ export function chunkMarkdown(text: string, relpath: string): readonly MarkdownC
   };
 
   for (const [index, rawLine] of lines.entries()) {
-    const lineNumber = index + 1;
+    const lineNumber = index + 1 + lineOffset;
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/u.exec(rawLine);
+    if (fence !== null) {
+      if (fence.display) {
+        const closer = /^\s*(`+|~+)\s*$/u.exec(rawLine);
+        if (closer && closer[1][0] === fence.char && closer[1].length >= fence.length) fence = null;
+        continue;
+      }
+      const closer = /^\s*(`+|~+)\s*$/u.exec(rawLine);
+      if (closer && closer[1][0] === fence.char && closer[1].length >= fence.length) {
+        if (buffer.length === 0) bufferPage = currentPage;
+        buffer.push({ number: lineNumber, text: rawLine });
+        fence = null;
+        continue;
+      }
+      if (buffer.length === 0) bufferPage = currentPage;
+      buffer.push({ number: lineNumber, text: rawLine });
+      continue;
+    }
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      const char = marker[0] as '`' | '~';
+      const language = fenceMatch[2].trim().split(/\s+/u)[0]?.toLocaleLowerCase() ?? '';
+      const display = ['dataview', 'dataviewjs', 'tasks'].includes(language);
+      if (display) flush(lineNumber - 1);
+      else {
+        if (buffer.length === 0) bufferPage = currentPage;
+        buffer.push({ number: lineNumber, text: rawLine });
+      }
+      fence = { char, length: marker.length, display };
+      continue;
+    }
     const pageMark = PAGE_MARK_PATTERN.exec(rawLine);
     if (pageMark) {
       // Close the previous page first, while `currentPage` still describes it.

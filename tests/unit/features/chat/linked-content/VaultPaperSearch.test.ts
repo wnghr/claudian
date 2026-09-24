@@ -200,7 +200,7 @@ describe('createVaultPaperSearch', () => {
     );
   });
 
-  it('excludes entry-page bodies but keeps their metadata in the index', async () => {
+  it('excludes entry pages, including their metadata, from answer search', async () => {
     await withVault(
       { content: {
         [CARD_PATH]: CARD_TEXT,
@@ -212,6 +212,8 @@ describe('createVaultPaperSearch', () => {
         // returned, even when the term match is real.
         const all = await impl.searchPapers({ query: 'summarises recent reads' });
         expect(all.hits.find(hit => hit.path === ENTRY_PATH && hit.kind === 'md'))
+          .toBeUndefined();
+        expect(all.hits.find(hit => hit.path === ENTRY_PATH && hit.kind === 'meta'))
           .toBeUndefined();
 
         // The card frontmatter is still searchable by its id.
@@ -299,6 +301,103 @@ describe('createVaultPaperSearch', () => {
     // must not call the embedding endpoint again.
     await impl.searchPapers({ query: 'nematic skyrmion turbulence' });
     expect(embedding.embedCalls).toBe(firstCalls);
+  });
+
+  it('excludes tagged dashboards and allows an explicit searchable override', async () => {
+    const dashboard = [
+      '---', 'title: Project center', 'tags:', '  - type/index', '---', '',
+      'dashboard-only phrase should not be searchable', '',
+    ].join('\n');
+    const override = [
+      '---', 'title: Reviewed dashboard note', 'tags:', '  - type/index',
+      'searchable: true', '---', '', 'kept dashboard explanation', '',
+    ].join('\n');
+    await withVault(
+      { content: {
+        '项目/项目中心.md': dashboard,
+        '项目/reviewed.md': override,
+      } },
+      async impl => {
+        const result = await impl.searchPapers({ query: 'dashboard' });
+        expect(result.hits.some(hit => hit.path === '项目/项目中心.md')).toBe(false);
+        expect(result.hits.some(hit => hit.path === '项目/reviewed.md')).toBe(true);
+      },
+    );
+  });
+
+  it('does not index Dataview or Tasks display blocks', async () => {
+    const text = [
+      '# Note', '', '```dataview', 'TABLE forbidden-dashboard-token', '```', '',
+      '```tasks', 'not done forbidden-task-token', '```', '',
+      'The retained explanation contains a useful physical result.', '',
+    ].join('\n');
+    await withVault({ content: { '科研笔记/real.md': text } }, async impl => {
+      const result = await impl.searchPapers({ mode: 'keyword', query: 'forbidden-dashboard-token' });
+      expect(result.hits).toEqual([]);
+      const retained = await impl.searchPapers({ mode: 'keyword', query: 'useful physical result' });
+      expect(retained.hits[0]?.path).toBe('科研笔记/real.md');
+    });
+  });
+
+  it('limits general search per source but lifts the limit for an exact file scope', async () => {
+    const text = Array.from({ length: 6 }, (_, index) => (
+      `## Section ${index}\n\nThe same distinctive retrieval phrase appears in section ${index}.`
+    )).join('\n\n');
+    await withVault({ content: { '科研笔记/long.md': text } }, async impl => {
+      const result = await impl.searchPapers({ mode: 'keyword', query: 'same distinctive retrieval phrase' });
+      expect(result.hits.filter(hit => hit.path === '科研笔记/long.md')).toHaveLength(3);
+
+      const exact = await impl.searchPapers({
+        mode: 'keyword', query: 'same distinctive retrieval phrase',
+        scope: '科研笔记/long.md', limit: 8,
+      });
+      expect(exact.hits.filter(hit => hit.path === '科研笔记/long.md')).toHaveLength(6);
+    });
+  });
+
+  it('lifts the per-source limit when scope resolves to a Zotero attachment key', async () => {
+    const content = Array.from({ length: 6 }, (_, index) => (
+      `## Result ${index}\n\nThe attachment contains the distinctive optical response ${index}.`
+    )).join('\n\n');
+    const externalDocuments = async (): Promise<readonly ExternalPaperSearchDocument[]> => [{
+      path: 'zotero/ATTACH01.pdf',
+      content,
+    }];
+    await withVault({ externalDocuments }, async impl => {
+      const result = await impl.searchPapers({
+        mode: 'keyword',
+        query: 'distinctive optical response',
+        scope: 'ATTACH01',
+        limit: 8,
+      });
+      expect(result.hits).toHaveLength(6);
+      expect(result.hits.every(hit => hit.path === 'zotero/ATTACH01.pdf')).toBe(true);
+    });
+  });
+
+  it('removes a note from search when searchable changes in the active vault', async () => {
+    const content: Record<string, string> = {
+      '科研笔记/reviewed.md': [
+        '---', 'searchable: true', '---', '',
+        'A distinctive sentence kept in this note for retrieval.',
+      ].join('\n'),
+    };
+    const app = buildApp({ content });
+    const file = app.vault.getFiles()[0] as TFile & { stat: { mtime: number; size: number } };
+    const impl = createVaultPaperSearch({ app, embedding: recordingEmbedding() });
+
+    expect((await impl.searchPapers({ mode: 'keyword', query: 'distinctive sentence' })).hits)
+      .toHaveLength(1);
+
+    content['科研笔记/reviewed.md'] = [
+      '---', 'searchable: false', '---', '',
+      'A distinctive sentence kept in this note for retrieval.',
+    ].join('\n');
+    file.stat.mtime += 1;
+    file.stat.size = content['科研笔记/reviewed.md'].length;
+
+    expect((await impl.searchPapers({ mode: 'keyword', query: 'distinctive sentence' })).hits)
+      .toHaveLength(0);
   });
 
   it('reuses parsed vault chunks on a second search of an unchanged file', async () => {

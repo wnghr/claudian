@@ -7,6 +7,57 @@ function bodyChunks(text: string) {
 }
 
 describe('chunkMarkdown', () => {
+  it('keeps headings and page markers inside tilde fenced code as code', () => {
+    const chunks = chunkMarkdown([
+      '~~~~python',
+      '# comment is not a section',
+      '<!-- p.99 -->',
+      'x = 1',
+      '~~~~',
+      '',
+      '# Actual section',
+      '',
+      'This is the actual section body and is long enough.',
+    ].join('\n'), 'note.md');
+
+    expect(chunks.filter(chunk => chunk.kind === 'md').map(chunk => chunk.heading))
+      .toEqual(['note', 'Actual section']);
+    expect(chunks.find(chunk => chunk.heading === 'Actual section')?.locator).toBe('L9-9');
+  });
+
+  it('keeps source link lists and offsets body locators past frontmatter', () => {
+    const chunks = chunkMarkdown([
+      '---',
+      'title: A note',
+      '---',
+      '',
+      '- [Primary source](https://doi.org/10.1234/example)',
+      '',
+      'The cited source supports this independent explanation.',
+    ].join('\n'), 'note.md');
+
+    const body = chunks.find(chunk => chunk.kind === 'md');
+    expect(body?.body).toContain('Primary source');
+    expect(body?.locator).toBe('L5-7');
+  });
+
+  it('does not treat a longer closing fence as closing a shorter code fence', () => {
+    const chunks = chunkMarkdown([
+      '````python',
+      '# inside',
+      '```',
+      '## still inside',
+      '````',
+      '',
+      '# Outside',
+      '',
+      'Outside prose remains indexable and long enough.',
+    ].join('\n'), 'note.md');
+
+    expect(chunks.filter(chunk => chunk.kind === 'md').map(chunk => chunk.heading))
+      .toEqual(['note', 'Outside']);
+  });
+
   it('keeps every page-anchored chunk on exactly one page', () => {
     const text = [
       '<!-- p.1 -->',
