@@ -136,8 +136,8 @@ export class BrowserSelectionController {
     const activeEl = doc.activeElement;
     if (!activeEl || !scopeEl.contains(activeEl)) return null;
 
-    if (activeEl.instanceOf(HTMLTextAreaElement) || activeEl.instanceOf(HTMLInputElement)) {
-      const { value, selectionStart, selectionEnd } = activeEl;
+    if (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT') {
+      const { value, selectionStart, selectionEnd } = activeEl as HTMLTextAreaElement | HTMLInputElement;
       if (typeof selectionStart !== 'number' || typeof selectionEnd !== 'number' || selectionStart === selectionEnd) return null;
       return value.slice(selectionStart, selectionEnd).trim() || null;
     }
@@ -146,19 +146,31 @@ export class BrowserSelectionController {
   }
 
   private extractSelectionFromIframes(containerEl: HTMLElement): string | null {
-    const iframes = Array.from(containerEl.querySelectorAll('iframe'));
-    for (const iframe of iframes) {
-      try {
-        const frameDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
-        if (!frameDoc || !frameDoc.body) continue;
-
-        const frameSelection = this.extractSelectionFromDocument(frameDoc, frameDoc.body);
-        if (frameSelection) return frameSelection;
-      } catch {
-        // Ignore inaccessible iframe contexts (cross-origin restrictions).
-      }
+    for (const frameDoc of this.frameDocuments(containerEl)) {
+      if (!frameDoc.body) continue;
+      const frameSelection = this.extractSelectionFromDocument(frameDoc, frameDoc.body);
+      if (frameSelection) return frameSelection;
     }
     return null;
+  }
+
+  private frameDocuments(containerEl: HTMLElement): Document[] {
+    const documents: Document[] = [];
+    const visit = (root: ParentNode, depth: number): void => {
+      if (depth > 4) return;
+      for (const iframe of Array.from(root.querySelectorAll('iframe'))) {
+        try {
+          const frameDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
+          if (!frameDoc || documents.includes(frameDoc)) continue;
+          documents.push(frameDoc);
+          visit(frameDoc, depth + 1);
+        } catch {
+          // Ignore inaccessible iframe contexts (cross-origin restrictions).
+        }
+      }
+    };
+    visit(containerEl, 1);
+    return documents;
   }
 
   private async extractSelectionFromWebviews(containerEl: HTMLElement): Promise<string | null> {
@@ -234,14 +246,7 @@ export class BrowserSelectionController {
   }
 
   private selectedPdfPage(containerEl: HTMLElement): number | null {
-    const documents: Document[] = [containerEl.ownerDocument];
-    for (const iframe of Array.from(containerEl.querySelectorAll('iframe'))) {
-      try {
-        if (iframe.contentDocument) documents.push(iframe.contentDocument);
-      } catch {
-        // Cross-origin frames cannot expose a selection or its page.
-      }
-    }
+    const documents: Document[] = [containerEl.ownerDocument, ...this.frameDocuments(containerEl)];
     for (const doc of documents) {
       const selection = doc.getSelection();
       if (!selection?.toString().trim()) continue;

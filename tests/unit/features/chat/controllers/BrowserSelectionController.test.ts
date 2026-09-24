@@ -117,6 +117,49 @@ describe('BrowserSelectionController', () => {
     ]);
   });
 
+  it('reads a ZotFlow PDF selection inside its nested reader iframe', async () => {
+    const outerFrame = document.createElement('iframe');
+    containerEl.appendChild(outerFrame);
+    const outerDocument = document.implementation.createHTMLDocument('reader');
+    Object.defineProperty(outerFrame, 'contentDocument', { value: outerDocument });
+    const innerFrame = outerDocument.createElement('iframe');
+    outerDocument.body.appendChild(innerFrame);
+    const innerDocument = document.implementation.createHTMLDocument('pdf');
+    Object.defineProperty(innerFrame, 'contentDocument', { value: innerDocument });
+    const page = innerDocument.createElement('div');
+    page.setAttribute('data-page-number', '3');
+    const selectionAnchor = innerDocument.createElement('span');
+    page.appendChild(selectionAnchor);
+    innerDocument.body.appendChild(page);
+    getSelectionSpy.mockImplementation(() => ({
+      toString: () => '', anchorNode: null, focusNode: null,
+    } as unknown as Selection));
+    const innerSelection = jest.spyOn(innerDocument, 'getSelection').mockImplementation(() => ({
+      toString: () => 'nested PDF text',
+      anchorNode: selectionAnchor,
+      focusNode: selectionAnchor,
+    } as unknown as Selection));
+    const view = {
+      getViewType: () => 'zotflow-zotero-reader-view',
+      getDisplayText: () => 'Paper',
+      getState: () => ({ libraryID: 1, itemKey: 'PAPER123' }),
+      containerEl,
+    };
+    app.workspace.getMostRecentLeaf.mockReturnValue({ view });
+
+    expect((controller as any).frameDocuments(containerEl)).toHaveLength(2);
+    expect((controller as any).extractSelectionFromIframes(containerEl)).toBe('nested PDF text');
+
+    controller.start();
+    jest.advanceTimersByTime(250);
+    await flushMicrotasks();
+
+    expect(controller.getContext()).toMatchObject({
+      selectedText: 'nested PDF text', pdfPath: 'zotero/PAPER123.pdf', page: 3,
+    });
+    innerSelection.mockRestore();
+  });
+
   it('shows line-based indicator text for multi-line browser selection', async () => {
     selectionText = 'line 1\nline 2';
     controller.start();
