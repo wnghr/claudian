@@ -46,6 +46,8 @@ export interface PaperNoteWriteRequest {
   readonly section?: string;
   /** Write even when the content already appears in the note. */
   readonly allowDuplicate?: boolean;
+  /** Text used for duplicate detection when the stored block includes metadata. */
+  readonly duplicateProbe?: string;
   /** ZotFlow local-only persist region to write into instead of a heading. */
   readonly persistRegionId?: string;
 }
@@ -172,12 +174,12 @@ export interface AppendOutcome {
 export function appendToNoteText(
   text: string,
   content: string,
-  options: { section: string; now: Date; allowDuplicate?: boolean },
+  options: { section: string; now: Date; allowDuplicate?: boolean; duplicateProbe?: string },
 ): AppendOutcome {
   const trimmed = content.trim();
   if (!trimmed) throw new Error('没有要写入的内容。');
 
-  if (!options.allowDuplicate && isDuplicateText(text, trimmed)) {
+  if (!options.allowDuplicate && isDuplicateText(text, options.duplicateProbe ?? trimmed)) {
     return { text, action: 'duplicate_skipped', location: '内容已存在，未重复写入' };
   }
 

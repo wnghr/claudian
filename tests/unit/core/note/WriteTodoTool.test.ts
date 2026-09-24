@@ -36,6 +36,26 @@ describe('write_todo tool', () => {
     expect(() => parseWriteTodoToolInput({ content: '读论文', due: '明天' })).toThrow(/YYYY-MM-DD/u);
   });
 
+  it('stores a project label with the task while checking the task text for duplicates', async () => {
+    const writer = {
+      appendToNote: jest.fn().mockResolvedValue({
+        action: 'appended',
+        path: TODO_NOTE_PATH,
+        link: '[[任务/TODO]]',
+        location: `§ ${TODO_NOTE_SECTION}`,
+      }),
+    };
+
+    await executeWriteTodoTool(writer, { content: '检查实验图像', project: '液晶实验' });
+
+    expect(writer.appendToNote).toHaveBeenCalledWith({
+      target: TODO_NOTE_PATH,
+      section: TODO_NOTE_SECTION,
+      content: '<!-- todo-project: 液晶实验 -->\n- [ ] 检查实验图像',
+      duplicateProbe: '- [ ] 检查实验图像',
+    });
+  });
+
   it('strips a pasted checkbox so every written task has one canonical shape', () => {
     expect(parseWriteTodoToolInput({ content: '- [x] 已经勾选的任务' })).toEqual({
       content: '已经勾选的任务',

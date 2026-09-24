@@ -8,13 +8,13 @@ import type { PaperNoteWritePort, PaperNoteWriteResult } from './PaperNoteWrite'
 export const TODO_NOTE_PATH = '任务/TODO.md';
 export const TODO_NOTE_SECTION = '任务清单';
 export const WRITE_TODO_TOOL_NAME = 'write_todo';
-export const WRITE_TODO_TOOL_VERSION = 1;
+export const WRITE_TODO_TOOL_VERSION = 2;
 export const WRITE_TODO_TOOL_CAPABILITY = 'todo.write';
 export const WRITE_TODO_TOOL_ACTION_LABEL = 'Write TODO';
 export const WRITE_TODO_TOOL_DESCRIPTION =
-  'Add one actionable unchecked task to the vault\'s single TODO list. The tool always writes to 任务/TODO.md and never creates categories or edits another note.';
+  'Add one actionable unchecked task to the vault\'s single TODO list, with an optional free-form project label maintained in TODO and independent of 项目中心.';
 export const WRITE_TODO_TOOL_INSTRUCTIONS =
-  'Use write_todo only after the user explicitly asks to add a TODO. Never infer or auto-create tasks from a plan, discussion, or unfinished idea. It always appends one unchecked item to 任务/TODO.md; do not use Bash, Write, or Edit for TODO capture, and do not split tasks into category notes.';
+  'Use write_todo only after the user explicitly asks to add a TODO. Never infer or auto-create tasks from a plan, discussion, or unfinished idea. It always appends one unchecked item to 任务/TODO.md. Project is an optional free-form label stored with that task; do not look up or write to 项目中心. Include a label only when the user names or clearly implies the project; otherwise omit it. Do not use Bash, Write, or Edit for TODO capture, and keep all tasks in the single flat list.';
 
 const WRITE_TODO_TOOL_FIELDS: readonly ToolFieldSpec[] = [
   {
@@ -28,6 +28,12 @@ const WRITE_TODO_TOOL_FIELDS: readonly ToolFieldSpec[] = [
     optional: true,
     description: 'Optional due date in YYYY-MM-DD format; omit it when no date was given.',
   },
+  {
+    name: 'project',
+    type: 'string',
+    optional: true,
+    description: 'Optional free-form project label. It is a label only, not a project note path or link.',
+  },
 ];
 
 export const WRITE_TODO_TOOL_JSON_SCHEMA = toJsonSchema(WRITE_TODO_TOOL_FIELDS);
@@ -35,6 +41,7 @@ export const WRITE_TODO_TOOL_JSON_SCHEMA = toJsonSchema(WRITE_TODO_TOOL_FIELDS);
 export interface WriteTodoToolInput {
   readonly content: string;
   readonly due?: string;
+  readonly project?: string;
 }
 
 export interface WriteTodoToolContext {
@@ -61,22 +68,44 @@ export function parseWriteTodoToolInput(value: unknown): WriteTodoToolInput {
     .trim();
   if (!content) throw new Error('content must be a non-empty string.');
 
-  if (input.due === undefined) return { content };
-  if (typeof input.due !== 'string' || !isValidDate(input.due.trim())) {
-    throw new Error('due must use YYYY-MM-DD format.');
+  let due: string | undefined;
+  if (input.due !== undefined) {
+    if (typeof input.due !== 'string' || !isValidDate(input.due.trim())) {
+      throw new Error('due must use YYYY-MM-DD format.');
+    }
+    due = input.due.trim();
   }
-  return { content, due: input.due.trim() };
+
+  let project: string | undefined;
+  if (input.project !== undefined) {
+    if (typeof input.project !== 'string') throw new Error('project must be a string label.');
+    project = input.project.trim();
+    if (!project || project.length > 80 || /[<>\r\n]|--/u.test(project)) {
+      throw new Error('project must be a non-empty label up to 80 characters without angle brackets, newlines, or double hyphens.');
+    }
+  }
+
+  return {
+    content,
+    ...(due ? { due } : {}),
+    ...(project ? { project } : {}),
+  };
 }
 
 function formatTodoContent(input: WriteTodoToolInput): string {
+  const task = formatTodoTask(input);
+  return input.project ? `<!-- todo-project: ${input.project} -->\n${task}` : task;
+}
+
+function formatTodoTask(input: WriteTodoToolInput): string {
   return `- [ ] ${input.content}${input.due ? ` 📅 ${input.due}` : ''}`;
 }
 
 function formatWriteTodoResult(input: WriteTodoToolInput, result: PaperNoteWriteResult): string {
   if (result.action === 'duplicate_skipped') {
-    return `TODO 已存在，未重复写入：${input.content}\n${result.link}`;
+    return `TODO 已存在，未重复写入：${input.content}${input.project ? `（项目：${input.project}）` : ''}\n${result.link}`;
   }
-  return `已加入 TODO（${TODO_NOTE_PATH}）：${input.content}${input.due ? `（截止 ${input.due}）` : ''}\n${result.link}`;
+  return `已加入 TODO（${TODO_NOTE_PATH}）：${input.content}${input.project ? `（项目：${input.project}）` : ''}${input.due ? `（截止 ${input.due}）` : ''}\n${result.link}`;
 }
 
 export async function executeWriteTodoTool(
@@ -88,6 +117,7 @@ export async function executeWriteTodoTool(
     target: TODO_NOTE_PATH,
     section: TODO_NOTE_SECTION,
     content: formatTodoContent(input),
+    ...(input.project ? { duplicateProbe: formatTodoTask(input) } : {}),
   });
   return formatWriteTodoResult(input, result);
 }
@@ -106,5 +136,5 @@ export const WRITE_TODO_TOOL_SPEC = defineTool<WriteTodoToolInput, WriteTodoTool
   instructions: WRITE_TODO_TOOL_INSTRUCTIONS,
   parse: parseWriteTodoToolInput,
   handler: (context, input) => executeWriteTodoTool(context.writer, input),
-  describeAction: input => `${TODO_NOTE_PATH} ← ${input.content}`,
+  describeAction: input => `${TODO_NOTE_PATH} ← ${input.content}${input.project ? ` · ${input.project}` : ''}`,
 });

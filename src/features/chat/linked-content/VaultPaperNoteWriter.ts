@@ -215,6 +215,7 @@ export function createVaultPaperNoteWriter(
           section: request.section ?? DEFAULT_APPEND_SECTION,
           now: stampDate,
           allowDuplicate: request.allowDuplicate,
+          duplicateProbe: request.duplicateProbe,
         });
 
       if (preview.action === 'duplicate_skipped') {
@@ -233,6 +234,7 @@ export function createVaultPaperNoteWriter(
             section: request.section ?? DEFAULT_APPEND_SECTION,
             now: stampDate,
             allowDuplicate: request.allowDuplicate,
+            duplicateProbe: request.duplicateProbe,
           }).text
       ));
 
