@@ -3,7 +3,8 @@ import { parseZoteroAttachmentReference } from './ZoteroAttachmentReference';
 import type { ZoteroStorageFullTextCache } from './ZoteroStorageFullText';
 
 /**
- * Content tier for Zotero attachments that have no MinerU parse.
+ * Fallback content tier for Zotero attachments when direct PDF extraction is
+ * unavailable and no usable MinerU parse exists.
  *
  * Zotero keeps its own plain-text extraction next to every attachment, which
  * makes PDFs readable without shipping a PDF engine or re-parsing anything. It

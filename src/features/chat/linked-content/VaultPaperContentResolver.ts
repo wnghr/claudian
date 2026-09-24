@@ -1,12 +1,12 @@
 import path from 'node:path';
 
-import type { App, TFile } from 'obsidian';
-import { TFile as ObsidianFile } from 'obsidian';
+import { type App, FileSystemAdapter, TFile as ObsidianFile, type TFile } from 'obsidian';
 
 import { LlmForZoteroMineruCache } from './LlmForZoteroMineruCache';
 import { PaperContentResolver, type PaperContentResult } from './PaperContentResolver';
+import { parseZoteroAttachmentReference } from './ZoteroAttachmentReference';
 import { createZoteroFullTextContentResolver } from './ZoteroFullTextPaperContent';
-import { createZoteroPdfTextResolver } from './ZoteroPdfText';
+import { createDirectPdfTextResolver } from './ZoteroPdfText';
 import { resolveZoteroStorageRoot, ZoteroStorageFullTextCache } from './ZoteroStorageFullText';
 
 export interface VaultPaperContentResolverOptions {
@@ -36,8 +36,8 @@ export function resolveLlmForZoteroCacheRoot(configuredRoot: string | undefined)
  *
  * 1. A MinerU parse, if one was configured - full fidelity, page anchors, and
  *    section headings.
- * 2. Zotero's own full-text cache - usually present for a synced attachment.
- * 3. A direct desktop PDF extraction when Zotero's cache is truncated or absent.
+ * 2. Direct desktop PDF extraction when MinerU has no usable parse.
+ * 3. Zotero's own full-text cache if the direct PDF pass is unavailable.
  * 4. The vault's own `论文/MD` cache, for PDFs that live in the vault.
  *
  * Failing to produce text is reported as a reason, never as an empty read.
@@ -71,42 +71,41 @@ export function createVaultPaperContentResolver(
       ? resolveZoteroStorageRoot(configuredDataDirectory)
       : options.zotFlowStoragePath?.trim() || resolveZoteroStorageRoot())
     : null;
-  // Both fallback tiers consult the same metadata/text cache. Apart from
-  // avoiding duplicate file reads, this guarantees that a direct PDF fallback
-  // and the plain-text tier observe the same attachment directory snapshot.
+  // Both fallback tiers use the same Zotero storage location and attachment
+  // lookup, so a failed direct extraction can still fall back to cached text.
   const zoteroStorage = storageRoot
     ? new ZoteroStorageFullTextCache({ storageRoot })
     : null;
   const zoteroFullText = zoteroStorage
     ? createZoteroFullTextContentResolver({ fullText: zoteroStorage })
     : null;
-  const zoteroPdfText = zoteroStorage
-    ? createZoteroPdfTextResolver({
-      storage: zoteroStorage,
-      readPdfText: options.readPdfText,
-    })
-    : null;
+  const directPdfText = createDirectPdfTextResolver({
+    readPdfText: options.readPdfText,
+    resolvePdfPath: async sourcePath => {
+      const attachmentKey = parseZoteroAttachmentReference(sourcePath);
+      if (attachmentKey) return zoteroStorage?.attachmentPdfPath(attachmentKey) ?? null;
+      const file = app.vault.getAbstractFileByPath(sourcePath);
+      const adapter = app.vault.adapter;
+      return file instanceof ObsidianFile && adapter instanceof FileSystemAdapter
+        ? adapter.getFullPath(file.path)
+        : null;
+    },
+  });
 
   /**
-   * The MinerU tier answers with a *diagnosis* rather than null when it finds
-   * nothing, so a non-ready result must not end the chain - otherwise the
-   * full-text tier behind it would never run. A diagnosis is only returned once
-   * every later tier has also declined, and a stale parse loses to the
-   * full-text cache because Zotero extracted that from the current PDF.
+   * MinerU Markdown is preferred for layout and formula fidelity. Without a
+   * usable parse, read the PDF itself first; Zotero's cached plain text remains
+   * a fallback when direct extraction is unavailable. A non-ready MinerU
+   * result is returned only after both fallback tiers decline.
    */
   const resolveExternalCache = async (sourcePath: string): Promise<PaperContentResult | null> => {
     const parsed = await externalCache?.resolve(sourcePath);
     if (parsed?.status === 'ready') return parsed;
 
-    const extracted = zoteroFullText ? await zoteroFullText(sourcePath) : null;
-    // Zotero's extractor is intentionally capped for long documents. Prefer a
-    // direct PDF pass when that caveat is present so pages after the cap stay
-    // readable; retain the cache as a fallback if pdftotext is unavailable.
-    const needsDirect = extracted?.warnings?.some(warning => warning.includes('stops near 100 pages'));
-    const direct = needsDirect || !extracted
-      ? (zoteroPdfText ? await zoteroPdfText(sourcePath) : null)
-      : null;
+    const direct = await directPdfText(sourcePath);
     if (direct) return direct;
+
+    const extracted = zoteroFullText ? await zoteroFullText(sourcePath) : null;
     if (extracted) return extracted;
 
     return parsed ?? null;
