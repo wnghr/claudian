@@ -23,6 +23,8 @@
     "rewind": "Zurückspulen"
   },
   "chat": {
+    "selectAvailableModel": "Wähle vor dem Senden ein verfügbares Modell aus.",
+    "selectAvailableTitleModel": "Wähle in den Claudian-Einstellungen ein verfügbares Titelmodell aus.",
     "rewind": {
       "confirmMessage": "Zu diesem Punkt zurückspulen? Dateiänderungen nach dieser Nachricht können überschrieben oder entfernt werden. Dies kann nicht rückgängig gemacht werden.",
       "confirmMessageConflicts": "Zu diesem Punkt zurückspulen? {count} außerhalb des Agenten geänderte Datei(en) werden überschrieben:\n{files}",
@@ -57,6 +59,32 @@
       "errorNoActiveTab": "Kein aktiver Tab",
       "commandNoMessages": "Verzweigung nicht möglich: keine Nachrichten in der Konversation",
       "commandNoAssistantUuid": "Verzweigung nicht möglich: keine Assistentenantwort mit Kennungen"
+    },
+    "quote": {
+      "buttonLabel": "Zitieren"
+    },
+    "sideChat": {
+      "title": "Nebenchat",
+      "collapse": "Einklappen",
+      "discard": "Verwerfen",
+      "statusPreparing": "Wird vorbereitet",
+      "statusQueued": "{count} in Warteschlange",
+      "statusWorking": "Arbeitet",
+      "statusError": "Benötigt Aufmerksamkeit",
+      "statusActionRequired": "Eingabe erforderlich",
+      "placeholder": "Im Nebenchat nachfragen",
+      "composerLabel": "Nachricht im Nebenchat",
+      "needsPrompt": "Gib nach /side eine Eingabe an, um einen Nebenchat zu starten.",
+      "unsupportedProvider": "Dieser Anbieter unterstützt keinen Nebenchat.",
+      "unavailableBusy": "Der Nebenchat benötigt eine abgeschlossene Antwort. Warte, bis der aktuelle Zug endet.",
+      "unavailableNoCheckpoint": "Schließe zuerst eine Antwort in dieser Konversation ab.",
+      "unavailableNoSession": "Die Anbietersitzung dieser Konversation konnte nicht aufgelöst werden.",
+      "alreadyExists": "Für diese Konversation existiert bereits ein Nebenchat. Verwirf ihn, um einen neuen zu starten.",
+      "nestedUnavailable": "Ein Nebenchat kann keinen weiteren Nebenchat starten. Klappe zuerst zum Hauptchat ein.",
+      "mainOnlyCommand": "/{command} ist nur im Hauptchat verfügbar.",
+      "startFailed": "Nebenchat konnte nicht gestartet werden: {error}",
+      "queued": "Für den Nebenchat eingereiht.",
+      "busySide": "Der Nebenchat antwortet noch. Warte, bis er fertig ist."
     }
   },
   "collab": {
@@ -94,6 +122,11 @@
       "savePath": "Pfad speichern"
     },
     "createProject": {
+      "authority": "Zusammenarbeitsinstanz",
+      "authorityLan": "LAN-Host auf diesem Gerät",
+      "authorityCloud": "Cloud-Server",
+      "serverUrl": "Cloud-Server-URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "title": "Collab-Projekt erstellen",
       "projectName": "Projektname",
       "projectNamePlaceholder": "Research notes",
@@ -107,6 +140,9 @@
       "resumeFailed": "Die Einrichtung benötigt weiter Aufmerksamkeit. Versuche es erneut."
     },
     "joinProject": {
+      "materialLan": "LAN-Einladung",
+      "materialCloud": "Cloud-Einladung",
+      "materialClaim": "Importierter Mitgliedschaftsanspruch",
       "title": "Collab-Projekt beitreten",
       "invitation": "Einladung",
       "invitationPlaceholder": "Einladungszeichenfolge einfügen",
@@ -120,26 +156,43 @@
       "resumeFailed": "Der Beitritt benötigt weiterhin Aufmerksamkeit. Versuche es erneut."
     },
     "reconnectProject": {
+      "restoreWithLink": "Verbindung mit einem Link wiederherstellen",
       "title": "Projekt neu verbinden",
-      "description": "Füge eine neue Einladung vom Host ein, um {name} neu zu verbinden.",
+      "descriptionLan": "Verbinde {name} mit einer neuen Einladung oder einem Mitgliedschaftsnachweis erneut. Nach dem Umzug zu Cloud kannst du die Cloud-Server-URL verwenden, solange der bisherige Host erreichbar ist und deinen Nachweis aufbewahrt.",
+      "descriptionCloud": "Verbinde {name} mit einer Cloud-Einladung, einem importierten Mitgliedschaftsanspruch oder der neuen Server-URL neu.",
+      "method": "Methode zur erneuten Verbindung",
+      "invitationOrClaim": "Einladung oder importierter Mitgliedschaftsanspruch",
+      "cloudMigration": "Nach dem Umzug zu Cloud erneut verbinden",
+      "relocation": "Dasselbe Cloud-Projekt unter einer neuen Server-URL",
+      "serverUrl": "Cloud-Server-URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "invitation": "Einladung",
       "invitationPlaceholder": "Neue Einladungszeichenfolge einfügen",
       "reconnect": "Neu verbinden",
       "reconnecting": "Projekt wird neu verbunden...",
-      "failed": "Das Projekt konnte nicht neu verbunden werden. Prüfe die Einladung und versuche es erneut."
+      "failedInvitation": "Das Projekt konnte nicht neu verbunden werden. Prüfe die Einladung und versuche es erneut.",
+      "failedCloudMaterial": "Das Projekt konnte nicht neu verbunden werden. Prüfe die Cloud-Einladung oder den importierten Mitgliedschaftsanspruch und versuche es erneut.",
+      "failedRelocation": "Das Projekt konnte nicht neu verbunden werden. Prüfe die Cloud-Server-URL und versuche es erneut."
     },
     "panel": {
+      "projectFolderRenameFailed": "Der Projektordner konnte nicht aktualisiert werden. Öffne Collab und versuche es erneut.",
       "title": "Collab",
       "addProject": "Projekt hinzufügen",
       "createProject": "Erstellen",
       "projectPicker": "Projekt auswählen",
-      "emptyDescription": "Erstelle ein lokales Projekt oder tritt dem Projekt eines anderen Claudian-Nutzers bei.",
+      "emptyDescription": "Erstelle ein Projekt oder tritt einem bestehenden bei.",
       "joinProject": "Beitreten",
       "reconnectProject": "Projekt neu verbinden...",
       "joinUnavailable": "Der Beitritt wird mit der LAN-Zusammenarbeit verfügbar.",
       "openProject": "Projekt öffnen",
       "setupIncomplete": "Die Einrichtung ist unvollständig, aber die gespeicherte Authority ist sicher.",
+      "leaveRecovery": "Das Verlassen dieses Projekts erfordert Aufmerksamkeit. Die gespeicherte Bereinigungswahl ist sicher.",
+      "resumeLeave": "Verlassen fortsetzen",
+      "leaveRecoveryFailed": "Das Verlassen konnte nicht abgeschlossen werden. Prüfe die Verbindung und versuche es erneut.",
       "workingCopyMissing": "Die Arbeitskopie fehlt. Das gespeicherte Projekt wurde nicht gelöscht.",
+      "setupRecoveryUnavailable": "Setup information could not be read. Refresh and try again.",
+      "restoreWorkingCopy": "Restore working copy",
+      "restoreWorkingCopyFailed": "Could not restore the working copy. Try again.",
       "myChanges": "Meine Änderungen",
       "myChangesReady": "Das Projekt ist bereit. Veröffentlichen folgt im nächsten Meilenstein.",
       "membersAccess": "Mitglieder & Zugriff",
@@ -162,6 +215,13 @@
       "title": "Projektverwaltung"
     },
     "access": {
+      "copyRecoveryLink": "Wiederherstellungslink",
+      "recoveryLinkCopied": "Wiederherstellungslink kopiert.",
+      "activeInvitations": "Aktive Einladungen",
+      "loadingInvitations": "Einladungen werden geladen…",
+      "noInvitations": "Keine aktiven Einladungen.",
+      "members": "Mitglieder",
+      "memberCountSingle": "{count} Mitglied",
       "memberCount": "{count} Mitglieder",
       "noMembers": "Keine Mitglieder verfügbar.",
       "loading": "Mitglieder werden geladen…",
@@ -169,14 +229,73 @@
       "retry": "Erneut versuchen",
       "invitations": "Einladungen",
       "createInvitation": "Einladung erstellen",
+      "resumeInvitation": "Einladung fortsetzen",
       "creatingInvitation": "Einladung wird erstellt…",
       "invitation": "Einladungszeichenfolge",
+      "copyInvitationId": "Einladungs-ID kopieren",
+      "invitationIdCopied": "Einladungs-ID kopiert.",
       "copyInvitation": "Einladung kopieren",
       "revokeInvitation": "Einladung widerrufen",
       "invitationCopied": "Einladung kopiert.",
       "invitationRevoked": "Einladung widerrufen.",
+      "invitationExpiresIn": "Dieser Link läuft in {minutes} Min. ab.",
+      "invitationExpired": "Dieser Link ist abgelaufen.",
+      "invitationUnavailable": "Diese Einladung ist nicht mehr verfügbar.",
+      "createNewInvitation": "Neue Einladung erstellen",
+      "invitationManagementPending": "Schließe zuerst die ausstehende Aktion in der Projektverwaltung ab.",
       "invitationFailed": "Die Einladungsaktion konnte nicht abgeschlossen werden.",
+      "invitationStatus": {
+        "active": "Aktiv",
+        "redeeming": "Wird verwendet",
+        "redeemed": "Verwendet",
+        "revoked": "Widerrufen",
+        "expired": "Abgelaufen"
+      },
       "copyFailed": "Die Einladung konnte nicht kopiert werden.",
+      "reissueMemberClaim": "Mitgliedschaftsanspruch neu ausstellen",
+      "revokeMemberClaim": "Mitgliedschaftsanspruch widerrufen",
+      "memberClaim": "Mitgliedschaftsanspruch",
+      "copyMemberClaim": "Mitgliedschaftsanspruch kopieren",
+      "memberClaimReady": "Der neue Mitgliedschaftsanspruch ist bereit.",
+      "memberClaimCopied": "Mitgliedschaftsanspruch kopiert.",
+      "cloudHostingDescription": "Zusammenarbeit über einen Cloud-Server.",
+      "lanHostingDescription": "Zusammenarbeit über einen Host im lokalen Netzwerk.",
+      "leaveProjectDescription": "Dieses Projekt verlassen. Sie können Ihre lokalen Dateien behalten.",
+      "retireProjectDescription": "Die Zusammenarbeit für alle in diesem Projekt beenden.",
+      "hosting": "Hosting",
+      "moveToCloud": "In die Cloud verschieben",
+      "moveToLan": "Ins LAN verschieben",
+      "projectActions": "Projektaktionen",
+      "cloudServerUrl": "Cloud-Server-URL",
+      "cloudServerUrlPlaceholder": "http://server.example:8787",
+      "proposeLanToCloud": "Verschieben in die Cloud anfragen",
+      "lanToCloudProposal": "Cloud-Ziel: {url} · {phase}",
+      "acceptLanToCloud": "Verschieben in die Cloud akzeptieren",
+      "retryLanToCloud": "Verschieben in die Cloud erneut versuchen",
+      "lanHost": "LAN-Host",
+      "thisDevice": "Dieses Gerät",
+      "anotherDevice": "Anderes Gerät",
+      "prepareLanHelp": "Bereiten Sie dieses Gerät vor, um das Projekt im lokalen Netzwerk zu hosten.",
+      "lanTargetReady": "Dieses Gerät ist bereit, das Projekt zu empfangen.",
+      "otherLanTargetHelp": "Öffnen Sie auf dem empfangenden Gerät „Ins LAN verschieben“ und beantragen Sie das Hosting. Die Anfrage erscheint hier.",
+      "shareLanHandleHelp": "Senden Sie diesen Handle an das Zielgerät, um dort den Transfer anzunehmen.",
+      "prepareCloudToLan": "LAN-Ziel vorbereiten",
+      "withdrawCloudToLan": "Ziel zurückziehen",
+      "cloudToLanDescriptor": "LAN-Zielbeschreibung",
+      "cloudToLanHandle": "Übertragungshandle",
+      "beginCloudToLan": "Verschieben ins LAN beginnen",
+      "acceptCloudToLan": "Übertragung auf diesem Gerät akzeptieren",
+      "observeTransfer": "Übertragungsstatus aktualisieren",
+      "copyTransferData": "Übertragungsdaten kopieren",
+      "transferUpdated": "Verschiebestatus aktualisiert.",
+      "transferConnectionRequired": "Diese gespeicherte Übertragung benötigt eine kompatible Serververbindung, bevor sie fortgesetzt werden kann.",
+      "transferStatus": {
+        "pending": "Ausstehend",
+        "active": "In Bearbeitung",
+        "completed": "Abgeschlossen",
+        "cancelled": "Abgebrochen"
+      },
+      "finishOperation": "Abgeschlossene Aktion beenden",
       "manager": "Manager",
       "managerCount": "Manager: {count}",
       "host": "Host",
@@ -217,13 +336,18 @@
       "retireProject": "Retire project",
       "confirmRetire": "Retire this project for everyone?",
       "leaveCleanupWarning": "Choose what happens to this local copy. Git history and unpublished Git-only work cannot be recovered after cleanup.",
+      "offlineLeaveLan": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the Host.",
+      "offlineLeaveCloud": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the server.",
+      "immediateLocalDeletion": "Local files will be deleted immediately.",
       "retireWarning": "This ends collaboration for every Member. Visible files remain on each device, but collaboration history and Git-only work are not recoverable.",
-      "actionComplete": "Zugriff aktualisiert."
+      "actionComplete": "Zugriff aktualisiert.",
+      "waitingCloudToLanApproval": "Warte auf die Genehmigung eines Managers. Dieses Gerät fährt danach automatisch fort.",
+      "resumeCloudToLan": "Fortsetzen",
+      "cloudToLanApproved": "Genehmigt. Das Zielgerät fährt automatisch fort; alternativ kann dessen Benutzer Fortsetzen wählen."
     },
     "host": {
-      "summary": "LAN-Host",
-      "hostedHere": "Auf diesem Gerät gehostet",
-      "hostedElsewhere": "Auf einem anderen Gerät gehostet",
+      "hostedHereSummary": "LAN-Host (auf diesem Gerät)",
+      "hostedElsewhereSummary": "LAN-Host (auf einem anderen Gerät)",
       "legacyClaimConfirmation": "Dieses Gerät als Host-Eigentümer verwenden?",
       "legacyClaimAction": "Dieses Gerät verwenden",
       "status": {
@@ -244,6 +368,19 @@
       "retry": "Erneut versuchen",
       "startFailed": "Der Host konnte nicht gestartet werden. Prüfe die Diagnose und versuche es erneut.",
       "stopFailed": "Der Host konnte nicht ordnungsgemäß gestoppt werden. Prüfe die Diagnose und versuche es erneut."
+    },
+    "update": {
+      "reconnect": "Verbinde dich erneut, um fortzufahren.",
+      "finishPublish": "Veröffentlichung abschließen",
+      "action": "Aktualisieren",
+      "updating": "Wird aktualisiert…",
+      "reviewTitle": "Projektupdate prüfen",
+      "failed": "Update fehlgeschlagen. Erneut versuchen",
+      "conflictTitle": "Konflikte beim Projektupdate",
+      "editAndContinue": "Bearbeite die Projektdateien und setze das Update dann in der Projektseitenleiste fort.",
+      "reviewAction": "Prüfen",
+      "conflictAction": "Konflikt",
+      "resumeAction": "Fortsetzen"
     },
     "publish": {
       "title": "Meine Änderungen",
@@ -335,6 +472,15 @@
       "save": "Save",
       "saving": "Saving…",
       "saveFailed": "The Ticket could not be saved.",
+      "contentChanged": "This Ticket changed while you were editing. Review the latest version before saving your draft.",
+      "latestVersion": "Latest version",
+      "keepMine": "Keep my version",
+      "savedRefreshing": "Saved. Refreshing…",
+      "savedRefreshFailed": "Saved. The latest Ticket could not be loaded.",
+      "retryRefresh": "Retry refresh",
+      "created": "Ticket created.",
+      "openCreated": "Open Ticket",
+      "useLatest": "Use latest version",
       "close": "Close",
       "reopen": "Reopen",
       "acceptedChanges": "Accepted changes",
@@ -451,7 +597,8 @@
     "titleModel": {
       "name": "Titel-Generierungsmodell",
       "desc": "Modell zur automatischen Generierung von Konversationstiteln.",
-      "auto": "Automatisch (Haiku)"
+      "select": "Modell auswählen",
+      "unavailableWarning": "Automatische Titel sind pausiert. Wählen Sie ein verfügbares Titelmodell."
     },
     "navMappings": {
       "name": "Vim-Style Navigationszuordnungen",
@@ -486,58 +633,10 @@
       "desc": "Bestimmte Befehle und Fähigkeiten aus dem Dropdown ausblenden. Nützlich, um Claude Code-Einträge auszublenden, die für Claudian nicht relevant sind. Gib Namen ohne führenden Schrägstrich ein, einen pro Zeile.",
       "placeholder": "commit\nbuild\ntest"
     },
-    "mcpServers": {
-      "name": "MCP-Server",
-      "descBeforeCommand": "Claude Code verwaltet MCP-Server über seine eigene CLI. Konfiguriere mit ",
-      "descAfterCommand": ", dann sind sie in Claudian verfügbar. ",
-      "learnMore": "Mehr erfahren"
-    },
-    "plugins": {
-      "name": "Claude Code-Plugins",
-      "desc": "Verwalte Claude Code Plugins aus ~/.claude/plugins. Aktivierte Plugins werden pro Vault in .claude/settings.json gespeichert."
-    },
-    "subagents": {
-      "name": "Sub-Agenten",
-      "desc": "Verwalte Vault-Sub-Agenten in .claude/agents/. Jede Markdown-Datei definiert einen benutzerdefinierten Agenten.",
-      "noAgents": "Keine Sub-Agenten konfiguriert. Klicke auf +, um einen zu erstellen.",
-      "deleteConfirm": "Sub-Agent \"{name}\" löschen?",
-      "saveFailed": "Sub-Agent konnte nicht gespeichert werden: {message}",
-      "refreshFailed": "Sub-Agenten konnten nicht aktualisiert werden: {message}",
-      "deleteFailed": "Sub-Agent konnte nicht gelöscht werden: {message}",
-      "renameCleanupFailed": "Warnung: Alte Datei für \"{name}\" konnte nicht entfernt werden",
-      "created": "Sub-Agent \"{name}\" erstellt",
-      "updated": "Sub-Agent \"{name}\" aktualisiert",
-      "deleted": "Sub-Agent \"{name}\" gelöscht",
-      "duplicateName": "Ein Agent mit dem Namen \"{name}\" existiert bereits",
-      "descriptionRequired": "Beschreibung ist erforderlich",
-      "promptRequired": "System-Prompt ist erforderlich",
-      "modal": {
-        "titleEdit": "Sub-Agent bearbeiten",
-        "titleAdd": "Sub-Agent hinzufügen",
-        "name": "Name",
-        "nameDesc": "Nur Kleinbuchstaben, Zahlen und Bindestriche",
-        "namePlaceholder": "code-reviewer",
-        "description": "Beschreibung",
-        "descriptionDesc": "Kurzbeschreibung dieses Agenten",
-        "descriptionPlaceholder": "Prüft Code auf Fehler und Stil",
-        "advancedOptions": "Erweiterte Optionen",
-        "model": "Modell",
-        "modelDesc": "Modellüberschreibung für diesen Agenten",
-        "tools": "Tools",
-        "toolsDesc": "Kommagetrennte Liste zulässiger Tools (leer = alle)",
-        "disallowedTools": "Nicht erlaubte Tools",
-        "disallowedToolsDesc": "Kommagetrennte Liste der zu verbietenden Tools",
-        "skills": "Fähigkeiten",
-        "skillsDesc": "Kommagetrennte Liste von Fähigkeiten",
-        "prompt": "System-Prompt",
-        "promptDesc": "Anweisungen für den Agenten",
-        "promptPlaceholder": "Du bist ein Code-Reviewer. Analysiere den angegebenen Code auf..."
-      }
-    },
     "safety": "Sicherheit",
     "loadUserSettings": {
       "name": "Benutzer-Claude-Einstellungen laden",
-      "desc": "Lädt ~/.claude/settings.json. Wenn aktiviert, können Benutzer-Claude-Code-Berechtigungsregeln den Sicherheitsmodus umgehen."
+      "desc": "Lädt die Claude-Code-Konfiguration auf Benutzerebene aus ~/.claude: settings.json, Skills, Befehle, Agenten und Plugins. Wenn deaktiviert, ist nur die Konfiguration auf Vault-Ebene verfügbar. Wenn aktiviert, können Benutzer-Berechtigungsregeln den Sicherheitsmodus umgehen."
     },
     "claudeSafeMode": {
       "name": "Sicherheitsmodus",
@@ -582,11 +681,6 @@
       "name": "Benutzerdefinierte Kontextlimits",
       "desc": "Legen Sie die Kontextfenstergrößen für Ihre benutzerdefinierten Modelle fest. Leer lassen für den Standardwert (200k Token).",
       "invalid": "Ungültiges Format. Verwenden Sie: 256k, 1m oder exakte Anzahl (1000-10000000)."
-    },
-    "customModels": {
-      "name": "Benutzerdefinierte Modelle",
-      "desc": "Füge zusätzliche Claude-Modell-IDs zur Auswahl hinzu, eine pro Zeile. Modellüberschreibungen aus der Umgebung ersetzen die Auswahl weiterhin.",
-      "placeholder": "claude-opus-4-6\nclaude-opus-4-5-20251101"
     },
     "enableChrome": {
       "name": "Chrome-Erweiterung aktivieren",
@@ -663,6 +757,17 @@
       "leftSidebar": "Linke Seitenleiste",
       "mainTab": "Haupteditor-Tab"
     },
+    "cliInstallation": {
+      "disclosure": "{name}-Installation",
+      "description": "Optionaler CLI-Pfad für diesen Computer. Für automatische Erkennung leer lassen.",
+      "checking": "CLI wird geprüft…",
+      "versionUnavailable": "Version nicht verfügbar",
+      "notFound": "Nicht gefunden",
+      "custom": "Benutzerdefinierter Pfad",
+      "auto": "Automatisch erkannt",
+      "checkFailed": "CLI konnte nicht geprüft werden",
+      "saveFailed": "Pfad konnte nicht gespeichert werden. Erneut versuchen."
+    },
     "cliPath": {
       "name": "Claude CLI-Pfad",
       "desc": "Benutzerdefinierter Pfad zum Claude Code CLI. Leer lassen für automatische Erkennung.",
@@ -682,6 +787,14 @@
       "desc": "Aktivierte {provider}-Modelle für neue Unterhaltungen verfügbar machen. Bestehende Sitzungen bleiben beim Deaktivieren erhalten.",
       "lastProviderWarning": "Damit Claudian funktioniert, muss mindestens ein Anbieter aktiviert bleiben.",
       "noModelsWarning": "Keine {provider}-Modelle sind aktiviert. Aktivieren Sie unten unter „Modelle“ mindestens ein Modell."
+    },
+    "claude": {
+      "responseStyle": {
+        "name": "Antwortstil",
+        "desc": "Standard verwendet Claudes üblichen Stil. Knapp beginnt mit Ergebnissen und verzichtet auf Einleitungen. Erfordert Claude Code 2.1.237 oder neuer.",
+        "default": "Standard",
+        "concise": "Knapp"
+      }
     },
     "codex": {
       "installationMethod": {
@@ -707,10 +820,11 @@
         "workspaceWrite": "Workspace schreiben",
         "readOnly": "Nur lesen"
       },
-      "customModels": {
-        "name": "Benutzerdefinierte Modelle",
-        "desc": "Füge zusätzliche Codex-Modell-IDs zur Auswahl hinzu, eine pro Zeile. `OPENAI_MODEL` hat weiterhin Vorrang, wenn gesetzt.",
-        "placeholder": "gpt-5.4\ngpt-5.3-codex-spark"
+      "responseStyle": {
+        "name": "Antwortstil",
+        "desc": "Wähle den Kommunikationsstil von Codex bei unterstützten Modellen. Gilt ab der nächsten Nachricht.",
+        "pragmatic": "Pragmatisch",
+        "friendly": "Freundlich"
       },
       "reasoningSummary": {
         "name": "Reasoning-Zusammenfassung",
@@ -731,94 +845,46 @@
         "hiddenDesc": "Blende bestimmte Codex-Fähigkeiten aus dem Dropdown aus. Gib Fähigkeitsnamen ohne führendes $ ein, einen pro Zeile.",
         "hiddenPlaceholder": "analyze\nexplain\nfix"
       },
-      "subagents": {
-        "name": "Codex-Sub-Agenten",
-        "desc": "Verwalte Vault-Codex-Sub-Agenten in .codex/agents/. Jede TOML-Datei definiert einen benutzerdefinierten Agenten."
-      },
-      "mcp": {
-        "descBeforeCommand": "Codex verwaltet MCP-Server über seine eigene CLI. Konfiguriere mit ",
-        "descAfterCommand": ", dann sind sie in Claudian verfügbar. ",
-        "learnMore": "Mehr erfahren"
-      },
       "environment": {
         "name": "Codex-Umgebung",
         "desc": "Nur Codex-eigene Laufzeitvariablen. Verwende dies für OPENAI_*- und CODEX_*-Einstellungen. Wenn die Codex-Autoerkennung Hilfe braucht, füge das Installationsverzeichnis dem gemeinsamen PATH hinzu statt diesem Anbieterabschnitt."
       }
     },
     "agentSkills": {
-      "sectionTitle": "Skills", "fixedRoot": "Managed in .agents/skills", "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.", "noSkills": "No shared skills configured. Click + to create one.", "skillBadge": "skill", "diagnosticsTitle": "Skills needing attention", "loadFailed": "Could not load shared skills.", "savedRefreshFailed": "Saved, but provider refresh failed.", "validationFailed": "Invalid skill: {message}", "collisionFailed": "A skill named \"{name}\" already exists.", "saveFailed": "Failed to save shared skill: {message}", "deleteFailed": "Failed to move shared skill to trash: {message}", "staleConflict": "This skill changed elsewhere; refresh before saving.", "created": "Shared skill \"{name}\" created.", "updated": "Shared skill \"{name}\" updated.", "deleted": "Shared skill \"{name}\" moved to trash.",
-      "modal": { "titleEdit": "Edit Shared Skill", "titleAdd": "Add Shared Skill", "name": "Skill name", "nameDesc": "Lowercase letters and numbers separated by single hyphens", "namePlaceholder": "code-reviewer", "description": "Description", "descriptionDesc": "Required portable description used by providers to select the skill", "descriptionPlaceholder": "Reviews code for correctness and maintainability", "instructions": "Instructions", "instructionsDesc": "Required SKILL.md instructions", "instructionsPlaceholder": "Review the supplied code and report actionable findings..." },
-      "delete": { "title": "Delete Shared Skill", "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.", "confirm": "Move to trash" }
-    },
-    "codexSkills": {
+      "sectionTitle": "Skills",
+      "fixedRoot": "Managed in .agents/skills",
+      "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.",
+      "noSkills": "No shared skills configured. Click + to create one.",
+      "skillBadge": "skill",
+      "diagnosticsTitle": "Skills needing attention",
+      "loadFailed": "Could not load shared skills.",
+      "savedRefreshFailed": "Saved, but provider refresh failed.",
+      "validationFailed": "Invalid skill: {message}",
+      "collisionFailed": "A skill named \"{name}\" already exists.",
+      "saveFailed": "Failed to save shared skill: {message}",
+      "deleteFailed": "Failed to move shared skill to trash: {message}",
+      "staleConflict": "This skill changed elsewhere; refresh before saving.",
+      "created": "Shared skill \"{name}\" created.",
+      "updated": "Shared skill \"{name}\" updated.",
+      "deleted": "Shared skill \"{name}\" moved to trash.",
       "modal": {
-        "titleEdit": "Codex-Fähigkeit bearbeiten",
-        "titleAdd": "Codex-Fähigkeit hinzufügen",
-        "directory": "Verzeichnis",
-        "directoryDesc": "Speicherort der Fähigkeit",
-        "skillName": "Name der Fähigkeit",
-        "skillNameDesc": "Der Name nach $ (z. B. \"analyze\" für $analyze)",
-        "description": "Beschreibung",
-        "descriptionDesc": "Optionale Beschreibung im Dropdown",
-        "instructions": "Anweisungen",
-        "instructionsDesc": "Anweisungen der Fähigkeit (SKILL.md-Inhalt)",
-        "instructionsPlaceholder": "Analyze the code for..."
+        "titleEdit": "Edit Shared Skill",
+        "titleAdd": "Add Shared Skill",
+        "name": "Skill name",
+        "nameDesc": "Lowercase letters and numbers separated by single hyphens",
+        "namePlaceholder": "code-reviewer",
+        "description": "Description",
+        "descriptionDesc": "Required portable description used by providers to select the skill",
+        "descriptionPlaceholder": "Reviews code for correctness and maintainability",
+        "instructions": "Instructions",
+        "instructionsDesc": "Required SKILL.md instructions",
+        "instructionsPlaceholder": "Review the supplied code and report actionable findings..."
       },
-      "instructionsRequired": "Anweisungen sind erforderlich",
-      "saveFailed": "Codex-Fähigkeit konnte nicht gespeichert werden",
-      "header": "Codex-Fähigkeiten",
-      "noSkills": "Keine Codex-Fähigkeiten im Vault. Klicke auf +, um eine zu erstellen.",
-      "skillBadge": "Fähigkeit",
-      "deleted": "Codex-Fähigkeit \"{name}\" gelöscht",
-      "deleteFailed": "Codex-Fähigkeit konnte nicht gelöscht werden",
-      "created": "Codex-Fähigkeit \"{name}\" erstellt",
-      "updated": "Codex-Fähigkeit \"{name}\" aktualisiert"
-    },
-    "codexSubagents": {
-      "modal": {
-        "titleEdit": "Codex-Sub-Agent bearbeiten",
-        "titleAdd": "Codex-Sub-Agent hinzufügen",
-        "nameDesc": "Agentenname, den Codex beim Starten verwendet (Kleinbuchstaben, Bindestriche, Unterstriche)",
-        "descriptionDesc": "Wann Codex diesen Agenten verwenden soll",
-        "modelDesc": "Modellüberschreibung (leer lassen zum Vererben)",
-        "namePlaceholder": "code_reviewer"
-      },
-      "reasoningEffort": {
-        "name": "Reasoning-Aufwand",
-        "desc": "Reasoning-Aufwandsstufe des Modells",
-        "inherit": "Vererben",
-        "low": "Niedrig",
-        "medium": "Mittel",
-        "high": "Hoch",
-        "xhigh": "Sehr hoch"
-      },
-      "sandboxMode": {
-        "name": "Sandbox-Modus",
-        "desc": "Sandbox-Beschränkung für diesen Agenten",
-        "inherit": "Vererben",
-        "readOnly": "Nur lesen",
-        "dangerFullAccess": "Vollzugriff",
-        "workspaceWrite": "Workspace schreiben"
-      },
-      "nicknameCandidates": {
-        "name": "Nickname-Kandidaten",
-        "desc": "Kommagetrennte Anzeige-Nicknames (z. B. atlas, delta, echo)"
-      },
-      "developerInstructions": {
-        "name": "Entwickleranweisungen",
-        "desc": "Kernanweisungen, die das Verhalten des Agenten definieren",
-        "placeholder": "Review code like an owner.\nPrioritize correctness, security, and missing test coverage.",
-        "required": "Entwickleranweisungen sind erforderlich"
-      },
-      "validation": {
-        "nameRequired": "Sub-Agent-Name ist erforderlich",
-        "nameTooLong": "Sub-Agent-Name darf höchstens {count} Zeichen lang sein",
-        "nameInvalid": "Sub-Agent-Name darf nur Kleinbuchstaben, Zahlen, Bindestriche und Unterstriche enthalten",
-        "nicknameInvalid": "Nickname-Kandidaten dürfen nur ASCII-Buchstaben, Zahlen, Leerzeichen, Bindestriche und Unterstriche enthalten",
-        "nicknameDuplicate": "Nickname-Kandidaten müssen eindeutig sein"
-      },
-      "header": "Codex-Sub-Agenten",
-      "noAgents": "Keine Codex-Sub-Agenten im Vault. Klicke auf +, um einen zu erstellen."
+      "delete": {
+        "title": "Delete Shared Skill",
+        "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.",
+        "confirm": "Move to trash"
+      }
     }
   }
 }

@@ -1,13 +1,12 @@
+import { createCatalogCommandDiscoveryStore } from '../../../core/providers/commands/catalogCommandDiscovery';
 import { getHiddenProviderCommandSet } from '../../../core/providers/commands/hiddenCommands';
-import { normalizeProviderCommandDiscoveryItems } from '../../../core/providers/commands/ProviderCommandDiscoveryResult';
-import { ProviderCommandDiscoveryStore } from '../../../core/providers/commands/ProviderCommandDiscoveryStore';
 import {
   findProviderModelOption,
   getProviderSettingsSnapshotWithModel,
   normalizeProviderModelSelection,
   resolveConversationModel,
+  resolveProviderDefaultModel,
 } from '../../../core/providers/conversationModel';
-import { getEnabledProviderForModel } from '../../../core/providers/modelRouting';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
@@ -18,9 +17,11 @@ import type {
   ProviderUIOption,
 } from '../../../core/providers/types';
 import type { ClaudianSettings, Conversation } from '../../../core/types';
+import { t } from '../../../i18n/i18n';
 import type { FeatureHost } from '../../FeatureHost';
 import { toggleServiceTier } from '../actions/toggleServiceTier';
-import { getTabProviderId } from './providerResolution';
+import { projectContextUsageDisplay } from '../utils/usageInfo';
+import { getTabProviderId, requireTabProviderId } from './providerResolution';
 import { isClosingLifecycleState } from './TabLifecycle';
 import type {
   AssembledTabRuntime,
@@ -29,6 +30,7 @@ import type {
   TabProviderContext,
   TabServices,
 } from './types';
+import { UNRESOLVED_TAB_CAPABILITIES, UNRESOLVED_TAB_UI } from './UnresolvedTabUI';
 
 export type TabProviderSettings = Record<string, unknown> & {
   model: string;
@@ -58,7 +60,7 @@ export function getTabCapabilities(
   conversation?: Conversation | null,
 ): ProviderCapabilities {
   const providerId = getTabProviderId(tab, plugin, conversation);
-  return ProviderRegistry.getCapabilities(providerId);
+  return providerId ? ProviderRegistry.getCapabilities(providerId) : UNRESOLVED_TAB_CAPABILITIES;
 }
 
 export function getTabChatUIConfig(
@@ -66,7 +68,8 @@ export function getTabChatUIConfig(
   plugin: FeatureHost,
   conversation?: Conversation | null,
 ): ProviderChatUIConfig {
-  return ProviderRegistry.getChatUIConfig(getTabProviderId(tab, plugin, conversation));
+  const providerId = getTabProviderId(tab, plugin, conversation);
+  return providerId ? ProviderRegistry.getChatUIConfig(providerId) : UNRESOLVED_TAB_UI;
 }
 
 export function getTabSettingsSnapshot(
@@ -74,6 +77,7 @@ export function getTabSettingsSnapshot(
   plugin: FeatureHost,
 ): TabProviderSettings {
   const providerId = getTabProviderId(tab, plugin);
+  if (!providerId) return { ...plugin.settings, model: tab.draftModel ?? '' };
   return getProviderSettingsSnapshotWithModel(
     plugin.settings,
     providerId,
@@ -88,7 +92,7 @@ export function getWritableTabSettingsSnapshot(
 ): TabProviderSettings {
   return getProviderSettingsSnapshotWithModel(
     settings,
-    getTabProviderId(tab, plugin),
+    requireTabProviderId(tab, plugin),
     getTabSelectedModel(tab, plugin),
   );
 }
@@ -105,6 +109,7 @@ export function getTabSelectedModel(
   plugin: FeatureHost,
 ): string | null {
   const providerId = getTabProviderId(tab, plugin);
+  if (!providerId) return tab.draftModel;
   if (tab.conversationId === null) {
     return normalizeProviderModelSelection(providerId, plugin.settings, tab.draftModel)
       ?? tab.draftModel
@@ -124,10 +129,8 @@ export function getTabHiddenCommands(
   plugin: FeatureHost,
   conversation?: Conversation | null,
 ): Set<string> {
-  return getHiddenProviderCommandSet(
-    plugin.settings,
-    getTabProviderId(tab, plugin, conversation),
-  );
+  const providerId = getTabProviderId(tab, plugin, conversation);
+  return providerId ? getHiddenProviderCommandSet(plugin.settings, providerId) : new Set();
 }
 
 function getRegistryProviderCatalogInfo(providerId: ProviderId): ProviderCatalogInfo {
@@ -138,11 +141,7 @@ function getRegistryProviderCatalogInfo(providerId: ProviderId): ProviderCatalog
 
   return {
     config: catalog.getDropdownConfig(),
-    discovery: new ProviderCommandDiscoveryStore(async signal =>
-      normalizeProviderCommandDiscoveryItems(
-        await catalog.listDropdownEntries({ includeBuiltIns: false, signal }),
-      ),
-    ),
+    discovery: createCatalogCommandDiscoveryStore(catalog),
   };
 }
 
@@ -159,7 +158,7 @@ export function syncComposerDropdownForProvider(
 
   const providerId = getTabProviderId(tab, plugin, conversation);
   const catalogInfo = (getProviderCatalogConfig ?? tab.providerCatalogResolver)?.()
-    ?? getRegistryProviderCatalogInfo(providerId);
+    ?? (providerId ? getRegistryProviderCatalogInfo(providerId) : null);
 
   dropdown.setProviderId(providerId);
 
@@ -185,7 +184,7 @@ export async function updateTabProviderSettings(
   plugin: FeatureHost,
   update: (settings: TabProviderSettings) => void,
 ): Promise<TabProviderSettings> {
-  const providerId = getTabProviderId(tab, plugin);
+  const providerId = requireTabProviderId(tab, plugin);
   let snapshot!: TabProviderSettings;
   await plugin.mutateSettings((settings) => {
     snapshot = getWritableTabSettingsSnapshot(tab, plugin, settings);
@@ -242,7 +241,21 @@ export function applyProviderUIGating(
   tab.ui.permissionToggle.setVisible(hasPermissionToggle);
 
   tab.ui.imageContextManager.setEnabled(capabilities.supportsImageAttachments);
-  tab.ui.contextUsageMeter.update(tab.state.usage);
+  refreshTabContextUsage(tab, plugin);
+}
+
+/** Renders the tab's raw usage through the shared reported-window/custom-limit projection. */
+export function refreshTabContextUsage(
+  tab: AssembledTabRuntime,
+  plugin: FeatureHost,
+): void {
+  const settings = getTabSettingsSnapshot(tab, plugin);
+  tab.ui.contextUsageMeter.update(projectContextUsageDisplay(tab.state.usage, {
+    providerId: getTabProviderId(tab, plugin),
+    model: settings.model,
+    customContextLimits: settings.customContextLimits,
+    normalizeCustomContextLimitModel: getTabChatUIConfig(tab, plugin).normalizeCustomContextLimitModel,
+  }));
 }
 
 export function refreshTabWorkspaceServices(
@@ -256,16 +269,8 @@ export function refreshTabWorkspaceServices(
 export function syncTabProviderServices(
   tab: TabProviderContext,
   services: TabServices,
-  plugin: FeatureHost,
 ): void {
-  services.instructionRefineService?.cancel();
-  services.instructionRefineService?.resetConversation();
-  services.instructionRefineService = ProviderWorkspaceRegistry.getIfInitialized(tab.providerId)
-    ? ProviderRegistry.createInstructionRefineService(
-      plugin.providerHost,
-      tab.providerId,
-    )
-    : null;
+  if (!tab.providerId) return;
   services.subagentManager.setTaskResultInterpreter(
     ProviderRegistry.getTaskResultInterpreter(tab.providerId),
   );
@@ -274,29 +279,17 @@ export function syncTabProviderServices(
 function resolveBlankTabFallback(
   settings: Record<string, unknown>,
   enabledProviderIds: ProviderId[],
-  preferredProviderId: ProviderId,
+  preferredProviderId: ProviderId | null,
 ): { model: string; providerId: ProviderId } | null {
   const providerIds = [
-    ...(enabledProviderIds.includes(preferredProviderId) ? [preferredProviderId] : []),
+    ...(preferredProviderId && enabledProviderIds.includes(preferredProviderId) ? [preferredProviderId] : []),
     ...ProviderRegistry.getBlankTabProviderIds(settings)
       .filter(providerId => providerId !== preferredProviderId),
   ];
 
   for (const providerId of providerIds) {
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
-    const modelOptions = uiConfig.getModelOptions(settings);
-    if (modelOptions.length === 0) {
-      continue;
-    }
-
-    const defaultModel = uiConfig.getDefaultModel?.(settings);
-    const availableDefault = defaultModel
-      ? findProviderModelOption(providerId, defaultModel, settings)
-      : null;
-    return {
-      model: availableDefault ?? modelOptions[0].value,
-      providerId,
-    };
+    const model = resolveProviderDefaultModel(providerId, settings);
+    if (model) return { model, providerId };
   }
 
   return null;
@@ -315,28 +308,10 @@ export function onProviderAvailabilityChanged(
   let nextProviderId = tab.providerId;
 
   if (tab.draftModel) {
-    const draftProvider = getEnabledProviderForModel(
-      tab.draftModel,
-      settingsSnapshot,
-      tab.providerId,
-    );
-    const availableDraftModel = enabledProviderIds.includes(draftProvider)
-      ? findProviderModelOption(draftProvider, tab.draftModel, settingsSnapshot)
+    const availableDraftModel = tab.providerId && enabledProviderIds.includes(tab.providerId)
+      ? findProviderModelOption(tab.providerId, tab.draftModel, settingsSnapshot)
       : null;
-    if (!availableDraftModel) {
-      const fallback = resolveBlankTabFallback(
-        settingsSnapshot,
-        enabledProviderIds,
-        draftProvider,
-      );
-      if (fallback) {
-        tab.draftModel = fallback.model;
-        nextProviderId = fallback.providerId;
-      }
-    } else {
-      tab.draftModel = availableDraftModel;
-      nextProviderId = draftProvider;
-    }
+    if (availableDraftModel) tab.draftModel = availableDraftModel;
   } else {
     const fallback = resolveBlankTabFallback(
       settingsSnapshot,
@@ -351,7 +326,7 @@ export function onProviderAvailabilityChanged(
 
   tab.providerId = nextProviderId;
 
-  syncTabProviderServices(tab, tab.services, plugin);
+  syncTabProviderServices(tab, tab.services);
   syncComposerDropdownForProvider(tab, plugin);
   invalidateTabProviderCommands(tab);
   refreshTabProviderUI(tab);
@@ -407,12 +382,13 @@ export async function initializeTabExecution(
     return;
   }
   const providerId = getTabProviderId(tab, plugin, conversation);
+  if (!providerId) throw new Error(t('chat.selectAvailableModel'));
   await ProviderWorkspaceRegistry.ensureInitialized(plugin.providerHost, providerId, 'tab-execution');
   if (isClosingLifecycleState(tab.lifecycleState)) {
     return;
   }
   refreshTabWorkspaceServices(tab, plugin);
-  syncTabProviderServices(tab, tab.services, plugin);
+  syncTabProviderServices(tab, tab.services);
   await tab.executionCoordinator.bindConversation(conversation
     ? createConversationExecutionBinding(conversation)
     : null);

@@ -116,6 +116,32 @@ describe('OpenCode base model derivation', () => {
 });
 
 describe('opencodeChatUIConfig', () => {
+  it('capitalizes cached native effort labels while preserving selection values', () => {
+    const options = opencodeChatUIConfig.getReasoningOptions('opencode:openai/gpt-5', {
+      providerConfigs: {
+        opencode: {
+          thinkingOptionsByModel: {
+            'openai/gpt-5': [
+              { label: 'none', value: 'none' },
+              { label: 'low', value: 'low' },
+              { label: 'high', value: 'high' },
+              { label: 'max', value: 'max' },
+              { label: 'default', value: 'default' },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(options).toEqual([
+      { label: 'None', value: 'none' },
+      { label: 'Low', value: 'low' },
+      { label: 'High', value: 'high' },
+      { label: 'Max', value: 'max' },
+      { label: 'Default', value: 'default' },
+    ]);
+  });
+
   it('excludes saved variant selections when their base model is not enabled', () => {
     const options = opencodeChatUIConfig.getModelOptions({
       model: 'haiku',
@@ -196,7 +222,7 @@ describe('opencodeChatUIConfig', () => {
     })).toBe('opencode:anthropic/claude-sonnet-4');
   });
 
-  it('shows configured base model ids even before discovery finishes', () => {
+  it('requires metadata before offering configured base models', () => {
     expect(opencodeChatUIConfig.getModelOptions({
       providerConfigs: {
         opencode: {
@@ -205,13 +231,7 @@ describe('opencodeChatUIConfig', () => {
           ],
         },
       },
-    })).toEqual([
-      {
-        description: 'Configured model',
-        label: 'google/gemini-2.5-pro',
-        value: 'opencode:google/gemini-2.5-pro',
-      },
-    ]);
+    })).toEqual([]);
   });
 
   it('has no model fallback when no models are enabled', () => {

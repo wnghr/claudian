@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,9 +14,17 @@ import {
 } from '@test/helpers/installations';
 
 import {
+  createAuthorityTransferEntryRecord as createOwnedAuthorityTransferEntryRecord,
+  createAuthorityTransferRequesterEntry,
+  prepareAuthorityTransferSourceCancellation,
+} from '@/app/collab/authority-transfer/AuthorityTransferEntryRecord';
+import {
   createAuthorityTransferRecord,
-  decodeAuthorityTransferRecord,
 } from '@/app/collab/authority-transfer/AuthorityTransferRecord';
+import {
+  createCloudToLanTargetEntry,
+  publishCloudToLanTargetEntry,
+} from '@/app/collab/authority-transfer/cloud-to-lan/CloudToLanTransferEntryRecord';
 import {
   createAuthorityTransferClaimBatchCommitmentRecord,
 } from '@/app/collab/authority-transfer/persistence/AuthorityTransferClaimBatchCommitmentRecord';
@@ -28,6 +36,7 @@ import {
 } from '@/app/collab/authority-transfer/persistence/AuthorityTransferPersistence';
 import {
   AuthorityTransferRecovery,
+  type AuthorityTransferRecoveryHandler,
 } from '@/app/collab/authority-transfer/recovery/AuthorityTransferRecovery';
 import { CollabLocalProjectRepository } from '@/app/collab/CollabLocalProjectRepository';
 import {
@@ -40,6 +49,18 @@ import {
 import { CollabError } from '@/core/collab/ClaudianCollabError';
 
 const PROJECT_ID = 'project-alpha';
+
+function createAuthorityTransferEntryRecord(
+  input: Omit<
+    Parameters<typeof createOwnedAuthorityTransferEntryRecord>[0],
+    'ownerInstallationKey'
+  >,
+) {
+  return createOwnedAuthorityTransferEntryRecord({
+    ...input,
+    ownerInstallationKey: TEST_INSTALLATION_A,
+  });
+}
 
 function claimBatch(): CollabTransferredMembershipClaimBatch {
   const unsigned: CollabTransferredMembershipClaimBatch = {
@@ -102,6 +123,18 @@ function lifecycle() {
   });
 }
 
+function recoveryHandler(
+  overrides: Partial<AuthorityTransferRecoveryHandler> = {},
+): AuthorityTransferRecoveryHandler {
+  return {
+    resume: jest.fn(async () => undefined),
+    resumeRetained: jest.fn(async () => undefined),
+    resumeManager: jest.fn(async () => undefined),
+    resumeTargetPreparation: jest.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
 describe('AuthorityTransferRecovery', () => {
   let vaultRoot: string;
 
@@ -111,6 +144,96 @@ describe('AuthorityTransferRecovery', () => {
 
   afterEach(async () => {
     await rm(vaultRoot, { force: true, recursive: true });
+  });
+
+  it('settles a requester-only project after a completed roundtrip during startup recovery', async () => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    const persistence = new AuthorityTransferPersistence(repository, {
+      isRecoveryOwner: owner => owner === TEST_INSTALLATION_A,
+      now: () => new Date('2026-08-27T00:00:00.000Z'),
+    });
+    await persistence.submitRequesterEntry(createAuthorityTransferRequesterEntry({
+      installationKey: TEST_INSTALLATION_A, proposedAt: '2026-08-26T00:00:00.000Z',
+      proposedByMemberId: 'member-alpha', request: { projectId: PROJECT_ID, expectedAuthorityGeneration: 1,
+        idempotencyKey: 'intent-before-roundtrip', targetUrl: 'http://127.0.0.1:8787/' },
+    }));
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
+      reconcileRequester: projectId => persistence.settleLocalAuthorityAdvance({
+        projectId, memberId: 'member-alpha', authorityGeneration: 3,
+      }),
+    }), () => undefined);
+    recovery.register(lifecycle());
+    await recovery.run();
+    await expect(persistence.loadRequesterEntry(PROJECT_ID, TEST_INSTALLATION_A)).resolves.toBeNull();
+  });
+
+  it('retains Manager lifecycle ownership until the exact claimant handoff is durable', async () => {
+    let handoffEstablished = false;
+    const recovery = new AuthorityTransferRecovery(
+      {
+        inspectLifecycleOwner: jest.fn(async () => 'nonterminal'),
+      } as unknown as AuthorityTransferPersistence,
+      recoveryHandler({
+        managerHandoffEstablished: async () => handoffEstablished,
+      }),
+      () => undefined,
+    );
+
+    await expect(recovery.durableOwner.inspect(PROJECT_ID)).resolves.toBe('nonterminal');
+
+    handoffEstablished = true;
+
+    await expect(recovery.durableOwner.inspect(PROJECT_ID)).resolves.toBe('terminal');
+  });
+
+  it.each(['semantic', 'physical', 'retained-failure'] as const)('restores retained routes while %s transfer recovery is pending', async owner => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    for (const generation of [1, 3]) {
+      const transferId = `retained-transfer-${generation}`;
+      const proof = {
+        batchRevision: 1, batchSha256: 'b'.repeat(64), checkpointSha256: 'a'.repeat(64),
+        certificate: 'A'.repeat(86), certificateAlgorithm: 'ed25519' as const,
+        committedAt: '2026-08-26T00:03:00.000Z', operationIntentId: `retained-intent-${generation}`,
+        projectId: PROJECT_ID, sourceAuthority: { generation, kind: 'lan' as const },
+        sourceHostMemberId: 'member-alpha', targetAuthority: { generation: generation + 1, kind: 'cloud' as const }, transferId,
+      };
+      const record = createAuthorityTransferRecord({
+        ownerInstallationKey: TEST_INSTALLATION_A, lifecycleOwnership: 'owned', localRole: 'source',
+        operationIntentId: proof.operationIntentId, stagingDirectoryName: `.claudian-authority-transfer-${transferId}`,
+        sourceLanEndpoint: 'https://127.0.0.1:54545',
+        status: { ...status('source-quiesced'), transferId,
+          batchRevision: 1, batchSha256: proof.batchSha256, checkpointSha256: proof.checkpointSha256,
+          sourceAuthority: proof.sourceAuthority, targetAuthority: proof.targetAuthority,
+          phase: 'completed', state: 'completed', relinquishmentProof: proof, updatedAt: '2026-08-26T00:04:00.000Z' },
+      });
+      await repository.authorityTransferRecords.saveRetained({
+        schemaVersion: 2, record, custody: null, commitment: null, targetHandleSha256: null,
+      });
+    }
+    if (owner !== 'physical') await repository.authorityTransferRecords.save(createAuthorityTransferRecord({
+      ownerInstallationKey: TEST_INSTALLATION_A, lifecycleOwnership: 'owned', localRole: 'source',
+      operationIntentId: 'current-intent', stagingDirectoryName: '.claudian-authority-transfer-current-transfer',
+      status: { ...status('collecting-readiness', PROJECT_ID, 'current-transfer'),
+        sourceAuthority: { generation: 5, kind: 'lan' }, targetAuthority: { generation: 6, kind: 'cloud' } },
+    }));
+    const persistence = new AuthorityTransferPersistence(new CollabLocalProjectRepository(vaultRoot), { isRecoveryOwner: () => true });
+    const recovered: string[] = [];
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
+      resumeRetained: async record => {
+        if (owner === 'retained-failure' && record.transferId === 'retained-transfer-1') throw new Error('old responder unavailable');
+        recovered.push(`retained:${record.transferId}`);
+      },
+      resume: async record => { recovered.push(`current:${record.transferId}`); },
+    }), () => undefined);
+    const subsystem = lifecycle();
+    if (owner === 'physical') subsystem.registerDurableOwner({ name: 'host-transfer', inspect: async () => 'nonterminal' });
+    recovery.register(subsystem);
+    const failed = await subsystem.lifecycleRecovery.resume().then(() => false, () => true);
+    expect(failed).toBe(owner === 'retained-failure');
+    expect(recovered).toEqual([
+      ...(owner === 'retained-failure' ? [] : ['retained:retained-transfer-1']),
+      'retained:retained-transfer-3', ...(owner === 'physical' ? [] : ['current:current-transfer']),
+    ]);
   });
 
   it('enumerates startup state and reacquires the lifecycle arbiter for recovery', async () => {
@@ -125,7 +248,11 @@ describe('AuthorityTransferRecovery', () => {
       status: status('collecting-readiness'),
     }));
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -135,6 +262,35 @@ describe('AuthorityTransferRecovery', () => {
       expect.objectContaining({ projectId: PROJECT_ID, transferId: 'transfer-one' }),
       {},
     );
+  });
+
+  it('recovers the transfer predecessor while a same-Project claimant is pending', async () => {
+    const persistence = {
+      inspectLifecycleOwner: jest.fn(async () => 'nonterminal'),
+      loadRecoveryOwnerRecord: jest.fn(async () => null),
+      loadCloudToLanTargetEntry: jest.fn(async () => null),
+      listRetained: jest.fn(async () => []),
+      scanProjectCatalog: jest.fn(async () => ({
+        invalidEntryCount: 0,
+        projectIds: [PROJECT_ID],
+      })),
+    } as unknown as AuthorityTransferPersistence;
+    const resumeManager = jest.fn(async () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resumeManager, managerHandoffEstablished: async () => true }),
+      () => undefined,
+    );
+    const subsystem = lifecycle();
+    subsystem.registerDurableOwner({
+      inspect: async projectId => projectId === PROJECT_ID ? 'nonterminal' : 'absent',
+      name: 'authority-transfer-claimant',
+    });
+    recovery.register(subsystem);
+
+    await expect(subsystem.lifecycleRecovery.resume()).resolves.toBeUndefined();
+
+    expect(resumeManager).toHaveBeenCalledWith(PROJECT_ID, {});
   });
 
   it('rejects a foreign installation owner before commitment repair or runtime effects', async () => {
@@ -155,7 +311,7 @@ describe('AuthorityTransferRecovery', () => {
     });
     const recovery = new AuthorityTransferRecovery(
       persistence,
-      { resume },
+      recoveryHandler({ resume }),
       assertRecoveryOwner,
     );
     const subsystem = lifecycle();
@@ -183,7 +339,7 @@ describe('AuthorityTransferRecovery', () => {
     }));
     const repair = jest.spyOn(persistence, 'recoverInterruptedClaimCommitment');
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({ resume }), () => {
       throw new CollabError({
         code: 'durable-progress-recovery-required',
         safeContext: { reason: 'host-installation-recovery-owner-mismatch' },
@@ -198,7 +354,7 @@ describe('AuthorityTransferRecovery', () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
-  it('surfaces an ownerless legacy transfer instead of treating it as foreign', async () => {
+  it('rejects an ownerless legacy transfer without rewriting it or resuming effects', async () => {
     const repository = new CollabLocalProjectRepository(vaultRoot);
     const current = createAuthorityTransferRecord({
       ownerInstallationKey: TEST_INSTALLATION_A,
@@ -209,29 +365,30 @@ describe('AuthorityTransferRecovery', () => {
       status: status('collecting-readiness'),
     });
     const { ownerInstallationKey: _ownerInstallationKey, ...withoutOwner } = current;
-    await repository.authorityTransferRecords.save(decodeAuthorityTransferRecord({
-      ...withoutOwner,
-      schemaVersion: 1,
-    }));
+    const legacyPath = path.join(vaultRoot, repository.getProjectPaths(PROJECT_ID).authorityTransfer);
+    await mkdir(path.dirname(legacyPath), { recursive: true });
+    const bytes = JSON.stringify({ ...withoutOwner, schemaVersion: 1 });
+    await writeFile(legacyPath, bytes, { mode: 0o600 });
     const persistence = new AuthorityTransferPersistence(repository, {
       isRecoveryOwner: ownerInstallationKey => ownerInstallationKey === TEST_INSTALLATION_A,
     });
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, ownerInstallationKey => {
-      if (ownerInstallationKey === undefined) {
-        throw new CollabError({
-          code: 'durable-progress-recovery-required',
-          safeContext: { reason: 'host-installation-recovery-owner-mismatch' },
-        });
-      }
-    });
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
     await expect(subsystem.lifecycleRecovery.resume()).rejects.toMatchObject({
       code: 'durable-progress-recovery-required',
+      safeContext: { reason: 'lifecycle-owner-inspection-failed' },
     });
-    await expect(persistence.inspectLifecycleOwner(PROJECT_ID)).resolves.toBe('nonterminal');
+    await expect(persistence.inspectLifecycleOwner(PROJECT_ID)).rejects.toMatchObject({
+      safeContext: { reason: 'local-record-corrupt' },
+    });
+    await expect(readFile(legacyPath, 'utf8')).resolves.toBe(bytes);
     expect(resume).not.toHaveBeenCalled();
   });
 
@@ -248,17 +405,141 @@ describe('AuthorityTransferRecovery', () => {
     }));
     const prepare = jest.fn().mockResolvedValue(undefined);
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { prepare, resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ prepare, resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
     await subsystem.lifecycleRecovery.resume();
 
-    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
-      lifecycleOwnership: 'proposal',
-      transferId: 'transfer-one',
-    }));
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lifecycleOwnership: 'proposal',
+        transferId: 'transfer-one',
+      }),
+      {},
+    );
     expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('enumerates a source entry proposal without constructing a Cloud runtime', async () => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    const persistence = new AuthorityTransferPersistence(repository, {
+      isRecoveryOwner: () => true,
+      now: () => new Date('2026-08-27T00:00:00.000Z'),
+    });
+    await repository.authorityTransferEntries.saveSource(
+      createAuthorityTransferEntryRecord({
+      proposedByMemberId: 'member-proposer',
+      request: {
+        expectedAuthorityGeneration: 1,
+        idempotencyKey: 'intent-entry-proposal',
+        projectId: PROJECT_ID,
+        targetUrl: 'http://127.0.0.1:8787/',
+      },
+      status: {
+        ...status('collecting-readiness'),
+        expiresAt: '2026-09-25T00:00:00.000Z',
+      },
+      }),
+    );
+    const inspect = jest.spyOn(persistence, 'inspectLifecycleOwner');
+    const prepare = jest.fn().mockResolvedValue(undefined);
+    const resume = jest.fn().mockResolvedValue(undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ prepare, resume }),
+      () => {
+      throw new Error('A nonphysical proposal has no installation recovery owner');
+      },
+    );
+    const subsystem = lifecycle();
+    recovery.register(subsystem);
+
+    await expect(subsystem.lifecycleRecovery.resume()).resolves.toBeUndefined();
+
+    expect(inspect).toHaveBeenCalledWith(PROJECT_ID);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+    await expect(persistence.inspectLifecycleOwner(PROJECT_ID)).resolves.toBe('proposal');
+  });
+
+  it('rebinds an entry-only Cloud-to-LAN target preparation during startup recovery', async () => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    const persistence = new AuthorityTransferPersistence(repository, {
+      isRecoveryOwner: ownerInstallationKey => ownerInstallationKey === TEST_INSTALLATION_A,
+    });
+    const preparing = createCloudToLanTargetEntry({
+      createdAt: '2026-08-27T00:00:00.000Z',
+      expiresAt: '2026-09-26T00:00:00.000Z',
+      operationIntentId: 'intent-target-preparation',
+      ownerInstallationKey: TEST_INSTALLATION_A,
+      projectId: PROJECT_ID,
+      selectedTargetMemberId: 'member-target',
+      selectedTargetPersonalRef: 'refs/heads/members/member-target',
+      sourceAuthorityGeneration: 1,
+      sourceCloudUrl: 'https://cloud.example.test/',
+    });
+    const published = publishCloudToLanTargetEntry(preparing, {
+      caCertificatePem: '-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----',
+      caFingerprint: 'c'.repeat(64),
+      publishedAt: '2026-08-27T00:01:00.000Z',
+      targetUrl: 'https://192.168.1.20:54545',
+    });
+    await repository.authorityTransferEntries.saveTarget(published);
+    const resumeTargetPreparation = jest.fn().mockResolvedValue(undefined);
+    const assertRecoveryOwner = jest.fn();
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resumeTargetPreparation }),
+      assertRecoveryOwner,
+    );
+    const subsystem = lifecycle();
+    recovery.register(subsystem);
+
+    await expect(subsystem.lifecycleRecovery.resume()).resolves.toBeUndefined();
+
+    expect(assertRecoveryOwner).toHaveBeenCalledWith(TEST_INSTALLATION_A, PROJECT_ID);
+    expect(resumeTargetPreparation).toHaveBeenCalledWith(published, {});
+  });
+
+  it('expires an entry-only proposal during startup enumeration', async () => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    await repository.authorityTransferEntries.saveSource(
+      createAuthorityTransferEntryRecord({
+      proposedByMemberId: 'member-proposer',
+      request: {
+        expectedAuthorityGeneration: 1,
+        idempotencyKey: 'intent-entry-expiry',
+        projectId: PROJECT_ID,
+        targetUrl: 'http://127.0.0.1:8787/',
+      },
+      status: {
+        ...status('collecting-readiness'),
+        expiresAt: '2026-09-25T00:00:00.000Z',
+      },
+      }),
+    );
+    const persistence = new AuthorityTransferPersistence(repository, {
+      isRecoveryOwner: () => true,
+      now: () => new Date('2026-09-25T00:00:00.000Z'),
+    });
+    const resume = jest.fn().mockResolvedValue(undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
+    const subsystem = lifecycle();
+    recovery.register(subsystem);
+
+    await expect(subsystem.lifecycleRecovery.resume()).resolves.toBeUndefined();
+
+    expect(resume).not.toHaveBeenCalled();
+    await expect(persistence.loadSourceEntry(PROJECT_ID)).resolves.toBeNull();
   });
 
   it('repairs an interrupted unacknowledged commitment before resuming its owner', async () => {
@@ -279,7 +560,11 @@ describe('AuthorityTransferRecovery', () => {
       purpose: 'source-terminal',
     }));
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -307,7 +592,11 @@ describe('AuthorityTransferRecovery', () => {
       stagingDirectoryName: record.stagingDirectoryName,
       transferId: record.transferId,
     }));
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -317,6 +606,78 @@ describe('AuthorityTransferRecovery', () => {
       terminalCleanupCompleted: false,
       transferId: 'transfer-one',
     }), {});
+    await expect(persistence.inspectLifecycleOwner(PROJECT_ID)).resolves.toBe('terminal');
+  });
+
+  it('resumes terminal cleanup when the completion marker precedes entry removal', async () => {
+    const repository = new CollabLocalProjectRepository(vaultRoot);
+    const persistence = new AuthorityTransferPersistence(repository, { isRecoveryOwner: () => true });
+    const proposal = createAuthorityTransferEntryRecord({
+      proposedByMemberId: 'member-proposer',
+      request: {
+        expectedAuthorityGeneration: 1,
+        idempotencyKey: 'intent-one',
+        projectId: PROJECT_ID,
+        targetUrl: 'http://127.0.0.1:8787/',
+      },
+      status: {
+        ...status('collecting-readiness'),
+        expiresAt: '2026-09-25T00:00:00.000Z',
+      },
+    });
+    await repository.authorityTransferEntries.saveSource(
+      prepareAuthorityTransferSourceCancellation({
+        ...proposal,
+        phase: 'handed-off',
+        successor: {
+          operationIntentId: 'intent-one',
+          ownerInstallationKey: TEST_INSTALLATION_A,
+          transferId: 'transfer-one',
+        },
+      }, {
+        expectedAuthorityGeneration: 1,
+        expectedPhase: 'collecting-readiness',
+        idempotencyKey: 'intent-cancel-terminal-cleanup',
+        projectId: PROJECT_ID,
+        transferId: 'transfer-one',
+      }),
+    );
+    await repository.authorityTransferRecords.save({
+      ...createAuthorityTransferRecord({
+        ownerInstallationKey: TEST_INSTALLATION_A,
+        lifecycleOwnership: 'owned',
+        localRole: 'source',
+        operationIntentId: 'intent-one',
+        sourceLanEndpoint: 'https://127.0.0.1:54545',
+        stagingDirectoryName: '.claudian-authority-transfer-transfer-one',
+        status: {
+          ...status('cancelled'),
+          expiresAt: proposal.status.expiresAt,
+        },
+      }),
+      terminalCleanupCompleted: true,
+    });
+    const resume = jest.fn(async record => persistence.completeTerminalCleanup({
+      operationIntentId: record.operationIntentId,
+      projectId: record.projectId,
+      stagingDirectoryName: record.stagingDirectoryName,
+      transferId: record.transferId,
+    }));
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
+    const subsystem = lifecycle();
+    recovery.register(subsystem);
+
+    await expect(subsystem.lifecycleRecovery.resume()).resolves.toBeUndefined();
+
+    expect(resume).toHaveBeenCalledTimes(1);
+    await expect(persistence.loadSourceEntry(PROJECT_ID)).resolves.toMatchObject({
+      phase: 'cancelled',
+      status: { state: 'cancelled' },
+    });
     await expect(persistence.inspectLifecycleOwner(PROJECT_ID)).resolves.toBe('terminal');
   });
 
@@ -352,7 +713,11 @@ describe('AuthorityTransferRecovery', () => {
       stagingDirectoryName: record.stagingDirectoryName,
       transferId: record.transferId,
     }));
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -374,9 +739,9 @@ describe('AuthorityTransferRecovery', () => {
       stagingDirectoryName: '.claudian-authority-transfer-transfer-one',
       status: status('source-quiesced'),
     }));
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn().mockResolvedValue(undefined),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -422,9 +787,9 @@ describe('AuthorityTransferRecovery', () => {
         return record ? 'nonterminal' : 'absent';
       },
     };
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn().mockResolvedValue(undefined),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     subsystem.registerDurableOwner(hostTransferOwner);
     recovery.register(subsystem);
@@ -445,9 +810,9 @@ describe('AuthorityTransferRecovery', () => {
       stagingDirectoryName: '.claudian-authority-transfer-transfer-one',
       status: status('collecting-readiness'),
     }));
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn().mockResolvedValue(undefined),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     recovery.register(subsystem);
     const operation = jest.fn().mockResolvedValue('admitted');
@@ -479,12 +844,12 @@ describe('AuthorityTransferRecovery', () => {
     }
     const firstError = new Error('alpha recovery unavailable');
     const resumed: string[] = [];
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn(async record => {
         resumed.push(record.projectId);
         if (record.projectId === 'project-alpha') throw firstError;
       }),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -507,9 +872,9 @@ describe('AuthorityTransferRecovery', () => {
     await mkdir(path.dirname(corruptPath), { recursive: true });
     await writeFile(corruptPath, '{', { mode: 0o600 });
     const resumed: string[] = [];
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn(async record => { resumed.push(record.projectId); }),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -535,9 +900,9 @@ describe('AuthorityTransferRecovery', () => {
       recursive: true,
     });
     const resumed: string[] = [];
-    const recovery = new AuthorityTransferRecovery(persistence, {
+    const recovery = new AuthorityTransferRecovery(persistence, recoveryHandler({
       resume: jest.fn(async record => { resumed.push(record.projectId); }),
-    }, () => undefined);
+    }), () => undefined);
     const subsystem = lifecycle();
     recovery.register(subsystem);
 
@@ -560,7 +925,11 @@ describe('AuthorityTransferRecovery', () => {
       status: status('collecting-readiness'),
     }));
     const resume = jest.fn().mockResolvedValue(undefined);
-    const recovery = new AuthorityTransferRecovery(persistence, { resume }, () => undefined);
+    const recovery = new AuthorityTransferRecovery(
+      persistence,
+      recoveryHandler({ resume }),
+      () => undefined,
+    );
     const subsystem = lifecycle();
     recovery.register(subsystem);
     let releaseBlocker!: () => void;

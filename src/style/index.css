@@ -22,6 +22,7 @@
 @import "./components/context-tray.css";
 @import "./components/context-footer.css";
 @import "./components/composer-dropdown.css";
+@import "./components/side-chat.css";
 
 /* Toolbar */
 @import "./toolbar/model-selector.css";
@@ -54,18 +55,17 @@
 @import "./features/collab-polish.css";
 
 /* Modals */
-@import "./modals/instruction.css";
 @import "./modals/fork-target.css";
 
 /* Settings */
 @import "./settings/base.css";
+@import "./settings/cli-installation.css";
 @import "./settings/env-snippets.css";
 @import "./settings/slash-settings.css";
-@import "./settings/plugin-settings.css";
-@import "./settings/agent-settings.css";
 @import "./settings/agent-skills.css";
 @import "./settings/paper-cache.css";
 @import "./settings/provider-model-picker.css";
+@import "./settings/groups.css";
 
 /* Accessibility */
 @import "./accessibility.css";

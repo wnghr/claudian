@@ -5,7 +5,7 @@ import type { ComposerInputElement } from '@/shared/composer-dropdown/types';
 import type { ProviderCommandDropdownConfig } from '../../../core/providers/commands/ProviderCommandCatalog';
 import type { ProviderCommandDiscoveryController } from '../../../core/providers/commands/ProviderCommandDiscoveryStore';
 import type { ProviderCommandEntry } from '../../../core/providers/commands/ProviderCommandEntry';
-import type { InstructionRefineService, ProviderId, TitleGenerationService } from '../../../core/providers/types';
+import type { ProviderId, TitleGenerationService } from '../../../core/providers/types';
 import type { MainChatComposerDropdown } from '../composer/MainChatComposerDropdown';
 import type { BrowserSelectionController } from '../controllers/BrowserSelectionController';
 import type { CanvasSelectionController } from '../controllers/CanvasSelectionController';
@@ -18,6 +18,7 @@ import type { ChatExecutionCoordinator } from '../execution/ChatExecutionCoordin
 import type { LinkedContentController } from '../linked-content';
 import type { MessageRenderer } from '../rendering/MessageRenderer';
 import type { SubagentManager } from '../services/SubagentManager';
+import type { SideChatController } from '../side-chat/SideChatController';
 import type { ChatState } from '../state/ChatState';
 import type { TabAttention, TabReviewOutcome } from '../state/types';
 import type { ComposerContextTray } from '../ui/ComposerContextTray';
@@ -31,7 +32,6 @@ import type {
   ServiceTierToggle,
   ThinkingBudgetSelector,
 } from '../ui/InputToolbar';
-import type { InstructionModeManager } from '../ui/InstructionModeManager';
 import type { NavigationSidebar } from '../ui/NavigationSidebar';
 import type { TabSession } from './TabSession';
 
@@ -96,6 +96,8 @@ export interface TabControllers {
   readonly streamController: StreamController;
   readonly inputController: InputController;
   readonly navigationController: NavigationController;
+  /** Owner of this tab's single temporary side chat and composer destination. */
+  readonly sideChatController: SideChatController;
 }
 
 /**
@@ -103,7 +105,6 @@ export interface TabControllers {
  */
 export interface TabServices {
   readonly subagentManager: SubagentManager;
-  instructionRefineService: InstructionRefineService | null;
   readonly titleGenerationService: TitleGenerationService;
 }
 
@@ -121,7 +122,6 @@ export interface TabUIComponents {
   readonly permissionToggle: PermissionToggle;
   readonly serviceTierToggle: ServiceTierToggle;
   readonly composerDropdown: MainChatComposerDropdown;
-  readonly instructionModeManager: InstructionModeManager;
   readonly contextUsageMeter: ContextUsageMeter;
   readonly navigationSidebar: NavigationSidebar;
 }
@@ -201,7 +201,7 @@ export interface AssembledTabRuntime {
   draftModel: string | null;
 
   /** Active provider for this tab's current conversation/runtime. */
-  providerId: ProviderId;
+  providerId: ProviderId | null;
 
   /** Conversation ID bound to this tab (null for new/empty tabs). */
   conversationId: string | null;
@@ -295,7 +295,7 @@ export interface TabManagerCallbacks {
   onTabDraftChanged?: (tabId: TabId, draftModel: string | null) => void;
 
   /** Called when the active provider changes within a tab (blank tab model selection). */
-  onTabProviderChanged?: (tabId: TabId, providerId: ProviderId) => void;
+  onTabProviderChanged?: (tabId: TabId, providerId: ProviderId | null) => void;
 }
 
 /**

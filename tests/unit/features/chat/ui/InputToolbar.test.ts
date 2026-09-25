@@ -246,7 +246,7 @@ describe('ModelSelector', () => {
     expect(icon?.getAttribute('viewBox')).toBe(selectedProviderIcon.viewBox);
   });
 
-  it('should display first model when current model not found', () => {
+  it('shows an unavailable selection instead of displaying another model', () => {
     callbacks.getSettings.mockReturnValue({
       model: 'nonexistent',
       thinkingBudget: 'low',
@@ -257,7 +257,7 @@ describe('ModelSelector', () => {
     });
     selector.updateDisplay();
     const label = parentEl.querySelector('.claudian-model-label');
-    expect(label?.textContent).toBe('Haiku');
+    expect(label?.textContent).toBe('Model unavailable');
   });
 
   it('should render model options in reverse order', () => {
@@ -847,7 +847,6 @@ describe('ServiceTierToggle', () => {
   });
 });
 
-
 describe('ContextUsageMeter', () => {
   let parentEl: any;
   let meter: ContextUsageMeter;
@@ -1049,21 +1048,7 @@ describe('InputToolbarLayoutController', () => {
   });
 });
 
-
 describe('createInputToolbar', () => {
-  it('should return all toolbar components', () => {
-    const parentEl = createMockEl();
-    const callbacks = createMockCallbacks();
-    const toolbar = createInputToolbar(parentEl, callbacks);
-
-    expect(toolbar.modelSelector).toBeInstanceOf(ModelSelector);
-    expect(toolbar.modeSelector).toBeInstanceOf(ModeSelector);
-    expect(toolbar.thinkingBudgetSelector).toBeInstanceOf(ThinkingBudgetSelector);
-    expect(toolbar.contextUsageMeter).toBeInstanceOf(ContextUsageMeter);
-    expect(toolbar.layoutController).toBeInstanceOf(InputToolbarLayoutController);
-    expect(toolbar.permissionToggle).toBeInstanceOf(PermissionToggle);
-    expect(toolbar.serviceTierToggle).toBeInstanceOf(ServiceTierToggle);
-  });
 
   it('should place the mode selector after the permission toggle in toolbar order', () => {
     const parentEl = createMockEl();

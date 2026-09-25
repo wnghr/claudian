@@ -8,7 +8,6 @@ const RETIREMENT = {
   acknowledgementStatus: 'pending',
   cleanupOperationId: 'cleanup-one',
   cleanupStatus: 'pending',
-  cloudDevelopmentActorId: null,
   cloudRetirementId: null,
   cloudServerUrl: null,
   createdAt: '2026-08-13T00:00:00.000Z',
@@ -54,6 +53,8 @@ describe('RetirementLocalRecovery', () => {
       operation: () => Promise<void>,
     ) => operation());
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [{
           authorityKind: 'lan' as const,
@@ -88,6 +89,8 @@ describe('RetirementLocalRecovery', () => {
   it('removes an applied cleanup journal after its projection is already gone', async () => {
     const finalize = jest.fn(async () => undefined);
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [],
         schemaVersion: COLLAB_LOCAL_PROJECT_SCHEMA_VERSION,
@@ -115,6 +118,8 @@ describe('RetirementLocalRecovery', () => {
   it('retains an unindexed cleanup journal while a pending Leave can still adopt it', async () => {
     const finalize = jest.fn(async () => undefined);
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [],
         schemaVersion: COLLAB_LOCAL_PROJECT_SCHEMA_VERSION,
@@ -140,6 +145,8 @@ describe('RetirementLocalRecovery', () => {
     const finalize = jest.fn(async () => undefined);
     const handler = { resume: jest.fn(async () => undefined) };
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [],
         schemaVersion: COLLAB_LOCAL_PROJECT_SCHEMA_VERSION,
@@ -167,6 +174,8 @@ describe('RetirementLocalRecovery', () => {
     const finalize = jest.fn(async () => undefined);
     const handler = { resume: jest.fn(async () => undefined) };
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [{
           authorityKind: 'lan' as const,
@@ -204,6 +213,8 @@ describe('RetirementLocalRecovery', () => {
     const finalize = jest.fn(async () => undefined);
     const handler = { resume: jest.fn(async () => undefined) };
     const recovery = new RetirementLocalRecovery({
+      listRetiredProjectIds: async () => [],
+      resumeFinalizedRetiredProject: async () => undefined,
       loadIndex: jest.fn(async () => ({
         projects: [{
           authorityKind: 'lan' as const,

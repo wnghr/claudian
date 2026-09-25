@@ -1,10 +1,3 @@
-import {
-  computeConversationInputDigest,
-  CONVERSATION_INPUT_LEDGER_SCHEMA_VERSION,
-  type ConversationInputLedger,
-  type ConversationInputLedgerReadResult,
-  type ConversationInputRecord,
-} from '../../core/bootstrap/ConversationInputLedgerStorage';
 import type { ConversationPersistence } from '../../core/bootstrap/ConversationPersistenceStore';
 import type {
   SessionMetadataAuthority,
@@ -32,12 +25,10 @@ import {
   type ProviderId,
 } from '../../core/providers/types';
 import {
-  type ChatMessage,
   type Conversation,
   type ConversationMeta,
   type ConversationModelRecoverySource,
   type ConversationMutablePatch,
-  isCanonicalUserMessage,
   type SessionMetadata,
 } from '../../core/types';
 import { mapWithConcurrency } from '../../utils/concurrency';
@@ -53,22 +44,6 @@ interface ConversationRepositoryBaseDeps {
 export type ConversationRepositoryDeps = ConversationRepositoryBaseDeps & {
   persistence: ConversationPersistence;
 };
-
-interface LoadedLedgerState {
-  status: 'loaded';
-  ledger: ConversationInputLedger;
-  needsMigration: boolean;
-}
-
-interface UnavailableLedgerState {
-  status: 'unavailable';
-  reason: Extract<
-    ConversationInputLedgerReadResult,
-    { status: 'unavailable' }
-  >['reason'];
-}
-
-type LedgerState = LoadedLedgerState | UnavailableLedgerState;
 
 interface ExecutionBindingState {
   readonly bindingId: string;
@@ -88,11 +63,6 @@ interface LinkedContentPathRename {
   oldPath: string;
   newPath: string;
   includeDescendants: boolean;
-}
-
-interface InputLedgerCorrelationResult {
-  ledgerChanged: boolean;
-  lastAcceptedInputAt: number | null;
 }
 
 type HistoricalModelRecoveryResult =
@@ -176,23 +146,6 @@ function applyModelRecoverySource(
   };
 }
 
-export class ConversationInputLedgerUnavailableError extends Error {
-  constructor(
-    readonly conversationId: string,
-    readonly reason: UnavailableLedgerState['reason'],
-  ) {
-    super(`Conversation input ledger is unavailable: ${conversationId} (${reason})`);
-    this.name = 'ConversationInputLedgerUnavailableError';
-  }
-}
-
-export class ConversationInputStageRejectedError extends Error {
-  constructor(readonly conversationId: string) {
-    super(`Conversation input was not durably staged: ${conversationId}`);
-    this.name = 'ConversationInputStageRejectedError';
-  }
-}
-
 export class ConversationRepository {
   private conversations: Conversation[] = [];
   private hydratedConversationIds = new Set<string>();
@@ -200,8 +153,6 @@ export class ConversationRepository {
   private conversationGenerations = new Map<string, number>();
   private deletedConversationIds = new Set<string>();
   private deletingConversationIds = new Set<string>();
-  private readonly ledgerStates = new Map<string, LedgerState>();
-  private readonly ledgerLoadPromises = new Map<string, Promise<LedgerState>>();
   private readonly persistenceQueues = new Map<string, Promise<void>>();
   private readonly executionBindings = new Map<string, ExecutionBindingState>();
   private readonly deletionStates = new Map<string, ConversationDeletionState>();
@@ -226,10 +177,10 @@ export class ConversationRepository {
 
   replaceAll(conversations: Conversation[]): void {
     for (const conversation of this.conversations) {
-      this.invalidateConversation(conversation.id);
+      this.#invalidateConversation(conversation.id);
     }
     for (const conversation of conversations) {
-      this.applyLinkedContentPathRenamesToHydratedConversation(conversation);
+      this.#applyLinkedContentPathRenamesToHydratedConversation(conversation);
     }
     this.conversations = conversations.filter(
       ({ id }) => !this.deletedConversationIds.has(id),
@@ -240,7 +191,7 @@ export class ConversationRepository {
     }
     this.linkedContentPathsByConversationId.clear();
     for (const conversation of this.conversations) {
-      this.captureLinkedContentIdentity(conversation);
+      this.#captureLinkedContentIdentity(conversation);
     }
     this.hydratedConversationIds = new Set(
       this.conversations
@@ -250,8 +201,6 @@ export class ConversationRepository {
     this.hydrationPromises.clear();
     this.historicalModelRecoveryPromises.clear();
     this.historicalModelRecoverySources.clear();
-    this.ledgerStates.clear();
-    this.ledgerLoadPromises.clear();
     this.executionBindings.clear();
     this.deletionStates.clear();
   }
@@ -264,8 +213,10 @@ export class ConversationRepository {
     }>,
   ): Promise<void> {
     for (const { conversation, source } of entries) {
-      const target = source === 'legacy' ? 'unscoped' : source;
-      this.metadataTargets.set(conversation.id, target);
+      if (!this.metadataTargets.has(conversation.id)) {
+        const target = source === 'legacy' ? 'unscoped' : source;
+        this.metadataTargets.set(conversation.id, target);
+      }
     }
     const linkedContentPathCorrectedIds = new Set<string>();
     for (const { conversation } of entries) {
@@ -274,7 +225,7 @@ export class ConversationRepository {
         linkedContentPathCorrectedIds.add(conversation.id);
       } else if (
         !current
-        && this.applyLinkedContentPathRenamesToHydratedConversation(conversation)
+        && this.#applyLinkedContentPathRenamesToHydratedConversation(conversation)
       ) {
         linkedContentPathCorrectedIds.add(conversation.id);
       }
@@ -285,7 +236,7 @@ export class ConversationRepository {
         !this.getSync(conversation.id)
         && registeredProviderIds.has(conversation.providerId)
       ) {
-        await this.reconcileIncomingSelectedModel(conversation);
+        await this.#reconcileIncomingSelectedModel(conversation);
       }
     }
     const added = this.mergeMetadataConversations(
@@ -308,12 +259,12 @@ export class ConversationRepository {
           )
           || linkedContentPathCorrectedIds.has(conversation.id),
       )
-      .map(({ conversation, source }) => this.enqueuePersistence(
+      .map(({ conversation, source }) => this.#enqueuePersistence(
         conversation.id,
         async () => {
           const current = this.getSync(conversation.id);
-          if (!current || !await this.canWriteConversation(current)) return;
-          await this.writeMetadata(current, {
+          if (!current || !await this.#canWriteConversation(current)) return;
+          await this.#writeMetadata(current, {
             preserveProviderState: !this.hydratedConversationIds.has(current.id),
           });
           this.pendingLinkedContentPathCorrectionIds.delete(current.id);
@@ -335,7 +286,7 @@ export class ConversationRepository {
         this.getSync(conversation.id);
         continue;
       }
-      if (this.applyLinkedContentPathRenamesToHydratedConversation(conversation)) {
+      if (this.#applyLinkedContentPathRenamesToHydratedConversation(conversation)) {
         this.pendingLinkedContentPathCorrectionIds.add(conversation.id);
       }
     }
@@ -361,7 +312,7 @@ export class ConversationRepository {
         right.lastActivityAt - left.lastActivityAt,
     );
     for (const conversation of added) {
-      this.captureLinkedContentIdentity(conversation);
+      this.#captureLinkedContentIdentity(conversation);
       if (conversation.messages.length > 0) {
         this.hydratedConversationIds.add(conversation.id);
       }
@@ -380,17 +331,15 @@ export class ConversationRepository {
       this.conversations.splice(index, 1);
       this.hydratedConversationIds.delete(shell.id);
       this.hydrationPromises.delete(shell.id);
-      this.ledgerStates.delete(shell.id);
-      this.ledgerLoadPromises.delete(shell.id);
       this.executionBindings.delete(shell.id);
       this.linkedContentPathsByConversationId.delete(shell.id);
       this.metadataTargets.delete(shell.id);
-      this.invalidateConversation(shell.id);
+      this.#invalidateConversation(shell.id);
     }
   }
 
   getAll(): Conversation[] {
-    this.restoreAllLinkedContentIdentities();
+    this.#restoreAllLinkedContentIdentities();
     return this.conversations;
   }
 
@@ -404,11 +353,8 @@ export class ConversationRepository {
     const providerId = options?.providerId ?? DEFAULT_CHAT_PROVIDER_ID;
     const sessionId = options?.sessionId;
     const id = sessionId ?? this.generateId();
-    if (
-      this.deletedConversationIds.has(id)
-      || await this.persistence.isDeleted(id)
-    ) {
-      throw new Error(`Conversation ID is permanently deleted: ${id}`);
+    if (this.deletedConversationIds.has(id)) {
+      throw new Error(`Conversation was deleted in this session: ${id}`);
     }
     const providerSettings =
       ProviderSettingsCoordinator.getProviderSettingsSnapshot(
@@ -423,7 +369,7 @@ export class ConversationRepository {
     const conversation: Conversation = {
       id,
       providerId,
-      title: this.generateDefaultTitle(),
+      title: this.#generateDefaultTitle(),
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       sessionId: sessionId ?? null,
@@ -436,7 +382,7 @@ export class ConversationRepository {
 
     this.metadataTargets.set(conversation.id, 'device');
     this.conversations.unshift(conversation);
-    this.captureLinkedContentIdentity(conversation);
+    this.#captureLinkedContentIdentity(conversation);
     if (!sessionId) {
       this.hydratedConversationIds.add(conversation.id);
     }
@@ -457,12 +403,12 @@ export class ConversationRepository {
     const conversation = this.getSync(id);
     if (!conversation) return false;
 
-    return this.enqueuePersistence(id, async () => {
-      if (!await this.canWriteConversation(conversation)) return false;
-      const source = this.requireMetadataTarget(id);
+    return this.#enqueuePersistence(id, async () => {
+      if (!await this.#canWriteConversation(conversation)) return false;
+      const source = this.#requireMetadataTarget(id);
       if (source === 'device') return false;
 
-      await this.writeMetadata(conversation, {
+      await this.#writeMetadata(conversation, {
         preserveProviderState: !this.hydratedConversationIds.has(id),
       });
       await this.persistence.assignMetadataToDevice(id);
@@ -476,10 +422,7 @@ export class ConversationRepository {
       (conversation) => conversation.id === id,
     );
     if (index === -1) {
-      if (
-        this.deletedConversationIds.has(id)
-        || await this.isDeletedInAnyMetadataTarget(id)
-      ) {
+      if (this.deletedConversationIds.has(id)) {
         await this.retryDeletedConversationCleanup(id);
       }
       return;
@@ -497,28 +440,28 @@ export class ConversationRepository {
     this.conversations.splice(index, 1);
     this.hydratedConversationIds.delete(id);
     this.hydrationPromises.delete(id);
-    this.invalidateConversation(id);
+    this.#invalidateConversation(id);
 
     if (pendingHydration) {
       await Promise.allSettled([pendingHydration]);
     }
 
-    let markerDurable = false;
+    let metadataRemoved = false;
     try {
-      await this.enqueuePersistence(id, async () => {
-        await this.persistence.markDeleted(
-          id,
-          Date.now(),
-          this.requireMetadataTarget(id),
-        );
-        markerDurable = true;
+      await this.#enqueuePersistence(id, async () => {
+        await this.persistence.deleteLegacyMetadata(id);
+        const target = this.#requireMetadataTarget(id);
+        await (target === 'device'
+          ? this.persistence.deleteCurrentMetadata(id)
+          : this.persistence.deleteCurrentMetadata(id, target));
+        metadataRemoved = true;
         this.deletingConversationIds.delete(id);
         this.deletionStates.delete(id);
         this.executionBindings.delete(id);
-        await this.finalizeDeletedConversation(id);
+        await this.#finalizeDeletedConversation(id);
       });
     } catch (error) {
-      if (!markerDurable) {
+      if (!metadataRemoved) {
         this.deletingConversationIds.delete(id);
         this.deletedConversationIds.delete(id);
         this.deletionStates.delete(id);
@@ -530,25 +473,22 @@ export class ConversationRepository {
         if (conversation.messages.length > 0) {
           this.hydratedConversationIds.add(id);
         }
-        this.invalidateConversation(id);
-        await this.replayDeletionSnapshot(id, deletionState);
+        this.#invalidateConversation(id);
+        await this.#replayDeletionSnapshot(id, deletionState);
       }
       throw error;
     }
   }
 
   async retryDeletedConversationCleanup(id: string): Promise<void> {
-    if (
-      !this.deletedConversationIds.has(id)
-      && !await this.isDeletedInAnyMetadataTarget(id)
-    ) {
+    if (!this.deletedConversationIds.has(id)) {
       return;
     }
     this.deletedConversationIds.add(id);
     this.deletingConversationIds.delete(id);
-    await this.enqueuePersistence(
+    await this.#enqueuePersistence(
       id,
-      () => this.finalizeDeletedConversation(id),
+      () => this.#finalizeDeletedConversation(id),
     );
   }
 
@@ -558,36 +498,43 @@ export class ConversationRepository {
   ): Promise<'deleted' | 'reset' | 'preserved' | 'not_found'> {
     const conversation = this.getSync(id);
     if (!conversation) return 'not_found';
+    const generation = this.#getConversationGeneration(id);
 
     const historyService = ProviderRegistry.getConversationHistoryService(
       conversation.providerId,
     );
     if (!historyService.resolveMissingConversationSession) return 'preserved';
 
-    const previousSessionId = conversation.sessionId;
-    const previousProviderState = conversation.providerState;
-    const previousResumeAtMessageId = conversation.resumeAtMessageId;
     const vaultPath = this.deps.getVaultPath();
     let resolution: 'delete' | 'reset' | 'preserve';
+    let nativeReadCompleted = false;
     try {
-      resolution = await historyService.resolveMissingConversationSession(
-        conversation,
-        vaultPath,
-        missingProviderSessionId,
-        this.getHistoryPathContext(conversation.providerId, vaultPath),
-      );
-    } catch {
-      conversation.sessionId = previousSessionId;
-      conversation.providerState = previousProviderState;
-      conversation.resumeAtMessageId = previousResumeAtMessageId;
+      const outcome = await this.#readProviderHistory(conversation, async draft => {
+        const result = await historyService.resolveMissingConversationSession!(
+          draft,
+          vaultPath,
+          missingProviderSessionId,
+          this.#getHistoryPathContext(draft.providerId, vaultPath),
+        );
+        nativeReadCompleted = true;
+        return result;
+      }, value => value === 'reset');
+      if (!outcome.current) return 'preserved';
+      resolution = outcome.value;
+    } catch (error) {
+      // Native inspection is best effort; a failed durable transition must surface.
+      if (nativeReadCompleted) throw error;
       return 'preserved';
     }
+    // Acceptance can supersede the native decision before this await continuation.
+    if (!this.#isConversationCurrent(conversation, generation)) return 'preserved';
     if (resolution === 'delete') {
       await this.delete(id);
       return 'deleted';
     }
     if (resolution === 'reset') {
-      await this.save(conversation);
+      this.hydratedConversationIds.delete(id);
+      this.#invalidateConversation(id);
       return 'reset';
     }
     return 'preserved';
@@ -597,7 +544,7 @@ export class ConversationRepository {
     const conversation = this.getSync(id);
     if (!conversation) return;
 
-    conversation.title = title.trim() || this.generateDefaultTitle();
+    conversation.title = title.trim() || this.#generateDefaultTitle();
     await this.save(conversation);
   }
 
@@ -623,7 +570,7 @@ export class ConversationRepository {
       );
       if (selectedModel) {
         safeUpdates.selectedModel = selectedModel;
-        this.markSelectedModelMutation(conversation);
+        this.#markSelectedModelMutation(conversation);
       } else {
         delete safeUpdates.selectedModel;
       }
@@ -635,7 +582,7 @@ export class ConversationRepository {
       || 'resumeAtMessageId' in safeUpdates
     ) {
       this.hydratedConversationIds.delete(id);
-      this.invalidateConversation(id);
+      this.#invalidateConversation(id);
     }
     await this.save(conversation);
   }
@@ -665,6 +612,26 @@ export class ConversationRepository {
       conversation.isPinned = false;
     }
     await this.save(conversation);
+  }
+
+  invalidateProviderSessions(providerIds: ProviderId[]): Conversation[] {
+    const drafts = this.conversations.map(conversation => cloneJson(conversation));
+    const invalidated = ProviderSettingsCoordinator.invalidateConversationSessions(drafts, providerIds);
+    return invalidated.flatMap(draft => {
+      const conversation = this.getSync(draft.id);
+      if (!conversation) return [];
+      conversation.sessionId = draft.sessionId;
+      conversation.providerState = draft.providerState;
+      conversation.resumeAtMessageId = draft.resumeAtMessageId;
+      this.hydratedConversationIds.delete(conversation.id);
+      this.#invalidateConversation(conversation.id);
+      return [conversation];
+    });
+  }
+
+  async persistProviderSessionInvalidations(providerIds: ProviderId[]): Promise<void> {
+    const providers = new Set(providerIds);
+    await this.persistConversations(this.conversations.filter(conversation => providers.has(conversation.providerId)));
   }
 
   async persistConversations(
@@ -707,7 +674,7 @@ export class ConversationRepository {
     const recovered = await mapWithConcurrency(
       candidates,
       async (conversation): Promise<Conversation | null> => {
-        const recovery = this.recoverHistoricalModelSelection(conversation);
+        const recovery = this.#recoverHistoricalModelSelection(conversation);
         if (!recovery) return null;
         const result = await recovery;
         return result === 'recovered' && this.getSync(conversation.id) === conversation
@@ -721,7 +688,7 @@ export class ConversationRepository {
     );
   }
 
-  private recoverHistoricalModelSelection(
+  #recoverHistoricalModelSelection(
     conversation: Conversation,
   ): Promise<HistoricalModelRecoveryResult> | null {
     if (getStoredModelSelection(conversation.selectedModel)) {
@@ -753,8 +720,8 @@ export class ConversationRepository {
     }
     if (!recoverModelSelection) return null;
 
-    const generation = this.getConversationGeneration(conversation.id);
-    const recovery = this.runHistoricalModelRecovery(
+    const generation = this.#getConversationGeneration(conversation.id);
+    const recovery = this.#runHistoricalModelRecovery(
       conversation,
       generation,
       recoverModelSelection,
@@ -764,7 +731,7 @@ export class ConversationRepository {
     return recovery;
   }
 
-  private async runHistoricalModelRecovery(
+  async #runHistoricalModelRecovery(
     conversation: Conversation,
     generation: number,
     recoverModelSelection: HistoricalModelRecovery,
@@ -776,14 +743,14 @@ export class ConversationRepository {
       selectedModel = (await recoverModelSelection(
         recoverySource,
         vaultPath,
-        this.getHistoryPathContext(recoverySource.providerId, vaultPath),
+        this.#getHistoryPathContext(recoverySource.providerId, vaultPath),
       ))?.trim() || null;
     } catch {
       return 'unresolved';
     }
     if (!selectedModel) return 'unresolved';
     if (
-      !this.isConversationCurrent(conversation, generation)
+      !this.#isConversationCurrent(conversation, generation)
       || getStoredModelSelection(conversation.selectedModel)
     ) {
       return 'superseded';
@@ -801,7 +768,7 @@ export class ConversationRepository {
 
     let didPersist: boolean;
     try {
-      didPersist = await this.persistSelectedModelBeforePublish(
+      didPersist = await this.#persistSelectedModelBeforePublish(
         conversation,
         selectedModel,
         true,
@@ -812,7 +779,7 @@ export class ConversationRepository {
     if (
       didPersist
       &&
-      this.isConversationCurrent(conversation, generation)
+      this.#isConversationCurrent(conversation, generation)
       && conversation.selectedModel === selectedModel
     ) {
       this.historicalModelRecoverySources.delete(conversation.id);
@@ -843,7 +810,7 @@ export class ConversationRepository {
     };
     this.linkedContentPathRenames.push(rename);
     const changed = this.conversations.filter(conversation => (
-      this.applyLinkedContentPathRename(conversation, rename)
+      this.#applyLinkedContentPathRename(conversation, rename)
     ));
     await this.persistConversations(changed);
   }
@@ -902,14 +869,14 @@ export class ConversationRepository {
       return Promise.resolve(false);
     }
 
-    return this.persistLatestExecutionSnapshot(conversationId, binding);
+    return this.#persistLatestExecutionSnapshot(conversationId, binding);
   }
 
-  private persistLatestExecutionSnapshot(
+  #persistLatestExecutionSnapshot(
     conversationId: string,
     binding: ExecutionBindingState,
   ): Promise<boolean> {
-    return this.enqueuePersistence(conversationId, async () => {
+    return this.#enqueuePersistence(conversationId, async () => {
       if (
         this.executionBindings.get(conversationId) !== binding
         || !binding.latestSnapshot
@@ -918,7 +885,7 @@ export class ConversationRepository {
         return false;
       }
       const current = this.getSync(conversationId);
-      if (!current || !await this.canWriteConversation(current)) {
+      if (!current || !await this.#canWriteConversation(current)) {
         return false;
       }
       if (
@@ -930,14 +897,14 @@ export class ConversationRepository {
       }
 
       const latest = binding.latestSnapshot;
-      this.applySnapshot(current, latest);
-      await this.writeMetadata(current);
+      this.#applySnapshot(current, latest);
+      await this.#writeMetadata(current);
       binding.lastPersistedRevision = latest.revision;
       return true;
     });
   }
 
-  private replayDeletionSnapshot(
+  #replayDeletionSnapshot(
     conversationId: string,
     deletionState: ConversationDeletionState,
   ): Promise<boolean> {
@@ -970,147 +937,19 @@ export class ConversationRepository {
     }
   }
 
-  async assertConversationExecutionAuthority(
-    conversationId: string,
-  ): Promise<void> {
+  async assertConversationExecutionAuthority(conversationId: string): Promise<void> {
     const conversation = this.getSync(conversationId);
-    if (!conversation) {
-      throw new ConversationInputStageRejectedError(conversationId);
-    }
-    const target = this.requireMetadataTarget(conversationId);
-    if (!await this.canWriteConversation(conversation)) {
-      throw new ConversationInputStageRejectedError(conversationId);
-    }
-    await this.persistence.assertMetadataWriteAuthority(conversationId, target);
-    if (
-      this.getSync(conversationId) !== conversation
-      || this.requireMetadataTarget(conversationId) !== target
-    ) {
-      throw new ConversationInputStageRejectedError(conversationId);
+    if (!conversation || !await this.#canWriteConversation(conversation)
+      || this.getSync(conversationId) !== conversation) {
+      throw new Error(`Conversation is no longer available: ${conversationId}`);
     }
   }
 
-  async stageConversationInput(
-    conversationId: string,
-    record: ConversationInputRecord,
-  ): Promise<void> {
-    const ledger = await this.requireInputLedger(conversationId);
-    await this.enqueuePersistence(conversationId, async () => {
-      if (!await this.canWriteLedger(conversationId, ledger)) {
-        throw new ConversationInputStageRejectedError(conversationId);
-      }
-      const existing = ledger.records.find(({ id }) => id === record.id);
-      let insertedRecord: ConversationInputRecord | null = null;
-      if (!existing) {
-        insertedRecord = cloneJson(record);
-        ledger.records.push(insertedRecord);
-      }
-      try {
-        await this.writeInputLedger(conversationId, ledger);
-        this.markInputLedgerCanonical(conversationId, ledger);
-      } catch (error) {
-        if (insertedRecord) {
-          const insertedIndex = ledger.records.indexOf(insertedRecord);
-          if (insertedIndex !== -1) {
-            ledger.records.splice(insertedIndex, 1);
-          }
-        }
-        throw error;
-      }
-    });
-  }
-
-  async acceptConversationInput(
-    conversationId: string,
-    recordId: string,
-    nativeIds: {
-      providerUserMessageId?: string;
-      providerAssistantMessageId?: string;
-    } = {},
-  ): Promise<void> {
-    const ledger = await this.requireInputLedger(conversationId);
-    const record = ledger.records.find(({ id }) => id === recordId);
-    if (!record) {
-      throw new Error(`Conversation input record not found: ${recordId}`);
-    }
-    record.state = 'accepted';
-    if (nativeIds.providerUserMessageId !== undefined) {
-      record.providerUserMessageId = nativeIds.providerUserMessageId;
-    }
-    if (nativeIds.providerAssistantMessageId !== undefined) {
-      record.providerAssistantMessageId = nativeIds.providerAssistantMessageId;
-    }
+  async recordConversationActivity(conversationId: string, timestamp: number): Promise<void> {
     const conversation = this.getSync(conversationId);
-    if (conversation) {
-      this.attachRecordToInMemoryMessages(conversation, record);
-      conversation.lastActivityAt = Math.max(
-        conversation.lastActivityAt,
-        record.timestamp,
-      );
-    }
-
-    await this.enqueuePersistence(conversationId, async () => {
-      if (!await this.canWriteLedger(conversationId, ledger)) return;
-      await this.writeInputLedger(conversationId, ledger);
-      this.markInputLedgerCanonical(conversationId, ledger);
-      const current = this.getSync(conversationId);
-      if (current && await this.canWriteConversation(current)) {
-        await this.writeMetadata(current);
-      }
-    });
-  }
-
-  async discardStagedConversationInput(
-    conversationId: string,
-    recordId: string,
-  ): Promise<void> {
-    const ledger = await this.requireInputLedger(conversationId);
-    const index = ledger.records.findIndex(({ id }) => id === recordId);
-    if (index === -1 || ledger.records[index].state !== 'staged') return;
-    ledger.records.splice(index, 1);
-    await this.persistLedgerOnly(conversationId, ledger);
-  }
-
-  async getConversationInputLedger(
-    conversationId: string,
-  ): Promise<ConversationInputLedger | null> {
-    const state = await this.loadInputLedger(conversationId);
-    return state.status === 'loaded' ? cloneJson(state.ledger) : null;
-  }
-
-  async copyConversationInputsForFork(
-    sourceConversationId: string,
-    targetConversationId: string,
-    throughAssistantCheckpointId?: string,
-  ): Promise<void> {
-    const source = await this.requireInputLedger(sourceConversationId);
-    let records = source.records;
-    if (throughAssistantCheckpointId !== undefined) {
-      const checkpointIndex = records.findIndex(
-        ({ providerAssistantMessageId }) =>
-          providerAssistantMessageId === throughAssistantCheckpointId,
-      );
-      records = checkpointIndex === -1 ? [] : records.slice(0, checkpointIndex + 1);
-    }
-    const target = await this.requireInputLedger(targetConversationId);
-    target.records = cloneJson(records);
-    await this.persistLedgerOnly(targetConversationId, target);
-  }
-
-  async truncateConversationInputsFrom(
-    conversationId: string,
-    inputIdentity: string,
-  ): Promise<void> {
-    const ledger = await this.requireInputLedger(conversationId);
-    const index = ledger.records.findIndex(
-      (record) =>
-        record.id === inputIdentity
-        || record.localMessageId === inputIdentity
-        || record.providerUserMessageId === inputIdentity,
-    );
-    if (index === -1) return;
-    ledger.records.splice(index);
-    await this.persistLedgerOnly(conversationId, ledger);
+    if (!conversation) return;
+    conversation.lastActivityAt = Math.max(conversation.lastActivityAt, timestamp);
+    await this.save(conversation);
   }
 
   async flushPersistence(conversationId: string): Promise<void> {
@@ -1138,12 +977,12 @@ export class ConversationRepository {
       createdAt: conversation.createdAt,
       lastActivityAt: conversation.lastActivityAt,
       messageCount: conversation.messages.length,
-      preview: this.getPreview(conversation),
+      preview: this.#getPreview(conversation),
       linkedContentPath: conversation.linkedContentPath,
       isPinned: conversation.isPinned,
       isArchived: conversation.isArchived,
       titleGenerationStatus: conversation.titleGenerationStatus,
-      isLegacySession: this.isLegacyMetadataTarget(id),
+      isLegacySession: this.#isLegacyMetadataTarget(id),
     };
   }
 
@@ -1158,10 +997,10 @@ export class ConversationRepository {
       return existing;
     }
 
-    const generation = this.getConversationGeneration(id);
+    const generation = this.#getConversationGeneration(id);
     const promise = this.hydratedConversationIds.has(id)
-      ? this.reconcileHydratedConversation(conversation, generation)
-      : this.hydrateConversation(id, generation);
+      ? this.#reconcileHydratedConversation(conversation, generation)
+      : this.#hydrateConversation(id, generation);
     this.hydrationPromises.set(id, promise);
     try {
       return await promise;
@@ -1172,19 +1011,18 @@ export class ConversationRepository {
     }
   }
 
-  private async reconcileHydratedConversation(
+  async #reconcileHydratedConversation(
     conversation: Conversation,
     generation: number,
   ): Promise<Conversation | null> {
     await this.ensureSelectedModel(conversation);
-    if (!this.isConversationCurrent(conversation, generation)) return null;
-    await this.hydrateInputLedger(conversation);
-    return this.isConversationCurrent(conversation, generation)
+    if (!this.#isConversationCurrent(conversation, generation)) return null;
+    return this.#isConversationCurrent(conversation, generation)
       ? conversation
       : null;
   }
 
-  private async hydrateConversation(
+  async #hydrateConversation(
     id: string,
     generation: number,
   ): Promise<Conversation | null> {
@@ -1193,14 +1031,13 @@ export class ConversationRepository {
       return null;
     }
 
-    await this.reconcileProviderSession(conversation);
-    if (!this.isConversationCurrent(conversation, generation)) return null;
+    if (!await this.#reconcileProviderSession(conversation)) return null;
+    if (!this.#isConversationCurrent(conversation, generation)) return null;
     await this.ensureSelectedModel(conversation);
-    if (!this.isConversationCurrent(conversation, generation)) return null;
-    await this.hydrateProviderHistory(conversation);
-    if (!this.isConversationCurrent(conversation, generation)) return null;
-    await this.hydrateInputLedger(conversation);
-    if (!this.isConversationCurrent(conversation, generation)) return null;
+    if (!this.#isConversationCurrent(conversation, generation)) return null;
+    if (!await this.#hydrateProviderHistory(conversation)) return null;
+    if (!this.#isConversationCurrent(conversation, generation)) return null;
+    if (!this.#isConversationCurrent(conversation, generation)) return null;
     this.hydratedConversationIds.add(id);
     return conversation;
   }
@@ -1210,20 +1047,20 @@ export class ConversationRepository {
       (conversation) => conversation.id === id,
     ) ?? null;
     if (conversation) {
-      this.restoreLinkedContentIdentity(conversation);
+      this.#restoreLinkedContentIdentity(conversation);
     }
     return conversation;
   }
 
   findEmpty(): Conversation | null {
-    this.restoreAllLinkedContentIdentities();
+    this.#restoreAllLinkedContentIdentities();
     return this.conversations.find(
       (conversation) => conversation.messages.length === 0,
     ) ?? null;
   }
 
   list(): ConversationMeta[] {
-    this.restoreAllLinkedContentIdentities();
+    this.#restoreAllLinkedContentIdentities();
     return this.conversations.map((conversation) => ({
       id: conversation.id,
       providerId: conversation.providerId,
@@ -1232,12 +1069,12 @@ export class ConversationRepository {
       createdAt: conversation.createdAt,
       lastActivityAt: conversation.lastActivityAt,
       messageCount: conversation.messages.length,
-      preview: this.getPreview(conversation),
+      preview: this.#getPreview(conversation),
       linkedContentPath: conversation.linkedContentPath,
       isPinned: conversation.isPinned,
       isArchived: conversation.isArchived,
       titleGenerationStatus: conversation.titleGenerationStatus,
-      isLegacySession: this.isLegacyMetadataTarget(conversation.id),
+      isLegacySession: this.#isLegacyMetadataTarget(conversation.id),
     }));
   }
 
@@ -1282,35 +1119,35 @@ export class ConversationRepository {
     return changed;
   }
 
-  private applyLinkedContentPathRenamesToHydratedConversation(
+  #applyLinkedContentPathRenamesToHydratedConversation(
     conversation: Conversation,
   ): boolean {
     const originalPath = conversation.linkedContentPath;
     let currentPath = normalizeLinkedContentPath(originalPath) ?? undefined;
     for (const rename of this.linkedContentPathRenames) {
       if (!currentPath) break;
-      currentPath = this.rewriteLinkedContentPath(currentPath, rename) ?? currentPath;
+      currentPath = this.#rewriteLinkedContentPath(currentPath, rename) ?? currentPath;
     }
     if (currentPath === originalPath) return false;
 
-    this.assignLinkedContentPath(conversation, currentPath);
+    this.#assignLinkedContentPath(conversation, currentPath);
     return true;
   }
 
-  private applyLinkedContentPathRename(
+  #applyLinkedContentPathRename(
     conversation: Conversation,
     rename: LinkedContentPathRename,
   ): boolean {
-    const currentPath = this.getAuthoritativeLinkedContentPath(conversation);
+    const currentPath = this.#getAuthoritativeLinkedContentPath(conversation);
     if (!currentPath) return false;
-    const rewrittenPath = this.rewriteLinkedContentPath(currentPath, rename);
+    const rewrittenPath = this.#rewriteLinkedContentPath(currentPath, rename);
     if (!rewrittenPath || rewrittenPath === currentPath) return false;
 
-    this.setLinkedContentIdentity(conversation, rewrittenPath);
+    this.#setLinkedContentIdentity(conversation, rewrittenPath);
     return true;
   }
 
-  private rewriteLinkedContentPath(
+  #rewriteLinkedContentPath(
     contentPath: string,
     rename: LinkedContentPathRename,
   ): string | null {
@@ -1322,46 +1159,46 @@ export class ConversationRepository {
     );
   }
 
-  private captureLinkedContentIdentity(conversation: Conversation): void {
+  #captureLinkedContentIdentity(conversation: Conversation): void {
     const path = normalizeLinkedContentPath(conversation.linkedContentPath)
       ?? undefined;
-    this.setLinkedContentIdentity(conversation, path);
+    this.#setLinkedContentIdentity(conversation, path);
   }
 
-  private setLinkedContentIdentity(
+  #setLinkedContentIdentity(
     conversation: Conversation,
     path: string | undefined,
   ): void {
     this.linkedContentPathsByConversationId.set(conversation.id, path);
-    this.assignLinkedContentPath(conversation, path);
+    this.#assignLinkedContentPath(conversation, path);
   }
 
-  private restoreLinkedContentIdentity(conversation: Conversation): void {
+  #restoreLinkedContentIdentity(conversation: Conversation): void {
     if (!this.linkedContentPathsByConversationId.has(conversation.id)) return;
-    this.assignLinkedContentPath(
+    this.#assignLinkedContentPath(
       conversation,
       this.linkedContentPathsByConversationId.get(conversation.id),
     );
   }
 
-  private restoreAllLinkedContentIdentities(): void {
+  #restoreAllLinkedContentIdentities(): void {
     for (const conversation of this.conversations) {
-      this.restoreLinkedContentIdentity(conversation);
+      this.#restoreLinkedContentIdentity(conversation);
     }
   }
 
-  private getAuthoritativeLinkedContentPath(
+  #getAuthoritativeLinkedContentPath(
     conversation: Conversation,
   ): string | undefined {
     if (this.linkedContentPathsByConversationId.has(conversation.id)) {
       const path = this.linkedContentPathsByConversationId.get(conversation.id);
-      this.assignLinkedContentPath(conversation, path);
+      this.#assignLinkedContentPath(conversation, path);
       return path;
     }
     return normalizeLinkedContentPath(conversation.linkedContentPath) ?? undefined;
   }
 
-  private assignLinkedContentPath(
+  #assignLinkedContentPath(
     conversation: Conversation,
     path: string | undefined,
   ): void {
@@ -1373,77 +1210,46 @@ export class ConversationRepository {
     mutableConversation.linkedContentPath = path;
   }
 
-  private async reconcileProviderSession(
+  async #reconcileProviderSession(
     conversation: Conversation,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const historyService = ProviderRegistry.getConversationHistoryService(
       conversation.providerId,
     );
 
     const vaultPath = this.deps.getVaultPath();
-    const pathContext = this.getHistoryPathContext(
+    const pathContext = this.#getHistoryPathContext(
       conversation.providerId,
       vaultPath,
     );
     if (historyService.recoverConversationSessionReference) {
-      const previousSessionId = conversation.sessionId;
-      const previousProviderState = conversation.providerState;
-      const previousResumeAtMessageId = conversation.resumeAtMessageId;
       try {
-        if (
-          await historyService.recoverConversationSessionReference(
-            conversation,
-            vaultPath,
-            pathContext,
-          )
-        ) {
-          await this.save(conversation);
-        }
+        const outcome = await this.#readProviderHistory(conversation, draft => (
+          historyService.recoverConversationSessionReference!(draft, vaultPath, pathContext)
+        ), changed => changed);
+        if (!outcome.current) return false;
       } catch {
-        conversation.sessionId = previousSessionId;
-        conversation.providerState = previousProviderState;
-        conversation.resumeAtMessageId = previousResumeAtMessageId;
-        return;
+        return true;
       }
     }
 
-    if (!historyService.getConversationSessionAvailability) return;
-
-    let availability;
+    if (!historyService.getConversationSessionAvailability) return true;
     try {
-      availability =
-        await historyService.getConversationSessionAvailability(
-          conversation,
-          vaultPath,
-          pathContext,
-        );
-    } catch {
-      return;
-    }
-    if (
-      availability !== 'relocated'
-      || !historyService.prepareRelocatedConversationSession
-    ) {
-      return;
-    }
-
-    const previousSessionId = conversation.sessionId;
-    const previousProviderState = conversation.providerState;
-    const previousResumeAtMessageId = conversation.resumeAtMessageId;
-    try {
+      const availability = await this.#readProviderHistory(conversation, draft => (
+        historyService.getConversationSessionAvailability!(draft, vaultPath, pathContext)
+      ));
+      if (!availability.current) return false;
       if (
-        await historyService.prepareRelocatedConversationSession(
-          conversation,
-          vaultPath,
-          pathContext,
-        )
-      ) {
-        await this.save(conversation);
-      }
+        availability.value !== 'relocated'
+        || !historyService.prepareRelocatedConversationSession
+      ) return true;
+      const outcome = await this.#readProviderHistory(conversation, draft => (
+        historyService.prepareRelocatedConversationSession!(draft, vaultPath, pathContext)
+      ), changed => changed);
+      return outcome.current;
     } catch {
-      conversation.sessionId = previousSessionId;
-      conversation.providerState = previousProviderState;
-      conversation.resumeAtMessageId = previousResumeAtMessageId;
+      // Failed reads only discard their isolated draft.
+      return true;
     }
   }
 
@@ -1452,7 +1258,7 @@ export class ConversationRepository {
   ): Promise<void> {
     let recoveryResult: HistoricalModelRecoveryResult | 'unsupported' = 'unsupported';
     if (!getStoredModelSelection(conversation.selectedModel)) {
-      const recovery = this.recoverHistoricalModelSelection(conversation);
+      const recovery = this.#recoverHistoricalModelSelection(conversation);
       if (recovery) recoveryResult = await recovery;
     }
     const resolved = resolveConversationModel(
@@ -1474,10 +1280,10 @@ export class ConversationRepository {
       return;
     }
 
-    await this.persistSelectedModelBeforePublish(conversation, modelToPersist);
+    await this.#persistSelectedModelBeforePublish(conversation, modelToPersist);
   }
 
-  private async reconcileIncomingSelectedModel(conversation: Conversation): Promise<void> {
+  async #reconcileIncomingSelectedModel(conversation: Conversation): Promise<void> {
     if (
       !getStoredModelSelection(conversation.selectedModel)
     ) {
@@ -1499,19 +1305,15 @@ export class ConversationRepository {
     }
 
     const snapshot = { ...conversation, selectedModel: modelToPersist };
-    const didPersist = await this.enqueuePersistence(conversation.id, async () => {
+    const didPersist = await this.#enqueuePersistence(conversation.id, async () => {
       if (
         this.getSync(conversation.id)
         || this.deletedConversationIds.has(conversation.id)
         || this.deletingConversationIds.has(conversation.id)
-        || await this.persistence.isDeleted(
-          conversation.id,
-          this.requireMetadataTarget(conversation.id),
-        )
       ) {
         return false;
       }
-      await this.writeMetadata(snapshot, {
+      await this.#writeMetadata(snapshot, {
         preserveProviderState: true,
       });
       return true;
@@ -1521,18 +1323,18 @@ export class ConversationRepository {
     }
   }
 
-  private async persistSelectedModelBeforePublish(
+  async #persistSelectedModelBeforePublish(
     conversation: Conversation,
     selectedModel: string,
     clearRecoverySource = false,
   ): Promise<boolean> {
     const previousSelectedModel = conversation.selectedModel;
-    const selectedModelMutationVersion = this.markSelectedModelMutation(conversation);
-    const didPersist = await this.enqueuePersistence(conversation.id, async () => {
+    const selectedModelMutationVersion = this.#markSelectedModelMutation(conversation);
+    const didPersist = await this.#enqueuePersistence(conversation.id, async () => {
       if (
-        this.getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
-        || !await this.canWriteConversation(conversation)
-        || this.getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
+        this.#getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
+        || !await this.#canWriteConversation(conversation)
+        || this.#getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
       ) {
         return false;
       }
@@ -1541,14 +1343,14 @@ export class ConversationRepository {
         selectedModel,
         ...(clearRecoverySource ? { modelRecoverySource: undefined } : {}),
       };
-      await this.writeMetadata(snapshot, {
+      await this.#writeMetadata(snapshot, {
         preserveProviderState: !this.hydratedConversationIds.has(conversation.id),
       });
       return true;
     });
     if (
       !didPersist
-      || this.getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
+      || this.#getSelectedModelMutationVersion(conversation) !== selectedModelMutationVersion
       || conversation.selectedModel !== previousSelectedModel
     ) {
       return false;
@@ -1561,284 +1363,65 @@ export class ConversationRepository {
     return true;
   }
 
-  private markSelectedModelMutation(conversation: Conversation): number {
-    const nextVersion = this.getSelectedModelMutationVersion(conversation) + 1;
+  #markSelectedModelMutation(conversation: Conversation): number {
+    const nextVersion = this.#getSelectedModelMutationVersion(conversation) + 1;
     this.selectedModelMutationVersions.set(conversation, nextVersion);
     return nextVersion;
   }
 
-  private getSelectedModelMutationVersion(conversation: Conversation): number {
+  #getSelectedModelMutationVersion(conversation: Conversation): number {
     return this.selectedModelMutationVersions.get(conversation) ?? 0;
   }
 
-  private async hydrateProviderHistory(
+  async #hydrateProviderHistory(
     conversation: Conversation,
-  ): Promise<void> {
-    const vaultPath = this.deps.getVaultPath();
-    await ProviderRegistry
-      .getConversationHistoryService(conversation.providerId)
-      .hydrateConversationHistory(
-        conversation,
-        vaultPath,
-        this.getHistoryPathContext(conversation.providerId, vaultPath),
-      );
-  }
-
-  private async hydrateInputLedger(
-    conversation: Conversation,
-  ): Promise<void> {
-    const state = await this.loadInputLedger(conversation.id);
-    if (state.status !== 'loaded') return;
-    const correlation = this.correlateInputLedger(conversation, state.ledger);
-    if (correlation.ledgerChanged) {
-      try {
-        await this.persistLedgerOnly(conversation.id, state.ledger);
-      } catch {
-        // Native history remains usable; the accepted promotion stays dirty.
-      }
-    }
-    if (
-      correlation.lastAcceptedInputAt !== null
-      && correlation.lastAcceptedInputAt > conversation.lastActivityAt
-    ) {
-      conversation.lastActivityAt = correlation.lastAcceptedInputAt;
-      try {
-        await this.save(conversation);
-      } catch {
-        // The repaired activity remains in memory for the next metadata write.
-      }
-    }
-  }
-
-  private async loadInputLedger(conversationId: string): Promise<LedgerState> {
-    const existing = this.ledgerStates.get(conversationId);
-    if (existing) return existing;
-    const pending = this.ledgerLoadPromises.get(conversationId);
-    if (pending) return pending;
-
-    const load = this.persistence.loadInputLedger(conversationId).then(
-      (result): LedgerState => {
-        let state: LedgerState;
-        if (result.status === 'loaded') {
-          state = {
-            status: 'loaded',
-            ledger: result.ledger,
-            needsMigration: result.needsMigration,
-          };
-        } else if (result.status === 'missing') {
-          state = {
-            status: 'loaded',
-            ledger: {
-              schemaVersion: CONVERSATION_INPUT_LEDGER_SCHEMA_VERSION,
-              conversationId,
-              records: [],
-            },
-            needsMigration: false,
-          };
-        } else {
-          state = {
-            status: 'unavailable',
-            reason: result.reason,
-          };
-        }
-        this.ledgerStates.set(conversationId, state);
-        return state;
-      },
-    );
-    this.ledgerLoadPromises.set(conversationId, load);
-    try {
-      return await load;
-    } finally {
-      if (this.ledgerLoadPromises.get(conversationId) === load) {
-        this.ledgerLoadPromises.delete(conversationId);
-      }
-    }
-  }
-
-  private async requireInputLedger(
-    conversationId: string,
-  ): Promise<ConversationInputLedger> {
-    const conversation = this.getSync(conversationId);
-    if (
-      !conversation
-      || this.deletedConversationIds.has(conversationId)
-      || this.deletingConversationIds.has(conversationId)
-    ) {
-      throw new Error(`Conversation not found: ${conversationId}`);
-    }
-    const state = await this.loadInputLedger(conversationId);
-    if (state.status === 'unavailable') {
-      throw new ConversationInputLedgerUnavailableError(
-        conversationId,
-        state.reason,
-      );
-    }
-    return state.ledger;
-  }
-
-  private correlateInputLedger(
-    conversation: Conversation,
-    ledger: ConversationInputLedger,
-  ): InputLedgerCorrelationResult {
-    const usedRecordIds = new Set<string>();
-    let ledgerChanged = false;
-    let lastAcceptedInputAt: number | null = null;
-    let userTurnOrdinal = 0;
-    for (
-      let messageIndex = 0;
-      messageIndex < conversation.messages.length;
-      messageIndex += 1
-    ) {
-      const message = conversation.messages[messageIndex];
-      if (!isCanonicalUserMessage(message)) continue;
-      userTurnOrdinal += 1;
-
-      let candidates: ConversationInputRecord[] = [];
-      if (message.userMessageId) {
-        candidates = ledger.records.filter(
-          (record) =>
-            record.providerUserMessageId === message.userMessageId
-            && !usedRecordIds.has(record.id),
-        );
-      }
-      if (candidates.length === 0) {
-        const visibleText = message.displayContent
-          ?? extractUserDisplayContent(message.content)
-          ?? message.content;
-        const digest = computeConversationInputDigest({
-          visibleText,
-          images: message.images ?? [],
-        });
-        candidates = ledger.records.filter(
-          (record) =>
-            record.userTurnOrdinal === userTurnOrdinal
-            && record.contentDigest === digest
-            && !usedRecordIds.has(record.id),
-        );
-      }
-      if (candidates.length !== 1) continue;
-
-      const record = candidates[0];
-      usedRecordIds.add(record.id);
-      if (
-        message.userMessageId
-        && record.providerUserMessageId !== message.userMessageId
-      ) {
-        record.providerUserMessageId = message.userMessageId;
-        ledgerChanged = true;
-      }
-      if (!record.providerAssistantMessageId) {
-        const assistant = findAssistantForCanonicalUserTurn(
-          conversation.messages,
-          messageIndex,
-        );
-        if (assistant?.assistantMessageId) {
-          record.providerAssistantMessageId = assistant.assistantMessageId;
-          ledgerChanged = true;
-        }
-      }
-      this.attachRecordToMessage(message, record);
-      if (record.state === 'staged') {
-        record.state = 'accepted';
-        ledgerChanged = true;
-      }
-      lastAcceptedInputAt = lastAcceptedInputAt === null
-        ? record.timestamp
-        : Math.max(lastAcceptedInputAt, record.timestamp);
-    }
-    return { ledgerChanged, lastAcceptedInputAt };
-  }
-
-  private attachRecordToInMemoryMessages(
-    conversation: Conversation,
-    record: ConversationInputRecord,
-  ): void {
-    const userIndex = conversation.messages.findIndex(
-      (message) =>
-        message.role === 'user'
-        && (
-          message.id === record.localMessageId
-          || message.userMessageId === record.providerUserMessageId
-        ),
-    );
-    if (userIndex === -1) return;
-    const userMessage = conversation.messages[userIndex];
-    this.attachRecordToMessage(userMessage, record);
-    if (record.providerUserMessageId) {
-      userMessage.userMessageId = record.providerUserMessageId;
-    }
-    if (record.providerAssistantMessageId) {
-      const assistant = findAssistantForCanonicalUserTurn(
-        conversation.messages,
-        userIndex,
-      );
-      if (assistant) {
-        assistant.assistantMessageId = record.providerAssistantMessageId;
-      }
-    }
-  }
-
-  private attachRecordToMessage(
-    message: ChatMessage,
-    record: ConversationInputRecord,
-  ): void {
-    message.displayContent = record.rawDisplayText;
-    message.images = cloneJson(record.images);
-    message.executionInput = {
-      schemaVersion: CONVERSATION_INPUT_LEDGER_SCHEMA_VERSION,
-      canonicalText: record.canonicalText,
-      ...(record.context ? { context: cloneJson(record.context) } : {}),
-    };
-  }
-
-  private async persistLedgerOnly(
-    conversationId: string,
-    ledger: ConversationInputLedger,
-  ): Promise<void> {
-    await this.enqueuePersistence(conversationId, async () => {
-      if (!await this.canWriteLedger(conversationId, ledger)) return;
-      await this.writeInputLedger(conversationId, ledger);
-      this.markInputLedgerCanonical(conversationId, ledger);
-    });
-  }
-
-  private markInputLedgerCanonical(
-    conversationId: string,
-    ledger: ConversationInputLedger,
-  ): void {
-    const state = this.ledgerStates.get(conversationId);
-    if (state?.status === 'loaded' && state.ledger === ledger) {
-      state.needsMigration = false;
-    }
-  }
-
-  private async canWriteLedger(
-    conversationId: string,
-    ledger: ConversationInputLedger,
   ): Promise<boolean> {
-    const isCurrent = (): boolean => {
-      const state = this.ledgerStates.get(conversationId);
-      return (
-        state?.status === 'loaded'
-        && state.ledger === ledger
-        && !!this.getSync(conversationId)
-        && !this.deletedConversationIds.has(conversationId)
-        && !this.deletingConversationIds.has(conversationId)
-      );
-    };
-    if (
-      !isCurrent()
-      || await this.persistence.isDeleted(
-        conversationId,
-        this.requireMetadataTarget(conversationId),
-      )
-    ) {
-      return false;
-    }
-    return isCurrent();
+    const vaultPath = this.deps.getVaultPath();
+    const outcome = await this.#readProviderHistory(conversation, draft => (
+      ProviderRegistry.getConversationHistoryService(draft.providerId)
+        .hydrateConversationHistory(
+          draft,
+          vaultPath,
+          this.#getHistoryPathContext(draft.providerId, vaultPath),
+        )
+    ));
+    return outcome.current;
   }
 
-  private applySnapshot(
+  /** Native readers may mutate only this detached draft; the repository publishes it. */
+  async #readProviderHistory<T>(
+    conversation: Conversation,
+    read: (draft: Conversation) => Promise<T>,
+    shouldPersist: (value: T) => boolean = () => false,
+  ): Promise<{ current: false } | { current: true; value: T }> {
+    const generation = this.#getConversationGeneration(conversation.id);
+    const fields = ['sessionId', 'providerState', 'resumeAtMessageId', 'messages'] as const;
+    const before = fields.map(field => JSON.stringify(conversation[field]));
+    const draft = cloneJson(conversation);
+    const value = await read(draft);
+    const isCurrent = (): boolean => (
+      this.#isConversationCurrent(conversation, generation)
+      && fields.every((field, index) => JSON.stringify(conversation[field]) === before[index])
+    );
+    if (!isCurrent()) return { current: false };
+    const patch: ConversationMutablePatch = {};
+    if (JSON.stringify(draft.messages) !== before[3]) patch.messages = draft.messages;
+    if (JSON.stringify(draft.sessionId) !== before[0]) patch.sessionId = draft.sessionId;
+    if (JSON.stringify(draft.providerState) !== before[1]) patch.providerState = draft.providerState;
+    if (JSON.stringify(draft.resumeAtMessageId) !== before[2]) patch.resumeAtMessageId = draft.resumeAtMessageId;
+    if (shouldPersist(value)) {
+      const persisted = await this.#enqueuePersistence(conversation.id, async () => {
+        if (!await this.#canWriteConversation(conversation) || !isCurrent()) return false;
+        await this.#writeMetadata({ ...conversation, ...patch });
+        return true;
+      });
+      if (!persisted || !isCurrent()) return { current: false };
+    }
+    Object.assign(conversation, patch);
+    return { current: true, value };
+  }
+
+  #applySnapshot(
     conversation: Conversation,
     snapshot: ProviderSessionSnapshot,
   ): void {
@@ -1854,7 +1437,7 @@ export class ConversationRepository {
       )
     ) {
       conversation.modelRecoverySource = undefined;
-      this.invalidateConversation(conversation.id);
+      this.#invalidateConversation(conversation.id);
     }
     if (snapshot.providerSessionId !== undefined) {
       conversation.sessionId = snapshot.providerSessionId;
@@ -1880,66 +1463,42 @@ export class ConversationRepository {
   }
 
   private save(conversation: Conversation): Promise<void> {
-    this.restoreLinkedContentIdentity(conversation);
-    const generation = this.getConversationGeneration(conversation.id);
-    return this.enqueuePersistence(conversation.id, async () => {
+    this.#restoreLinkedContentIdentity(conversation);
+    const generation = this.#getConversationGeneration(conversation.id);
+    return this.#enqueuePersistence(conversation.id, async () => {
       if (
-        !this.isConversationCurrent(conversation, generation)
-        || !await this.canWriteConversation(conversation)
+        !this.#isConversationCurrent(conversation, generation)
+        || !await this.#canWriteConversation(conversation)
       ) {
         return;
       }
-      this.restoreLinkedContentIdentity(conversation);
-      await this.writeMetadata(conversation);
+      this.#restoreLinkedContentIdentity(conversation);
+      await this.#writeMetadata(conversation);
     });
   }
 
-  private async canWriteConversation(
+  async #canWriteConversation(
     conversation: Conversation,
   ): Promise<boolean> {
     return (
       this.getSync(conversation.id) === conversation
       && !this.deletedConversationIds.has(conversation.id)
       && !this.deletingConversationIds.has(conversation.id)
-      && !await this.persistence.isDeleted(
-        conversation.id,
-        this.requireMetadataTarget(conversation.id),
-      )
     );
   }
 
-  private writeMetadata(
+  #writeMetadata(
     conversation: Conversation,
     options: { preserveProviderState?: boolean } = {},
   ): Promise<void> {
     const metadata = this.toSessionMetadata(conversation, options);
-    const target = this.requireMetadataTarget(conversation.id);
+    const target = this.#requireMetadataTarget(conversation.id);
     return target === 'device'
       ? this.persistence.saveMetadata(metadata)
       : this.persistence.saveMetadata(metadata, target);
   }
 
-  private writeInputLedger(
-    conversationId: string,
-    ledger: ConversationInputLedger,
-  ): Promise<void> {
-    const target = this.requireMetadataTarget(conversationId);
-    return target === 'device'
-      ? this.persistence.saveInputLedger(conversationId, ledger)
-      : this.persistence.saveInputLedger(conversationId, ledger, target);
-  }
-
-  private async isDeletedInAnyMetadataTarget(
-    conversationId: string,
-  ): Promise<boolean> {
-    const [deviceDeleted, unscopedDeleted] = await Promise.all([
-      this.persistence.isDeleted(conversationId, 'device'),
-      this.persistence.isDeleted(conversationId, 'unscoped'),
-    ]);
-    return deviceDeleted || unscopedDeleted;
-  }
-
-  private requireMetadataTarget(conversationId: string): SessionMetadataAuthority {
+  #requireMetadataTarget(conversationId: string): SessionMetadataAuthority {
     const authority = this.metadataTargets.get(conversationId);
     if (!authority) {
       throw new Error(`Conversation metadata ownership is unresolved: ${conversationId}`);
@@ -1947,7 +1506,7 @@ export class ConversationRepository {
     return authority;
   }
 
-  private isLegacyMetadataTarget(conversationId: string): boolean {
+  #isLegacyMetadataTarget(conversationId: string): boolean {
     return this.metadataTargets.get(conversationId) === 'unscoped';
   }
 
@@ -1955,7 +1514,7 @@ export class ConversationRepository {
     conversation: Conversation,
     options: { preserveProviderState?: boolean } = {},
   ): SessionMetadata {
-    const linkedContentPath = this.getAuthoritativeLinkedContentPath(conversation);
+    const linkedContentPath = this.#getAuthoritativeLinkedContentPath(conversation);
     const historyService = ProviderRegistry.getConversationHistoryService(
       conversation.providerId,
     );
@@ -1992,24 +1551,7 @@ export class ConversationRepository {
     };
   }
 
-  private async cleanupDeletedConversation(id: string): Promise<void> {
-    const target = this.metadataTargets.get(id);
-    if (target === 'device') {
-      await this.persistence.deleteCurrentMetadata(id);
-    } else if (target === 'unscoped') {
-      await this.persistence.deleteCurrentMetadata(id, target);
-    } else if (!target) {
-      await this.persistence.deleteCurrentMetadata(id, 'device');
-      await this.persistence.deleteCurrentMetadata(id, 'unscoped');
-    }
-    await this.persistence.deleteLegacyMetadata(id);
-    await this.persistence.deleteInputLedger(id);
-    this.ledgerStates.delete(id);
-    this.ledgerLoadPromises.delete(id);
-    this.linkedContentPathsByConversationId.delete(id);
-  }
-
-  private async finalizeDeletedConversation(id: string): Promise<void> {
+  async #finalizeDeletedConversation(id: string): Promise<void> {
     let callbackError: unknown;
     try {
       await this.deps.onConversationDeleted(id);
@@ -2017,14 +1559,14 @@ export class ConversationRepository {
       callbackError = error;
     }
 
-    await this.cleanupDeletedConversation(id);
+    this.linkedContentPathsByConversationId.delete(id);
     if (callbackError !== undefined) {
       throw toError(callbackError);
     }
     this.metadataTargets.delete(id);
   }
 
-  private enqueuePersistence<T>(
+  #enqueuePersistence<T>(
     conversationId: string,
     operation: () => Promise<T>,
   ): Promise<T> {
@@ -2046,7 +1588,7 @@ export class ConversationRepository {
     return result;
   }
 
-  private getHistoryPathContext(
+  #getHistoryPathContext(
     providerId: ProviderId,
     vaultPath: string | null = this.deps.getVaultPath(),
   ): ProviderHistoryPathContext {
@@ -2062,26 +1604,26 @@ export class ConversationRepository {
     };
   }
 
-  private getConversationGeneration(id: string): number {
+  #getConversationGeneration(id: string): number {
     return this.conversationGenerations.get(id) ?? 0;
   }
 
-  private invalidateConversation(id: string): void {
+  #invalidateConversation(id: string): void {
     this.historicalModelRecoveryPromises.delete(id);
     this.historicalModelRecoverySources.delete(id);
     this.conversationGenerations.set(
       id,
-      this.getConversationGeneration(id) + 1,
+      this.#getConversationGeneration(id) + 1,
     );
   }
 
-  private isConversationCurrent(
+  #isConversationCurrent(
     conversation: Conversation,
     generation: number,
   ): boolean {
     return (
       this.getSync(conversation.id) === conversation
-      && this.getConversationGeneration(conversation.id) === generation
+      && this.#getConversationGeneration(conversation.id) === generation
     );
   }
 
@@ -2089,7 +1631,7 @@ export class ConversationRepository {
     return `conv-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
   }
 
-  private generateDefaultTitle(): string {
+  #generateDefaultTitle(): string {
     const now = new Date();
     return now.toLocaleString(undefined, {
       month: 'short',
@@ -2099,7 +1641,7 @@ export class ConversationRepository {
     });
   }
 
-  private getPreview(conversation: Conversation): string {
+  #getPreview(conversation: Conversation): string {
     const firstUserMessage = conversation.messages.find(
       (message) => message.role === 'user',
     );
@@ -2113,18 +1655,6 @@ export class ConversationRepository {
       + (previewText.length > 50 ? '...' : '')
     );
   }
-}
-
-function findAssistantForCanonicalUserTurn(
-  messages: readonly ChatMessage[],
-  userIndex: number,
-): ChatMessage | undefined {
-  for (let index = userIndex + 1; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (isCanonicalUserMessage(message)) return undefined;
-    if (message.role === 'assistant') return message;
-  }
-  return undefined;
 }
 
 function cloneJson<T>(value: T): T {

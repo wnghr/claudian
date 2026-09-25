@@ -80,24 +80,10 @@ export interface AuxiliaryContinuityReset {
   success: false;
   resetRequired: true;
   error: string;
-  refinedInstruction?: never;
   editedText?: never;
   insertedText?: never;
   clarification?: never;
 }
-
-/** Ordinary result from an instruction refinement agent query. */
-export interface InstructionRefineOutcome {
-  success: boolean;
-  resetRequired?: false;
-  refinedInstruction?: string;  // The refined instruction text
-  clarification?: string;       // Agent's clarifying question (if any)
-  error?: string;               // Error message (if failed)
-}
-
-export type InstructionRefineResult =
-  | InstructionRefineOutcome
-  | AuxiliaryContinuityReset;
 
 /** Permission mode for tool execution. */
 export type PermissionMode = 'yolo' | 'normal';
@@ -158,7 +144,6 @@ export interface ClaudianSettings {
   sharedEnvironmentVariables: string;
   envSnippets: EnvSnippet[];
   customContextLimits: Record<string, number>;
-  customModelAliases: Record<string, string>;
 
   // UI settings
   keyboardNavigation: KeyboardNavigationSettings;
@@ -181,9 +166,6 @@ export interface ClaudianSettings {
 
   // Internal lifecycle state. Entries remain until all affected session metadata is durable.
   pendingProviderSessionInvalidations: Partial<Record<string, number>>;
-
-  // State (provider-specific, round-tripped opaquely)
-  lastCustomModel?: string;
 
   // UI preferences
   maxWarmAgentProcesses: number;

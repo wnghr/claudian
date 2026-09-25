@@ -72,6 +72,7 @@ export interface HostTransferAdmissionPort {
 }
 
 export interface PreparedHostTransferPackage {
+  readonly authorityGeneration: number;
   readonly manifest: HostTransferPackageManifest;
   readonly manifestDigest: string;
   readonly proof: CollabHostTrustTransitionProof;
@@ -205,6 +206,7 @@ export interface IncomingHostTransferPackagePort {
     readonly signal?: AbortSignal;
   }): Promise<{
     readonly eventSequence: number;
+    readonly proofChainDigest: string;
   }>;
 }
 
@@ -222,6 +224,7 @@ export interface HostTransferProjectionPort {
     readonly autoStart: true;
     readonly endpoint: string;
     readonly eventSequence: number;
+    readonly proofChainDigest: string;
     readonly ownsAuthority: true;
     readonly projectId: CollabProjectId;
     readonly targetCaCertificatePem: string;
@@ -235,6 +238,7 @@ export interface HostTransferProjectionPort {
     readonly ownsAuthority: false;
     readonly projectId: CollabProjectId;
     readonly proof: CollabHostTrustTransitionProof;
+    readonly proofChainDigest: string;
     readonly targetCaCertificatePem: string;
     readonly targetCaFingerprint: string;
     readonly targetHostMemberId: CollabMemberId;

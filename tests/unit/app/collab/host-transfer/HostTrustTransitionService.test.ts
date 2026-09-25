@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { TEST_INSTALLATION_A } from '@test/helpers/installations';
 
+import { digestHostTransitionProofChain } from '@/app/collab/host-transfer/HostTransferPackage';
 import {
   HostTrustTransitionService,
 } from '@/app/collab/host-transfer/HostTrustTransitionService';
@@ -14,6 +15,7 @@ jest.setTimeout(120_000);
 describe('HostTrustTransitionService', () => {
   const service = new HostTrustTransitionService();
   const roots: string[] = [];
+  let identities: LanTlsIdentity[];
 
   async function identity(name: string): Promise<LanTlsIdentity> {
     const root = await mkdtemp(path.join(tmpdir(), `claudian-${name}-`));
@@ -24,13 +26,18 @@ describe('HostTrustTransitionService', () => {
     });
   }
 
-  afterEach(async () => {
+  beforeAll(async () => {
+    identities = await Promise.all(['first', 'second', 'third'].map(identity));
+    await Promise.all(identities.map(value => value.loadOrCreate()));
+  });
+
+  afterAll(async () => {
     await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })));
   });
 
   it('canonicalizes CRLF CA certificates before they enter transition proofs', async () => {
-    const source = await identity('source-crlf');
-    const target = await identity('target-crlf');
+    const source = identities[0];
+    const target = identities[1];
     const next = await target.loadOrCreate();
     const proof = await service.signTransition(await source.hostCaSigner(), {
       issuedAt: '2026-08-08T00:00:00.000Z',
@@ -43,8 +50,8 @@ describe('HostTrustTransitionService', () => {
   });
 
   it('signs the exact RSA-PSS transition payload without projecting private material', async () => {
-    const source = await identity('source');
-    const target = await identity('target');
+    const source = identities[0];
+    const target = identities[1];
     const sourceSigner = await source.hostCaSigner();
     const targetCa = await target.loadOrCreate();
 
@@ -69,9 +76,9 @@ describe('HostTrustTransitionService', () => {
   });
 
   it('validates an ordered chain and rejects project, ordering, duplicate, and tamper errors', async () => {
-    const first = await identity('first');
-    const second = await identity('second');
-    const third = await identity('third');
+    const first = identities[0];
+    const second = identities[1];
+    const third = identities[2];
     const firstSigner = await first.hostCaSigner();
     const secondSigner = await second.hostCaSigner();
     const secondCa = await second.loadOrCreate();
@@ -119,7 +126,7 @@ describe('HostTrustTransitionService', () => {
   });
 
   it('binds activation to the exact target CA and package manifest', async () => {
-    const source = await identity('source');
+    const source = identities[0];
     const sourceSigner = await source.hostCaSigner();
     const input = {
       cutoverAt: '2026-08-08T00:05:00.000Z',
@@ -141,5 +148,80 @@ describe('HostTrustTransitionService', () => {
       sourceSigner.caCertificatePem,
       { ...input, manifestDigest: 'c'.repeat(64) },
     )).toThrow();
+  });
+
+  it('binds committed Host activation evidence to its authority generation', async () => {
+    const source = identities[0];
+    const signer = await source.hostCaSigner();
+    const input = {
+      authorityGeneration: 7,
+      cutoverAt: '2026-08-08T00:05:00.000Z', manifestDigest: 'a'.repeat(64),
+      projectId: 'project-1', targetCaFingerprint: 'b'.repeat(64),
+      targetHostMemberId: 'member-2', transferId: 'transfer-1',
+    } as const;
+    const certificate = await service.signActivation(signer, input);
+    expect(certificate.authorityProof).toMatchObject({
+      authorityGeneration: 7, caCertificatePem: signer.caCertificatePem,
+      manifestSha256: input.manifestDigest, targetHostMemberId: 'member-2',
+    });
+    expect(() => service.verifyActivation(certificate, signer.caCertificatePem, input)).not.toThrow();
+    expect(() => service.verifyActivation(certificate, signer.caCertificatePem, {
+      ...input, authorityGeneration: 8,
+    })).toThrow();
+    expect(() => service.verifyActivation({ ...certificate, authorityProof: {
+      ...certificate.authorityProof!, targetHostMemberId: 'member-attacker',
+    } }, signer.caCertificatePem, input)).toThrow();
+  });
+
+  it('continues full retained history from a Member already trusting an intermediate Host', async () => {
+    const [first, second, third] = identities;
+    const [a, b, c] = await Promise.all([first.hostCaSigner(), second.hostCaSigner(), third.hostCaSigner()]);
+    const ab = await service.signTransition(a, {
+      issuedAt: '2026-08-08T00:00:00.000Z', nextCaCertificatePem: b.caCertificatePem,
+      projectId: 'project-1', transferId: 'transfer-ab',
+    });
+    const bc = await service.signTransition(b, {
+      issuedAt: '2026-08-08T00:01:00.000Z', nextCaCertificatePem: c.caCertificatePem,
+      projectId: 'project-1', transferId: 'transfer-bc',
+    });
+    expect(service.verifyChain({
+      expectedCurrentCaFingerprint: c.caFingerprint, pinnedCaCertificatePem: b.caCertificatePem,
+      projectId: 'project-1', proofs: [ab, bc],
+    })).toBe(c.caCertificatePem);
+  });
+
+  it('distinguishes a continuous return to a Host installation from competing successor proofs', async () => {
+    const [first, second, third] = identities;
+    const [a, b, c] = await Promise.all([first.hostCaSigner(), second.hostCaSigner(), third.hostCaSigner()]);
+    const ab = await service.signTransition(a, {
+      issuedAt: '2026-08-08T00:00:00.000Z', nextCaCertificatePem: b.caCertificatePem,
+      projectId: 'project-1', transferId: 'transfer-ab',
+    });
+    const ba = await service.signTransition(b, {
+      issuedAt: '2026-08-08T00:01:00.000Z', nextCaCertificatePem: a.caCertificatePem,
+      projectId: 'project-1', transferId: 'transfer-ba',
+    });
+    const ac = await service.signTransition(a, {
+      issuedAt: '2026-08-08T00:02:00.000Z', nextCaCertificatePem: c.caCertificatePem,
+      projectId: 'project-1', transferId: 'transfer-ac',
+    });
+    const checkpoint = {
+      transferId: ba.transferId,
+      proofChainDigest: digestHostTransitionProofChain([ab, ba]),
+    };
+    expect(() => service.verifyChain({
+      checkpoint,
+      expectedCurrentCaFingerprint: c.caFingerprint, pinnedCaCertificatePem: a.caCertificatePem,
+      projectId: 'project-1', proofs: [ac],
+    })).toThrow();
+    expect(service.verifyChain({
+      checkpoint,
+      expectedCurrentCaFingerprint: c.caFingerprint, pinnedCaCertificatePem: a.caCertificatePem,
+      projectId: 'project-1', proofs: [ab, ba, ac],
+    })).toBe(c.caCertificatePem);
+    expect(() => service.verifyChain({
+      expectedCurrentCaFingerprint: c.caFingerprint, pinnedCaCertificatePem: a.caCertificatePem,
+      projectId: 'project-1', proofs: [ab, ac],
+    })).toThrow();
   });
 });

@@ -70,18 +70,6 @@ export class ClaudianProviderHost implements ProviderHost {
     return this.plugin.mutateSettingsConditionally(mutation);
   }
 
-  loadData(): Promise<unknown> {
-    return this.plugin.loadData();
-  }
-
-  saveData(data: unknown): Promise<void> {
-    return this.plugin.saveData(data);
-  }
-
-  normalizeModelVariantSettings(): boolean {
-    return this.plugin.normalizeModelVariantSettings();
-  }
-
   getActiveEnvironmentVariables(providerId: ProviderId): string {
     return this.plugin.getActiveEnvironmentVariables(providerId);
   }

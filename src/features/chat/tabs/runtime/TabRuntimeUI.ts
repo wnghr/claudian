@@ -15,14 +15,14 @@ import type {
 } from '../../../../core/providers/types';
 import { MainChatComposerDropdown } from '../../composer/MainChatComposerDropdown';
 import { LinkedContentController } from '../../linked-content';
+import type { SideChatController } from '../../side-chat/SideChatController';
 import { ComposerContextTray } from '../../ui/ComposerContextTray';
 import { FileContextManager } from '../../ui/FileContext';
 import { ImageContextManager } from '../../ui/ImageContext';
 import { createInputToolbar } from '../../ui/InputToolbar';
-import { InstructionModeManager as InstructionModeManagerClass } from '../../ui/InstructionModeManager';
 import { NavigationSidebar } from '../../ui/NavigationSidebar';
 import { installTextareaSizing } from '../../ui/textareaSizing';
-import { recalculateUsageForModel } from '../../utils/usageInfo';
+import { clearReportedContextWindowForModel } from '../../utils/usageInfo';
 import { getTabProviderId } from '../providerResolution';
 import { commitProvisionalTab } from '../TabLifecycle';
 import { TabModelSelectionCoordinator } from '../TabModelSelectionCoordinator';
@@ -96,10 +96,9 @@ function buildContextManagers(
 
 function buildComposerDropdown(
   shell: TabRuntimeShellBundle,
-  providerId: ProviderId,
+  providerId: ProviderId | null,
   fileContextManager: FileContextManager,
   options: TabRuntimeConstructionContext,
-  runtimeRef: PublishedTabRuntimeRef,
   getHiddenCommands?: () => Set<string>,
   catalogInfo?: ProviderCatalogInfo,
 ): MainChatComposerDropdown {
@@ -114,46 +113,10 @@ function buildComposerDropdown(
       hiddenCommands: getHiddenCommands?.() ?? new Set(),
       providerConfig: catalogInfo?.config,
       providerDiscovery: catalogInfo?.discovery,
-      onSlashCommandSelected: command => {
-        if (command.id !== 'builtin:instruction') return;
-        dom.inputEl.value = '';
-        runtimeRef.requirePublished().ui.instructionModeManager.enter();
-      },
     },
   );
   options.registerCleanup('tab composer dropdown', () => dropdown.destroy());
   return dropdown;
-}
-
-function buildInstructionComponents(
-  shell: TabRuntimeShellBundle,
-  options: TabRuntimeConstructionContext,
-  runtimeRef: PublishedTabRuntimeRef,
-  composerDropdown: MainChatComposerDropdown,
-): Pick<
-  TabUIComponents,
-  'instructionModeManager'
-> {
-  const { dom } = shell;
-  const instructionModeManager = new InstructionModeManagerClass(
-    dom.inputEl,
-    {
-      onSubmit: async (rawInstruction) => {
-        await runtimeRef.requirePublished().controllers.inputController
-          .handleInstructionSubmit(rawInstruction);
-      },
-      getInputWrapper: () => dom.inputWrapper,
-      onActiveChange: active => {
-        if (active) composerDropdown.hide();
-      },
-    },
-  );
-  options.registerCleanup(
-    'tab instruction mode manager',
-    () => instructionModeManager.destroy(),
-  );
-
-  return { instructionModeManager };
 }
 
 function buildInputToolbar(
@@ -169,8 +132,7 @@ function buildInputToolbar(
   const inputToolbar = dom.inputWrapper.createDiv({ cls: 'claudian-input-toolbar' });
 
   const blankTabUIConfigProxy = (): ProviderChatUIConfig => {
-    const draftProvider = shell.providerId;
-    const baseConfig = ProviderRegistry.getChatUIConfig(draftProvider);
+    const baseConfig = getTabChatUIConfig(shell, plugin);
     return {
       ...baseConfig,
       getModelOptions: (settings: Record<string, unknown>) =>
@@ -193,14 +155,14 @@ function buildInputToolbar(
     applyProviderTarget: ({ providerId, model }) => {
       shell.draftModel = model;
       shell.providerId = providerId;
-      syncTabProviderServices(shell, services, plugin);
+      syncTabProviderServices(shell, services);
       runtimeRef.requirePublished().ui.composerDropdown.clearProviderCatalog();
     },
     restoreDraft: ({ providerId, model }) => {
       const tab = runtimeRef.requirePublished();
       shell.draftModel = model;
       shell.providerId = providerId;
-      syncTabProviderServices(shell, services, plugin);
+      syncTabProviderServices(shell, services);
       syncComposerDropdownForProvider(tab, plugin, shell.providerCatalogResolver);
       refreshTabProviderUI(tab);
       applyProviderUIGating(tab, plugin);
@@ -210,6 +172,29 @@ function buildInputToolbar(
     },
   });
 
+  /** Side chat owns an in-memory settings projection while it is selected. */
+  const getSelectedSideChat = (): SideChatController | null => {
+    const tab = runtimeRef.current();
+    if (!tab) return null;
+    const sideChat = tab.controllers.sideChatController;
+    return sideChat.destination === 'side' ? sideChat : null;
+  };
+
+  const applySideSetting = (
+    patch: Parameters<SideChatController['updateSideSettings']>[0],
+  ): boolean => {
+    const sideChat = getSelectedSideChat();
+    if (!sideChat) return false;
+    sideChat.updateSideSettings(patch);
+    const tab = runtimeRef.requirePublished();
+    tab.ui.modelSelector.updateDisplay();
+    tab.ui.modeSelector.updateDisplay();
+    tab.ui.thinkingBudgetSelector.updateDisplay();
+    tab.ui.permissionToggle.updateDisplay();
+    tab.ui.serviceTierToggle.updateDisplay();
+    return true;
+  };
+
   const toolbarComponents = createInputToolbar(inputToolbar, {
     getUIConfig: () => {
       if (shell.conversationId === null) {
@@ -218,11 +203,37 @@ function buildInputToolbar(
       return getTabChatUIConfig(shell, plugin);
     },
     getCapabilities: () => getTabCapabilities(shell, plugin),
-    getSettings: () => getTabSettingsSnapshot(shell, plugin),
+    getSettings: () => {
+      const base = getTabSettingsSnapshot(shell, plugin);
+      const sideSettings = getSelectedSideChat()?.runtime?.settings;
+      if (!sideSettings) return base;
+      return {
+        ...base,
+        ...(sideSettings.model ? { model: sideSettings.model } : {}),
+        ...(sideSettings.permissionMode
+          ? { permissionMode: sideSettings.permissionMode }
+          : {}),
+        ...(sideSettings.reasoning
+          ? { effortLevel: sideSettings.reasoning, thinkingBudget: sideSettings.reasoning }
+          : {}),
+        ...(sideSettings.serviceTier ? { serviceTier: sideSettings.serviceTier } : {}),
+      };
+    },
     getEnvironmentVariables: () => plugin.getActiveEnvironmentVariables(),
     onModelChange: async (model: string) => {
       const tab = runtimeRef.requirePublished();
       if (!options.isRuntimeLive(tab)) return;
+      const sideChat = getSelectedSideChat();
+      if (sideChat) {
+        // Enabled-model checks still apply; a side selection never substitutes one.
+        if (getEnabledProviderForModel(model, plugin.settings) !== sideChat.runtime?.providerId) {
+          new Notice('Cannot switch provider inside a side chat.');
+          tab.ui.modelSelector.updateDisplay();
+          return;
+        }
+        applySideSetting({ model });
+        return;
+      }
       if (tab.conversationId === null) {
         const selectionIntent = plugin.chatModelSelection.beginIntent();
         const request = modelSelection.beginRequest();
@@ -230,6 +241,11 @@ function buildInputToolbar(
           model,
           plugin.settings,
         );
+        if (!newProvider) {
+          new Notice('Select an available model in Claudian settings.');
+          tab.ui.modelSelector.updateDisplay();
+          return;
+        }
         const result = await modelSelection.selectBlank(request, {
           providerId: newProvider,
           model,
@@ -274,7 +290,7 @@ function buildInputToolbar(
 
       const boundProvider = tab.providerId;
       const modelProvider = getProviderForModel(model, plugin.settings);
-      if (modelProvider !== boundProvider) {
+      if (!boundProvider || modelProvider !== boundProvider) {
         new Notice('Cannot switch provider on a bound session. Start a new conversation instead.');
         tab.ui.modelSelector.updateDisplay();
         return;
@@ -329,20 +345,21 @@ function buildInputToolbar(
 
       const currentUsage = tab.state.usage;
       if (currentUsage) {
-        const newContextWindow = uiConfig.getContextWindowSize(
-          normalizedModel,
-          providerSettings.customContextLimits,
-          providerSettings,
-        );
-        tab.state.usage = recalculateUsageForModel(
+        tab.state.usage = clearReportedContextWindowForModel(
           currentUsage,
           normalizedModel,
-          newContextWindow,
+          boundProvider,
         );
       }
     },
     onModeChange: async (mode: string) => {
       const tab = runtimeRef.requirePublished();
+      if (getSelectedSideChat()) {
+        // Mode selection is provider-owned UI state that side chat does not project.
+        new Notice('Mode selection applies to the main chat.');
+        tab.ui.modeSelector.updateDisplay();
+        return;
+      }
       await updateTabProviderSettings(tab, plugin, (settings) => {
         getTabChatUIConfig(tab, plugin).applyModeSelection?.(mode, settings);
       });
@@ -351,6 +368,7 @@ function buildInputToolbar(
       onUserModified();
     },
     onThinkingBudgetChange: async (budget: string) => {
+      if (applySideSetting({ reasoning: budget })) return;
       const tab = runtimeRef.requirePublished();
       await updateTabProviderSettings(tab, plugin, (settings) => {
         const model = getTabSelectedModel(tab, plugin) ?? settings.model;
@@ -360,6 +378,7 @@ function buildInputToolbar(
       onUserModified();
     },
     onEffortLevelChange: async (effort: string) => {
+      if (applySideSetting({ reasoning: effort })) return;
       const tab = runtimeRef.requirePublished();
       await updateTabProviderSettings(tab, plugin, (settings) => {
         const model = getTabSelectedModel(tab, plugin) ?? settings.model;
@@ -369,11 +388,13 @@ function buildInputToolbar(
       onUserModified();
     },
     onServiceTierChange: async (serviceTier: string) => {
+      if (applySideSetting({ serviceTier })) return;
       const tab = runtimeRef.requirePublished();
       await updateTabServiceTier(tab, plugin, serviceTier);
       onUserModified();
     },
     onPermissionModeChange: async (mode: string) => {
+      if (applySideSetting({ permissionMode: mode })) return;
       const tab = runtimeRef.requirePublished();
       await updateTabPermissionMode(tab, plugin, mode);
       onUserModified();
@@ -421,15 +442,8 @@ export function buildTabRuntimeUI(
     getTabProviderId(shell, plugin),
     contextManagers.fileContextManager,
     options,
-    runtimeRef,
     () => getTabHiddenCommands(shell, plugin),
     catalogInfo,
-  );
-  const instructionComponents = buildInstructionComponents(
-    shell,
-    options,
-    runtimeRef,
-    composerDropdown,
   );
   const navigationSidebar = new NavigationSidebar(
     dom.messagesWrapperEl,
@@ -446,7 +460,6 @@ export function buildTabRuntimeUI(
     permissionToggle: toolbar.permissionToggle,
     serviceTierToggle: toolbar.serviceTierToggle,
     composerDropdown,
-    ...instructionComponents,
     contextUsageMeter: toolbar.contextUsageMeter,
     navigationSidebar,
   };

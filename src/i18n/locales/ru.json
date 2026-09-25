@@ -23,6 +23,8 @@
     "rewind": "Откатить"
   },
   "chat": {
+    "selectAvailableModel": "Перед отправкой выберите доступную модель.",
+    "selectAvailableTitleModel": "Выберите доступную модель для заголовков в настройках Claudian.",
     "rewind": {
       "confirmMessage": "Откатить до этой точки? Изменения файлов после этого сообщения могут быть перезаписаны или удалены. Это действие нельзя отменить.",
       "confirmMessageConflicts": "Откатить до этой точки? Будут перезаписаны файлы, изменённые вне агента ({count}):\n{files}",
@@ -57,6 +59,32 @@
       "errorNoActiveTab": "Нет активной вкладки",
       "commandNoMessages": "Нельзя форкнуть: в диалоге нет сообщений",
       "commandNoAssistantUuid": "Нельзя форкнуть: нет ответа ассистента с идентификаторами"
+    },
+    "quote": {
+      "buttonLabel": "Цитировать"
+    },
+    "sideChat": {
+      "title": "Побочный чат",
+      "collapse": "Свернуть",
+      "discard": "Отменить",
+      "statusPreparing": "Подготовка",
+      "statusQueued": "В очереди: {count}",
+      "statusWorking": "Работает",
+      "statusError": "Требует внимания",
+      "statusActionRequired": "Требуется ввод",
+      "placeholder": "Задайте уточняющий вопрос в побочном чате",
+      "composerLabel": "Сообщение побочного чата",
+      "needsPrompt": "Добавьте запрос после /side, чтобы начать побочный чат.",
+      "unsupportedProvider": "Этот провайдер не поддерживает побочный чат.",
+      "unavailableBusy": "Побочному чату нужен завершённый ответ. Дождитесь окончания текущего хода.",
+      "unavailableNoCheckpoint": "Сначала завершите ответ в этом разговоре.",
+      "unavailableNoSession": "Не удалось определить сессию провайдера для этого разговора.",
+      "alreadyExists": "Для этого разговора уже есть побочный чат. Отмените его, чтобы начать новый.",
+      "nestedUnavailable": "Побочный чат не может запустить ещё один. Сначала сверните к основному.",
+      "mainOnlyCommand": "/{command} доступна только в основном чате.",
+      "startFailed": "Не удалось запустить побочный чат: {error}",
+      "queued": "Добавлено в очередь бокового чата.",
+      "busySide": "Побочный чат ещё отвечает. Дождитесь завершения."
     }
   },
   "collab": {
@@ -94,6 +122,11 @@
       "savePath": "Сохранить путь"
     },
     "createProject": {
+      "authority": "Центр управления совместной работой",
+      "authorityLan": "LAN Host на этом устройстве",
+      "authorityCloud": "Cloud-сервер",
+      "serverUrl": "URL Cloud-сервера",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "title": "Создать проект Collab",
       "projectName": "Название проекта",
       "projectNamePlaceholder": "Research notes",
@@ -107,6 +140,9 @@
       "resumeFailed": "Настройка всё ещё требует внимания. Попробуйте снова."
     },
     "joinProject": {
+      "materialLan": "LAN-приглашение",
+      "materialCloud": "Cloud-приглашение",
+      "materialClaim": "Импортированное подтверждение членства",
       "title": "Присоединиться к проекту Collab",
       "invitation": "Приглашение",
       "invitationPlaceholder": "Вставьте строку приглашения",
@@ -120,26 +156,43 @@
       "resumeFailed": "Подключение всё ещё требует внимания. Повторите попытку."
     },
     "reconnectProject": {
+      "restoreWithLink": "Восстановить подключение по ссылке",
       "title": "Переподключить проект",
-      "description": "Вставьте новое приглашение от Host, чтобы переподключить {name}.",
+      "descriptionLan": "Подключите {name} заново с новым приглашением или данными восстановления участия. После переноса в Cloud используйте URL сервера Cloud, пока прежний Host доступен и хранит ваши данные восстановления.",
+      "descriptionCloud": "Переподключите {name} с помощью Cloud-приглашения, импортированного подтверждения членства или нового URL сервера.",
+      "method": "Способ переподключения",
+      "invitationOrClaim": "Приглашение или импортированное подтверждение членства",
+      "cloudMigration": "Подключиться после переноса в Cloud",
+      "relocation": "Тот же Cloud-проект по новому URL сервера",
+      "serverUrl": "URL Cloud-сервера",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "invitation": "Приглашение",
       "invitationPlaceholder": "Вставьте новую строку приглашения",
       "reconnect": "Переподключить",
       "reconnecting": "Переподключение проекта...",
-      "failed": "Не удалось переподключить проект. Проверьте приглашение и повторите попытку."
+      "failedInvitation": "Не удалось переподключить проект. Проверьте приглашение и повторите попытку.",
+      "failedCloudMaterial": "Не удалось переподключить проект. Проверьте Cloud-приглашение или импортированное подтверждение членства и повторите попытку.",
+      "failedRelocation": "Не удалось переподключить проект. Проверьте URL Cloud-сервера и повторите попытку."
     },
     "panel": {
+      "projectFolderRenameFailed": "Не удалось обновить расположение папки проекта. Откройте Collab и повторите попытку.",
       "title": "Collab",
       "addProject": "Добавить проект",
       "createProject": "Создать",
       "projectPicker": "Выбрать проект",
-      "emptyDescription": "Создайте локальный проект или присоединитесь к проекту другого пользователя Claudian.",
+      "emptyDescription": "Создайте проект или присоединитесь к существующему.",
       "joinProject": "Присоединиться",
       "reconnectProject": "Переподключить проект...",
       "joinUnavailable": "Присоединение станет доступно с LAN-совместной работой.",
       "openProject": "Открыть проект",
       "setupIncomplete": "Настройка не завершена, но сохранённая authority в безопасности.",
+      "leaveRecovery": "Выход из этого проекта требует внимания. Сохранённый вариант очистки не потерян.",
+      "resumeLeave": "Продолжить выход",
+      "leaveRecoveryFailed": "Не удалось завершить выход. Проверьте подключение и повторите попытку.",
       "workingCopyMissing": "Рабочая копия отсутствует. Сохранённый проект не удалён.",
+      "setupRecoveryUnavailable": "Setup information could not be read. Refresh and try again.",
+      "restoreWorkingCopy": "Restore working copy",
+      "restoreWorkingCopyFailed": "Could not restore the working copy. Try again.",
       "myChanges": "Мои изменения",
       "myChangesReady": "Проект готов. Публикация появится на следующем этапе.",
       "membersAccess": "Участники и доступ",
@@ -162,6 +215,13 @@
       "title": "Управление проектом"
     },
     "access": {
+      "copyRecoveryLink": "Ссылка восстановления",
+      "recoveryLinkCopied": "Ссылка восстановления скопирована.",
+      "activeInvitations": "Активные приглашения",
+      "loadingInvitations": "Загрузка приглашений…",
+      "noInvitations": "Активных приглашений нет.",
+      "members": "Участники",
+      "memberCountSingle": "Участников: {count}",
       "memberCount": "Участников: {count}",
       "noMembers": "Нет доступных участников.",
       "loading": "Загрузка участников…",
@@ -169,14 +229,73 @@
       "retry": "Повторить",
       "invitations": "Приглашения",
       "createInvitation": "Создать приглашение",
+      "resumeInvitation": "Продолжить приглашение",
       "creatingInvitation": "Создание приглашения…",
       "invitation": "Строка приглашения",
+      "copyInvitationId": "Копировать ID приглашения",
+      "invitationIdCopied": "ID приглашения скопирован.",
       "copyInvitation": "Копировать приглашение",
       "revokeInvitation": "Отозвать приглашение",
       "invitationCopied": "Приглашение скопировано.",
       "invitationRevoked": "Приглашение отозвано.",
+      "invitationExpiresIn": "Срок действия ссылки истечёт через {minutes} мин.",
+      "invitationExpired": "Срок действия ссылки истёк.",
+      "invitationUnavailable": "Это приглашение больше недоступно.",
+      "createNewInvitation": "Создать новое приглашение",
+      "invitationManagementPending": "Сначала завершите ожидающее действие в управлении проектом.",
       "invitationFailed": "Не удалось выполнить действие с приглашением.",
+      "invitationStatus": {
+        "active": "Активно",
+        "redeeming": "Используется",
+        "redeemed": "Использовано",
+        "revoked": "Отозвано",
+        "expired": "Истекло"
+      },
       "copyFailed": "Не удалось скопировать приглашение.",
+      "reissueMemberClaim": "Перевыпустить подтверждение членства",
+      "revokeMemberClaim": "Отозвать подтверждение членства",
+      "memberClaim": "Подтверждение членства",
+      "copyMemberClaim": "Копировать подтверждение членства",
+      "memberClaimReady": "Новое подтверждение членства готово.",
+      "memberClaimCopied": "Подтверждение членства скопировано.",
+      "cloudHostingDescription": "Совместная работа через сервер Cloud.",
+      "lanHostingDescription": "Совместная работа через хост в локальной сети.",
+      "leaveProjectDescription": "Покинуть проект. Вы сможете сохранить локальные файлы.",
+      "retireProjectDescription": "Завершить совместную работу для всех участников проекта.",
+      "hosting": "Хостинг",
+      "moveToCloud": "Перенести в Cloud",
+      "moveToLan": "Перенести в LAN",
+      "projectActions": "Действия с проектом",
+      "cloudServerUrl": "URL Cloud-сервера",
+      "cloudServerUrlPlaceholder": "http://server.example:8787",
+      "proposeLanToCloud": "Запросить перенос в Cloud",
+      "lanToCloudProposal": "Целевой Cloud: {url} · {phase}",
+      "acceptLanToCloud": "Принять перенос в Cloud",
+      "retryLanToCloud": "Повторить перенос в Cloud",
+      "lanHost": "LAN-хост",
+      "thisDevice": "Это устройство",
+      "anotherDevice": "Другое устройство",
+      "prepareLanHelp": "Подготовьте это устройство для размещения проекта в локальной сети.",
+      "lanTargetReady": "Это устройство готово принять проект.",
+      "otherLanTargetHelp": "На принимающем устройстве откройте «Перенести в LAN» и запросите размещение. Запрос появится здесь.",
+      "shareLanHandleHelp": "Отправьте этот дескриптор на целевое устройство, чтобы принять на нём перенос.",
+      "prepareCloudToLan": "Подготовить цель LAN",
+      "withdrawCloudToLan": "Отозвать цель",
+      "cloudToLanDescriptor": "Дескриптор цели LAN",
+      "cloudToLanHandle": "Идентификатор переноса",
+      "beginCloudToLan": "Начать перенос в LAN",
+      "acceptCloudToLan": "Принять перенос на этом устройстве",
+      "observeTransfer": "Обновить состояние переноса",
+      "copyTransferData": "Копировать данные переноса",
+      "transferUpdated": "Статус переноса обновлён.",
+      "transferConnectionRequired": "Для продолжения сохранённого переноса требуется совместимое подключение к серверу.",
+      "transferStatus": {
+        "pending": "Ожидается",
+        "active": "Выполняется",
+        "completed": "Завершено",
+        "cancelled": "Отменено"
+      },
+      "finishOperation": "Завершить выполненное действие",
       "manager": "Manager",
       "managerCount": "Менеджеров: {count}",
       "host": "Host",
@@ -217,13 +336,18 @@
       "retireProject": "Retire project",
       "confirmRetire": "Retire this project for everyone?",
       "leaveCleanupWarning": "Choose what happens to this local copy. Git history and unpublished Git-only work cannot be recovered after cleanup.",
+      "offlineLeaveLan": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the Host.",
+      "offlineLeaveCloud": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the server.",
+      "immediateLocalDeletion": "Local files will be deleted immediately.",
       "retireWarning": "This ends collaboration for every Member. Visible files remain on each device, but collaboration history and Git-only work are not recoverable.",
-      "actionComplete": "Доступ обновлён."
+      "actionComplete": "Доступ обновлён.",
+      "waitingCloudToLanApproval": "Ожидание одобрения Manager. Это устройство продолжит автоматически.",
+      "resumeCloudToLan": "Продолжить",
+      "cloudToLanApproved": "Одобрено. Принимающее устройство продолжит автоматически; пользователь также может нажать «Продолжить»."
     },
     "host": {
-      "summary": "LAN Host",
-      "hostedHere": "Размещён на этом устройстве",
-      "hostedElsewhere": "Размещён на другом устройстве",
+      "hostedHereSummary": "LAN Host (на этом устройстве)",
+      "hostedElsewhereSummary": "LAN Host (на другом устройстве)",
       "legacyClaimConfirmation": "Использовать это устройство как владельца Host?",
       "legacyClaimAction": "Использовать это устройство",
       "status": {
@@ -244,6 +368,19 @@
       "retry": "Повторить",
       "startFailed": "Не удалось запустить Host. Проверьте диагностику и повторите попытку.",
       "stopFailed": "Не удалось корректно остановить Host. Проверьте диагностику и повторите попытку."
+    },
+    "update": {
+      "reconnect": "Подключитесь снова, чтобы продолжить.",
+      "finishPublish": "Завершить публикацию",
+      "action": "Обновить",
+      "updating": "Обновление…",
+      "reviewTitle": "Проверить обновление проекта",
+      "failed": "Не удалось обновить. Повторить",
+      "conflictTitle": "Конфликты обновления проекта",
+      "editAndContinue": "Измените файлы проекта, затем продолжите обновление на боковой панели проекта.",
+      "reviewAction": "Проверить",
+      "conflictAction": "Конфликт",
+      "resumeAction": "Продолжить"
     },
     "publish": {
       "title": "Мои изменения",
@@ -335,6 +472,15 @@
       "save": "Save",
       "saving": "Saving…",
       "saveFailed": "The Ticket could not be saved.",
+      "contentChanged": "This Ticket changed while you were editing. Review the latest version before saving your draft.",
+      "latestVersion": "Latest version",
+      "keepMine": "Keep my version",
+      "savedRefreshing": "Saved. Refreshing…",
+      "savedRefreshFailed": "Saved. The latest Ticket could not be loaded.",
+      "retryRefresh": "Retry refresh",
+      "created": "Ticket created.",
+      "openCreated": "Open Ticket",
+      "useLatest": "Use latest version",
       "close": "Close",
       "reopen": "Reopen",
       "acceptedChanges": "Accepted changes",
@@ -451,7 +597,8 @@
     "titleModel": {
       "name": "Модель генерации заголовков",
       "desc": "Модель, используемая для автоматической генерации заголовков бесед.",
-      "auto": "Авто (Haiku)"
+      "select": "Выберите модель",
+      "unavailableWarning": "Автоматическое создание заголовков приостановлено. Выберите доступную модель для заголовков."
     },
     "navMappings": {
       "name": "Сопоставления навигации в стиле Vim",
@@ -486,58 +633,10 @@
       "desc": "Скрыть определённые команды и навыки из выпадающего списка. Полезно для скрытия записей Claude Code, которые не актуальны для Claudian. Вводите имена без начального слэша, по одному на строку.",
       "placeholder": "commit\nbuild\ntest"
     },
-    "mcpServers": {
-      "name": "MCP серверы",
-      "descBeforeCommand": "Claude Code управляет MCP-серверами через собственный CLI. Настройте через ",
-      "descAfterCommand": ", и они будут доступны в Claudian. ",
-      "learnMore": "Подробнее"
-    },
-    "plugins": {
-      "name": "Плагины Claude Code",
-      "desc": "Управление плагинами Claude Code из ~/.claude/plugins. Включенные плагины сохраняются для каждого хранилища в .claude/settings.json."
-    },
-    "subagents": {
-      "name": "Субагенты",
-      "desc": "Управление субагентами на уровне хранилища в .claude/agents/. Каждый Markdown-файл определяет одного пользовательского агента.",
-      "noAgents": "Субагенты не настроены. Нажмите +, чтобы создать одного.",
-      "deleteConfirm": "Удалить субагента \"{name}\"?",
-      "saveFailed": "Не удалось сохранить субагента: {message}",
-      "refreshFailed": "Не удалось обновить субагентов: {message}",
-      "deleteFailed": "Не удалось удалить субагента: {message}",
-      "renameCleanupFailed": "Предупреждение: не удалось удалить старый файл для \"{name}\"",
-      "created": "Субагент \"{name}\" создан",
-      "updated": "Субагент \"{name}\" обновлён",
-      "deleted": "Субагент \"{name}\" удалён",
-      "duplicateName": "Агент с именем \"{name}\" уже существует",
-      "descriptionRequired": "Описание обязательно",
-      "promptRequired": "Системный промпт обязателен",
-      "modal": {
-        "titleEdit": "Редактировать субагента",
-        "titleAdd": "Добавить субагента",
-        "name": "Имя",
-        "nameDesc": "Только строчные буквы, цифры и дефисы",
-        "namePlaceholder": "code-reviewer",
-        "description": "Описание",
-        "descriptionDesc": "Краткое описание этого агента",
-        "descriptionPlaceholder": "Проверяет код на ошибки и стиль",
-        "advancedOptions": "Дополнительные параметры",
-        "model": "Модель",
-        "modelDesc": "Переопределение модели для этого агента",
-        "tools": "Инструменты",
-        "toolsDesc": "Список разрешённых инструментов через запятую (пусто = все)",
-        "disallowedTools": "Запрещённые инструменты",
-        "disallowedToolsDesc": "Список инструментов, которые нужно запретить, через запятую",
-        "skills": "Навыки",
-        "skillsDesc": "Список навыков через запятую",
-        "prompt": "Системный промпт",
-        "promptDesc": "Инструкции для агента",
-        "promptPlaceholder": "Вы специалист по проверке кода. Проанализируйте предоставленный код на предмет..."
-      }
-    },
     "safety": "Безопасность",
     "loadUserSettings": {
       "name": "Загружать пользовательские настройки Claude",
-      "desc": "Загружает ~/.claude/settings.json. При включении пользовательские правила разрешений Claude Code могут обходить безопасный режим."
+      "desc": "Загружает пользовательскую конфигурацию Claude Code из ~/.claude: settings.json, навыки, команды, агенты и плагины. При отключении доступна только конфигурация уровня хранилища. При включении пользовательские правила разрешений могут обходить безопасный режим."
     },
     "claudeSafeMode": {
       "name": "Безопасный режим",
@@ -582,11 +681,6 @@
       "name": "Пользовательские лимиты контекста",
       "desc": "Установите размеры окна контекста для ваших пользовательских моделей. Оставьте пустым для использования значения по умолчанию (200k токенов).",
       "invalid": "Неверный формат. Используйте: 256k, 1m или точное число (1000-10000000)."
-    },
-    "customModels": {
-      "name": "Пользовательские модели",
-      "desc": "Добавьте дополнительные ID моделей Claude в список выбора, по одному на строку. Переопределения модели из окружения по-прежнему заменяют список.",
-      "placeholder": "claude-opus-4-6\nclaude-opus-4-5-20251101"
     },
     "enableChrome": {
       "name": "Включить расширение Chrome",
@@ -663,6 +757,17 @@
       "leftSidebar": "Левая боковая панель",
       "mainTab": "Основная вкладка редактора"
     },
+    "cliInstallation": {
+      "disclosure": "Установка {name}",
+      "description": "Необязательный путь к CLI на этом компьютере. Оставьте пустым для автоматического обнаружения.",
+      "checking": "Проверка CLI…",
+      "versionUnavailable": "Версия недоступна",
+      "notFound": "Не найден",
+      "custom": "Пользовательский путь",
+      "auto": "Определено автоматически",
+      "checkFailed": "Не удалось проверить CLI",
+      "saveFailed": "Не удалось сохранить путь. Повторите попытку."
+    },
     "cliPath": {
       "name": "Путь к CLI Claude",
       "desc": "Пользовательский путь к Claude Code CLI. Оставьте пустым для автоматического определения.",
@@ -682,6 +787,14 @@
       "desc": "Сделать включённые модели {provider} доступными для новых бесед. Существующие сеансы сохраняются после отключения.",
       "lastProviderWarning": "Для работы Claudian должен быть включён хотя бы один провайдер.",
       "noModelsWarning": "Нет включённых моделей {provider}. В разделе «Модели» ниже включите хотя бы одну модель."
+    },
+    "claude": {
+      "responseStyle": {
+        "name": "Стиль ответа",
+        "desc": "Обычный использует привычный стиль Claude. Краткий начинает с результата и пропускает вступление. Требуется Claude Code 2.1.237 или новее.",
+        "default": "Обычный",
+        "concise": "Краткий"
+      }
     },
     "codex": {
       "installationMethod": {
@@ -707,10 +820,11 @@
         "workspaceWrite": "Запись в рабочую область",
         "readOnly": "Только чтение"
       },
-      "customModels": {
-        "name": "Пользовательские модели",
-        "desc": "Добавьте дополнительные ID моделей Codex в список выбора, по одному на строку. `OPENAI_MODEL` по-прежнему имеет приоритет, если задан.",
-        "placeholder": "gpt-5.4\ngpt-5.3-codex-spark"
+      "responseStyle": {
+        "name": "Стиль ответа",
+        "desc": "Выберите стиль общения Codex для поддерживаемых моделей. Применяется со следующего сообщения.",
+        "pragmatic": "Прагматичный",
+        "friendly": "Дружелюбный"
       },
       "reasoningSummary": {
         "name": "Сводка рассуждений",
@@ -731,94 +845,46 @@
         "hiddenDesc": "Скрыть отдельные навыки Codex из списка. Введите имена навыков без начального $, по одному на строку.",
         "hiddenPlaceholder": "analyze\nexplain\nfix"
       },
-      "subagents": {
-        "name": "Субагенты Codex",
-        "desc": "Управляйте субагентами Codex уровня vault, сохраненными в .codex/agents/. Каждый TOML-файл задает одного пользовательского агента."
-      },
-      "mcp": {
-        "descBeforeCommand": "Codex управляет MCP-серверами через собственный CLI. Настройте через ",
-        "descAfterCommand": ", и они будут доступны в Claudian. ",
-        "learnMore": "Подробнее"
-      },
       "environment": {
         "name": "Окружение Codex",
         "desc": "Только переменные среды выполнения, принадлежащие Codex. Используйте для настроек OPENAI_* и CODEX_*. Если автоопределению Codex нужна помощь, добавьте каталог установки в общий PATH, а не в этот раздел провайдера."
       }
     },
     "agentSkills": {
-      "sectionTitle": "Skills", "fixedRoot": "Managed in .agents/skills", "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.", "noSkills": "No shared skills configured. Click + to create one.", "skillBadge": "skill", "diagnosticsTitle": "Skills needing attention", "loadFailed": "Could not load shared skills.", "savedRefreshFailed": "Saved, but provider refresh failed.", "validationFailed": "Invalid skill: {message}", "collisionFailed": "A skill named \"{name}\" already exists.", "saveFailed": "Failed to save shared skill: {message}", "deleteFailed": "Failed to move shared skill to trash: {message}", "staleConflict": "This skill changed elsewhere; refresh before saving.", "created": "Shared skill \"{name}\" created.", "updated": "Shared skill \"{name}\" updated.", "deleted": "Shared skill \"{name}\" moved to trash.",
-      "modal": { "titleEdit": "Edit Shared Skill", "titleAdd": "Add Shared Skill", "name": "Skill name", "nameDesc": "Lowercase letters and numbers separated by single hyphens", "namePlaceholder": "code-reviewer", "description": "Description", "descriptionDesc": "Required portable description used by providers to select the skill", "descriptionPlaceholder": "Reviews code for correctness and maintainability", "instructions": "Instructions", "instructionsDesc": "Required SKILL.md instructions", "instructionsPlaceholder": "Review the supplied code and report actionable findings..." },
-      "delete": { "title": "Delete Shared Skill", "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.", "confirm": "Move to trash" }
-    },
-    "codexSkills": {
+      "sectionTitle": "Skills",
+      "fixedRoot": "Managed in .agents/skills",
+      "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.",
+      "noSkills": "No shared skills configured. Click + to create one.",
+      "skillBadge": "skill",
+      "diagnosticsTitle": "Skills needing attention",
+      "loadFailed": "Could not load shared skills.",
+      "savedRefreshFailed": "Saved, but provider refresh failed.",
+      "validationFailed": "Invalid skill: {message}",
+      "collisionFailed": "A skill named \"{name}\" already exists.",
+      "saveFailed": "Failed to save shared skill: {message}",
+      "deleteFailed": "Failed to move shared skill to trash: {message}",
+      "staleConflict": "This skill changed elsewhere; refresh before saving.",
+      "created": "Shared skill \"{name}\" created.",
+      "updated": "Shared skill \"{name}\" updated.",
+      "deleted": "Shared skill \"{name}\" moved to trash.",
       "modal": {
-        "titleEdit": "Редактировать навык Codex",
-        "titleAdd": "Добавить навык Codex",
-        "directory": "Каталог",
-        "directoryDesc": "Где хранить навык",
-        "skillName": "Имя навыка",
-        "skillNameDesc": "Имя, используемое после $ (например, \"analyze\" для $analyze)",
-        "description": "Описание",
-        "descriptionDesc": "Необязательное описание, отображаемое в списке",
-        "instructions": "Инструкции",
-        "instructionsDesc": "Инструкции навыка (содержимое SKILL.md)",
-        "instructionsPlaceholder": "Analyze the code for..."
+        "titleEdit": "Edit Shared Skill",
+        "titleAdd": "Add Shared Skill",
+        "name": "Skill name",
+        "nameDesc": "Lowercase letters and numbers separated by single hyphens",
+        "namePlaceholder": "code-reviewer",
+        "description": "Description",
+        "descriptionDesc": "Required portable description used by providers to select the skill",
+        "descriptionPlaceholder": "Reviews code for correctness and maintainability",
+        "instructions": "Instructions",
+        "instructionsDesc": "Required SKILL.md instructions",
+        "instructionsPlaceholder": "Review the supplied code and report actionable findings..."
       },
-      "instructionsRequired": "Инструкции обязательны",
-      "saveFailed": "Не удалось сохранить навык Codex",
-      "header": "Навыки Codex",
-      "noSkills": "В vault нет навыков Codex. Нажмите +, чтобы создать навык.",
-      "skillBadge": "навык",
-      "deleted": "Навык Codex \"{name}\" удален",
-      "deleteFailed": "Не удалось удалить навык Codex",
-      "created": "Навык Codex \"{name}\" создан",
-      "updated": "Навык Codex \"{name}\" обновлен"
-    },
-    "codexSubagents": {
-      "modal": {
-        "titleEdit": "Редактировать субагента Codex",
-        "titleAdd": "Добавить субагента Codex",
-        "nameDesc": "Имя агента, которое Codex использует при запуске (строчные буквы, дефисы, подчеркивания)",
-        "descriptionDesc": "Когда Codex должен использовать этого агента",
-        "modelDesc": "Переопределение модели (пусто = наследовать)",
-        "namePlaceholder": "code_reviewer"
-      },
-      "reasoningEffort": {
-        "name": "Усилие рассуждения",
-        "desc": "Уровень усилия рассуждения модели",
-        "inherit": "Наследовать",
-        "low": "Низкий",
-        "medium": "Средний",
-        "high": "Высокий",
-        "xhigh": "Очень высокий"
-      },
-      "sandboxMode": {
-        "name": "Режим песочницы",
-        "desc": "Ограничение песочницы для этого агента",
-        "inherit": "Наследовать",
-        "readOnly": "Только чтение",
-        "dangerFullAccess": "Полный доступ",
-        "workspaceWrite": "Запись в рабочую область"
-      },
-      "nicknameCandidates": {
-        "name": "Варианты псевдонимов",
-        "desc": "Отображаемые псевдонимы через запятую (например: atlas, delta, echo)"
-      },
-      "developerInstructions": {
-        "name": "Инструкции разработчика",
-        "desc": "Основные инструкции, определяющие поведение агента",
-        "placeholder": "Review code like an owner.\nPrioritize correctness, security, and missing test coverage.",
-        "required": "Инструкции разработчика обязательны"
-      },
-      "validation": {
-        "nameRequired": "Имя субагента обязательно",
-        "nameTooLong": "Имя субагента должно быть не длиннее {count} символов",
-        "nameInvalid": "Имя субагента может содержать только строчные буквы, цифры, дефисы и подчеркивания",
-        "nicknameInvalid": "Варианты псевдонимов могут содержать только ASCII-буквы, цифры, пробелы, дефисы и подчеркивания",
-        "nicknameDuplicate": "Варианты псевдонимов должны быть уникальными"
-      },
-      "header": "Субагенты Codex",
-      "noAgents": "В vault нет субагентов Codex. Нажмите +, чтобы создать одного."
+      "delete": {
+        "title": "Delete Shared Skill",
+        "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.",
+        "confirm": "Move to trash"
+      }
     }
   }
 }

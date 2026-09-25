@@ -53,12 +53,17 @@ interface EventConnection {
 function eventPayload(record: AuthorityEventRecord): Readonly<Record<string, unknown>> {
   const requestId = record.payload.requestId;
   const memberId = record.payload.memberId;
+  const ticketId = record.payload.ticketId;
   if (
     (record.kind.startsWith('request.') || record.kind === 'comment.created')
     && typeof requestId === 'string'
     && isCollabOpaqueId(requestId)
   ) {
     return { requestId };
+  }
+  if ((record.kind.startsWith('ticket.') || record.kind === 'ticket-comment.created')
+    && isCollabOpaqueId(ticketId)) {
+    return { ticketId };
   }
   if (
     record.kind.startsWith('membership.')
@@ -73,6 +78,8 @@ function eventPayload(record: AuthorityEventRecord): Readonly<Record<string, unk
 function eventKind(kind: string): CollabEventKind | null {
   if (kind.startsWith('request.')) return 'request-updated';
   if (kind === 'comment.created') return 'comment-added';
+  if (kind.startsWith('ticket.')) return 'ticket-updated';
+  if (kind === 'ticket-comment.created') return 'ticket-comment-added';
   if (kind.startsWith('membership.')) return 'membership-updated';
   if (kind.startsWith('invitation.')) return 'invitation-updated';
   if (kind.startsWith('host.')) return 'host-state-updated';
@@ -143,7 +150,7 @@ export class ProjectEventHub {
     this.clearInterval = timer.clearInterval ?? (handle => window.clearInterval(handle));
     this.setInterval = timer.setInterval
       ?? ((callback, milliseconds) => window.setInterval(callback, milliseconds));
-    this.subscription = source.subscribe(() => this.scheduleRefresh());
+    this.subscription = source.subscribe(() => this.#scheduleRefresh());
   }
 
   hasAuthenticatedPresence(projectId: string, memberId: string): boolean {
@@ -152,6 +159,17 @@ export class ProjectEventHub {
       connection.memberId === memberId
       && connection.socket.readyState === OPEN_READY_STATE
     ));
+  }
+
+  async publishAuthorityChange(): Promise<void> {
+    const occurredAt = new Date().toISOString();
+    for (const connection of this.connections) {
+      this.send(connection, {
+        kind: 'host-state-updated', occurredAt, payload: {}, projectId: this.projectId,
+        protocolVersion: COLLAB_CONTROL_PROTOCOL_VERSION, sequence: connection.cursor + 1,
+      });
+    }
+    await Promise.resolve();
   }
 
   async publishRetirement(result: CollabRetirementResult): Promise<void> {
@@ -196,9 +214,9 @@ export class ProjectEventHub {
     socket.on('pong', () => {
       connection.missedPongs = 0;
     });
-    socket.on('close', () => this.removeConnection(connection));
-    socket.on('error', () => this.removeConnection(connection));
-    this.ensureHeartbeat();
+    socket.on('close', () => this.#removeConnection(connection));
+    socket.on('error', () => this.#removeConnection(connection));
+    this.#ensureHeartbeat();
     await this.refresh(connection);
   }
 
@@ -206,7 +224,7 @@ export class ProjectEventHub {
     if (this.closed) return;
     this.closed = true;
     this.subscription.dispose();
-    this.stopHeartbeat();
+    this.#stopHeartbeat();
     const connections = [...this.connections];
     this.connections.clear();
     for (const connection of connections) {
@@ -216,7 +234,7 @@ export class ProjectEventHub {
     }
   }
 
-  private scheduleRefresh(): void {
+  #scheduleRefresh(): void {
     if (this.closed || this.refreshScheduled) return;
     this.refreshScheduled = true;
     queueMicrotask(() => {
@@ -295,12 +313,12 @@ export class ProjectEventHub {
     }
   }
 
-  private ensureHeartbeat(): void {
+  #ensureHeartbeat(): void {
     if (this.heartbeatHandle !== null || this.connections.size === 0) return;
     this.heartbeatHandle = this.setInterval(() => {
       for (const connection of [...this.connections]) {
         if (connection.socket.readyState !== OPEN_READY_STATE) {
-          this.removeConnection(connection);
+          this.#removeConnection(connection);
           continue;
         }
         if (connection.missedPongs >= 2) {
@@ -313,14 +331,14 @@ export class ProjectEventHub {
     }, HEARTBEAT_INTERVAL_MS);
   }
 
-  private stopHeartbeat(): void {
+  #stopHeartbeat(): void {
     if (this.heartbeatHandle === null) return;
     this.clearInterval(this.heartbeatHandle);
     this.heartbeatHandle = null;
   }
 
-  private removeConnection(connection: EventConnection): void {
+  #removeConnection(connection: EventConnection): void {
     this.connections.delete(connection);
-    if (this.connections.size === 0) this.stopHeartbeat();
+    if (this.connections.size === 0) this.#stopHeartbeat();
   }
 }

@@ -4,12 +4,14 @@ import {
   isCollabProjectId,
 } from '@claudian-collab/protocol';
 import {
+  type EventRef,
   ItemView,
   MarkdownRenderer,
   type ViewStateResult,
   type WorkspaceLeaf,
 } from 'obsidian';
 
+import type { CollabProjectChanges } from '@/core/collab';
 import { CollabError } from '@/core/collab/ClaudianCollabError';
 import type {
   CollabConflictDetailViewState,
@@ -124,11 +126,11 @@ function parseState(value: unknown): CollabDetailViewState {
     if (
       !isCollabProjectId(state.projectId)
       || !isCollabOpaqueId(state.operationId)
-      || (state.location !== 'my-changes' && state.location !== 'request')
+      || (state.location !== 'my-changes' && state.location !== 'request' && state.location !== 'update')
       || (state.location === 'request' && (
         !isCollabOpaqueId(state.requestId)
       ))
-      || (state.location === 'my-changes' && state.requestId !== undefined)
+      || (state.location !== 'request' && state.requestId !== undefined)
     ) {
       throw viewError('review-view-state-invalid');
     }
@@ -142,7 +144,8 @@ function parseState(value: unknown): CollabDetailViewState {
   }
   if (state.kind === 'publication') {
     if (
-      !isCollabProjectId(state.projectId)
+      (state.intent !== undefined && state.intent !== 'publish' && state.intent !== 'update')
+      || !isCollabProjectId(state.projectId)
       || !isCollabOpaqueId(state.operationId)
       || !isCollabGitOid(state.currentMainOid)
       || !isCollabGitOid(state.candidateOid)
@@ -153,6 +156,7 @@ function parseState(value: unknown): CollabDetailViewState {
       throw viewError('review-view-state-invalid');
     }
     return {
+      ...(state.intent === undefined ? {} : { intent: state.intent }),
       candidateOid: state.candidateOid,
       comparisonBaseOid: state.comparisonBaseOid,
       comparisonTargetOid: state.comparisonTargetOid,
@@ -211,12 +215,15 @@ export class CollabDetailView extends ItemView {
   private conflictSession: ConflictDetailSession | null = null;
   private readonly conflictPanelFactory: CollabDetailConflictPanelFactory;
   private readonly diffSession: ReviewDiffSession;
+  private observedProjectId: string | null = null;
   private featureSubscription: { dispose(): void } | null = null;
   private readonly openTicketInNewTab: CollabDetailViewOptions['openTicketInNewTab'];
   private readonly preparedReviews: CollabPreparedReviewCache | null;
   private reviewSession: ReviewDetailSession | null = null;
   private state: CollabDetailViewState | null = null;
   private ticketSession: TicketDetailSession | null = null;
+  private refreshDirty = false;
+  private visibilityEvents: EventRef[] = [];
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -261,6 +268,7 @@ export class CollabDetailView extends ItemView {
 
   async setState(value: unknown, result: ViewStateResult): Promise<void> {
     const state = parseState(value);
+    this.refreshDirty = false;
     result.history = true;
     if (!this.port.isDetailAdmissionOpen()) {
       // A restored leaf before workspace-layout readiness may keep its parsed
@@ -272,6 +280,7 @@ export class CollabDetailView extends ItemView {
       this.state = state;
       return;
     }
+    this.observeState(state);
     if (state.kind === 'conflict') {
       this.activateMode('conflict');
       this.state = state;
@@ -289,11 +298,14 @@ export class CollabDetailView extends ItemView {
 
   async onOpen(): Promise<void> {
     if (!this.port.isDetailAdmissionOpen()) return;
-    this.featureSubscription ??= this.port.subscribe(() => {
-      const state = this.state;
-      if (state?.kind === 'ticket') void this.loadTicket(state);
-      if (state?.kind === 'request') void this.reviewSession?.refresh();
-    });
+    if (this.visibilityEvents.length === 0) {
+      const reveal = () => queueMicrotask(() => this.refreshVisibleDetail());
+      this.visibilityEvents = [
+        this.app.workspace.on('active-leaf-change', reveal),
+        this.app.workspace.on('layout-change', reveal),
+      ];
+    }
+    this.observeState(this.state);
     this.contentEl.replaceChildren();
     this.contentEl.classList.add('claudian-collab-review');
     if (this.state) {
@@ -307,6 +319,44 @@ export class CollabDetailView extends ItemView {
     } else {
       this.renderMessage(t('collab.review.openRequest'));
     }
+  }
+
+  onResize(): void {
+    this.refreshVisibleDetail();
+  }
+
+  private refreshVisibleDetail(): void {
+    if (!this.refreshDirty || !this.containerEl.isShown()) return;
+    this.refreshDirty = false;
+    const current = this.state;
+    if (current?.kind === 'ticket') void this.loadTicket(current);
+    if (current?.kind === 'request' || (current?.kind === 'publication' && current.intent === 'update')) {
+      void this.reviewSession?.refresh();
+    }
+  }
+
+  private affectedBy(changes?: CollabProjectChanges): boolean {
+    if (!changes || changes.members) return true;
+    const current = this.state;
+    if (current?.kind === 'ticket') return changes.tickets === true
+      || (current.ticketId !== undefined && changes.tickets?.includes(current.ticketId) === true);
+    if (current?.kind === 'request') return changes.main === true || changes.requests === true
+      || changes.requests?.includes(current.requestId) === true;
+    return current?.kind === 'publication' && current.intent === 'update' && changes.main === true;
+  }
+
+  private observeState(state: CollabDetailViewState | null): void {
+    const projectId = state && 'projectId' in state ? state.projectId : null;
+    if (this.observedProjectId === projectId) return;
+    this.featureSubscription?.dispose();
+    this.featureSubscription = null;
+    this.observedProjectId = projectId;
+    if (!projectId) return;
+    this.featureSubscription = this.port.observeProject(projectId, (_coordination, changes) => {
+      if (!this.affectedBy(changes)) return;
+      this.refreshDirty = true;
+      this.refreshVisibleDetail();
+    });
   }
 
   private async loadTicket(state: CollabTicketDetailViewState): Promise<void> {
@@ -336,6 +386,9 @@ export class CollabDetailView extends ItemView {
     await session.open(state);
   }
   async onClose(): Promise<void> {
+    this.refreshDirty = false;
+    for (const event of this.visibilityEvents) this.app.workspace.offref(event);
+    this.visibilityEvents = [];
     this.cancelWork();
     this.diffSession.destroy();
     this.featureSubscription?.dispose();
@@ -409,21 +462,24 @@ export class CollabDetailView extends ItemView {
 
 export class CollabDetailViewCoordinator {
   private generation = 0;
+  private closed = false;
   private transitionTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly workspace: CollabDetailWorkspacePort,
     private readonly preparedReviews?: CollabPreparedReviewCache,
+    private readonly isAvailable: () => boolean = () => true,
   ) {}
 
-  async close(): Promise<void> {
-    const generation = ++this.generation;
-    const transition = this.transitionTail.then(() => {
-      if (generation !== this.generation) return;
-      for (const leaf of this.workspace.getLeavesOfType(COLLAB_DETAIL_VIEW_TYPE)) {
-        leaf.detach();
-      }
-    });
+  close(): Promise<void> {
+    if (this.closed) return this.transitionTail;
+    this.closed = true;
+    this.generation += 1;
+    const detach = (): void => {
+      for (const leaf of this.workspace.getLeavesOfType(COLLAB_DETAIL_VIEW_TYPE)) leaf.detach();
+    };
+    detach();
+    const transition = this.transitionTail.then(detach);
     this.transitionTail = transition.catch(() => undefined);
     return transition;
   }
@@ -432,26 +488,27 @@ export class CollabDetailViewCoordinator {
     state: CollabDetailViewState,
     prepared?: CollabPreparedReviewEntry,
   ): Promise<void> {
+    if (this.closed || !this.isAvailable()) return;
     const safeState = parseState(state);
     if (safeState.kind === 'request' && prepared) {
       assertReviewMatchesState(prepared.review, safeState);
     }
     const generation = ++this.generation;
     const transition = this.transitionTail.then(async () => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       if (safeState.kind === 'request' && prepared) {
         this.preparedReviews?.store(prepared);
       }
       const existing = this.workspace.getLeavesOfType(COLLAB_DETAIL_VIEW_TYPE)[0];
       const leaf = existing ?? this.workspace.getLeaf('tab');
       if (!leaf) throw viewError('review-leaf-unavailable');
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       await leaf.setViewState({
         active: true,
         state: { ...safeState },
         type: COLLAB_DETAIL_VIEW_TYPE,
       });
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       await this.workspace.revealLeaf(leaf);
     });
     this.transitionTail = transition.catch(() => undefined);
@@ -459,19 +516,20 @@ export class CollabDetailViewCoordinator {
   }
 
   async openInNewTab(state: CollabDetailViewState): Promise<void> {
+    if (this.closed || !this.isAvailable()) return;
     const safeState = parseState(state);
     const generation = ++this.generation;
     const transition = this.transitionTail.then(async () => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       const leaf = this.workspace.getLeaf('tab');
       if (!leaf) throw viewError('review-leaf-unavailable');
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       await leaf.setViewState({
         active: true,
         state: { ...safeState },
         type: COLLAB_DETAIL_VIEW_TYPE,
       });
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.closed || !this.isAvailable()) return;
       await this.workspace.revealLeaf(leaf);
     });
     this.transitionTail = transition.catch(() => undefined);

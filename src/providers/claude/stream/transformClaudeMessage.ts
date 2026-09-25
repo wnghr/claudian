@@ -13,7 +13,7 @@ import {
   extractToolResultImages,
 } from '../sdk/toolResultContent';
 import type { ClaudeAsyncSubagentCompletionEvent, TransformEvent } from '../sdk/types';
-import { isDefaultClaudeModel, resolveContextWindowSize } from '../types/models';
+import { isDefaultClaudeModel } from '../types/models';
 import { createTransformStreamState, type TransformStreamState } from './toolInputStreamState';
 
 type ToolUseFields = { id: string; name: string; input: Record<string, unknown> };
@@ -91,12 +91,10 @@ function transformTaskNotification(message: SDKMessage): ClaudeAsyncSubagentComp
 }
 
 export interface TransformOptions {
-  /** The intended model from settings/query (used for context window size). */
+  /** The intended model from settings/query (used to match reported context windows). */
   intendedModel?: string;
-  /** Custom context limits from settings (model ID → tokens). */
-  customContextLimits?: Record<string, number>;
-  /** Context window reported by the active provider runtime. */
-  authoritativeContextWindow?: number;
+  /** Context window reported by the active provider runtime for the intended model. */
+  reportedContextWindow?: number;
   /** Tracks active streamed tool blocks so input_json_delta can be normalized. */
   streamState?: TransformStreamState;
   /** Tracks prompt-token usage across Anthropic-compatible stream events. */
@@ -331,7 +329,7 @@ function samePromptUsage(a: PromptUsageSnapshot, b: PromptUsageSnapshot): boolea
 
 function buildUsageInfo(promptUsage: PromptUsageSnapshot, options?: TransformOptions): UsageInfo {
   const model = options?.intendedModel ?? 'sonnet';
-  return recalculateClaudeUsageContextWindow({
+  return withReportedContextWindow({
     model,
     inputTokens: promptUsage.inputTokens,
     cacheCreationInputTokens: promptUsage.cacheCreationInputTokens,
@@ -339,31 +337,26 @@ function buildUsageInfo(promptUsage: PromptUsageSnapshot, options?: TransformOpt
     contextWindow: 0,
     contextTokens: promptUsage.contextTokens,
     percentage: 0,
-  }, options?.customContextLimits, options?.authoritativeContextWindow);
+  }, options?.reportedContextWindow);
 }
 
-export function recalculateClaudeUsageContextWindow(
+/** Raw usage carries only a valid reported window; anything else becomes 0 (unknown). */
+export function withReportedContextWindow(
   usage: UsageInfo,
-  customContextLimits?: Record<string, number>,
-  runtimeContextWindow?: number,
+  reportedContextWindow?: number,
 ): UsageInfo {
-  const contextWindowResolution = resolveContextWindowSize(
-    usage.model ?? 'sonnet',
-    customContextLimits,
-    runtimeContextWindow,
-  );
-  const { contextWindow } = contextWindowResolution;
-  const nextUsage: UsageInfo = {
+  const contextWindow = typeof reportedContextWindow === 'number'
+    && Number.isFinite(reportedContextWindow)
+    && reportedContextWindow > 0
+    ? reportedContextWindow
+    : 0;
+  return {
     ...usage,
     contextWindow,
-    percentage: Math.min(100, Math.max(0, Math.round((usage.contextTokens / contextWindow) * 100))),
+    percentage: contextWindow > 0
+      ? Math.min(100, Math.max(0, Math.round((usage.contextTokens / contextWindow) * 100)))
+      : 0,
   };
-  if (contextWindowResolution.source === 'runtime') {
-    nextUsage.contextWindowIsAuthoritative = true;
-  } else {
-    delete nextUsage.contextWindowIsAuthoritative;
-  }
-  return nextUsage;
 }
 
 export function createTransformUsageState(): TransformUsageState {
@@ -428,7 +421,6 @@ export function* transformSDKMessage(
         yield {
           type: 'session_init',
           sessionId: message.session_id,
-          agents: message.agents,
           permissionMode: message.permissionMode,
         };
       } else if (message.subtype === 'compact_boundary') {

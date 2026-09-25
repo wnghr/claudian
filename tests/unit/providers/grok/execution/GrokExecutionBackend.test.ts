@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 const mockLoadGrokPromptIndexAfterAssistant = jest.fn();
 const mockResolveGrokSessionDirectory = jest.fn();
 
@@ -44,6 +46,12 @@ import {
   updateCurrentGrokCatalog,
   updateGrokProviderSettings,
 } from '@/providers/grok/settings';
+
+function createGrokHost(model = 'grok-4'): ProviderHost {
+  const host = { settings: { model: `grok/${model}`, providerConfigs: { grok: { enabled: true, visibleModels: [model, "grok-3"] } } } } as unknown as ProviderHost;
+  updateCurrentGrokCatalog(host.settings, { defaultModelId: model, fingerprint: 'fixture', refreshedAt: 1, models: [{ rawId: "grok-3", displayName: "Grok 3", supportsReasoning: false, reasoningEfforts: [] }, { rawId: model, displayName: model, supportsReasoning: true, reasoningEfforts: [] }] });
+  return host;
+}
 
 const interactionPort: ProviderInteractionPort = {
   askUserQuestion: jest.fn(),
@@ -101,20 +109,7 @@ function grok45Request(reasoning: string): ProviderExecutionRequest {
   };
 }
 
-function createGrok45Host(): ProviderHost {
-  return {
-    settings: {
-      model: 'grok/grok-4.5',
-      providerConfigs: {
-        grok: {
-          enabled: true,
-          preferredReasoningByModel: {},
-        },
-      },
-      savedProviderModel: { grok: 'grok/grok-4.5' },
-    },
-  } as unknown as ProviderHost;
-}
+function createGrok45Host(): ProviderHost { return createGrokHost('grok-4.5'); }
 
 function persistGrok45Catalog(
   host: ProviderHost,
@@ -219,6 +214,15 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
     newSessionId: 'session-forked',
     parentSessionId: request.sourceSessionId,
   });
+  private interjectionListener?: (value: { sessionId: string; interjectionId?: string }) => void;
+  onInterjection(listener: (value: { sessionId: string; interjectionId?: string }) => void): () => void {
+    this.interjectionListener = listener;
+    return () => { this.interjectionListener = undefined; };
+  }
+  emitInterjection(index = -1): void {
+    const request = this.interjectCalls.at(index) as { sessionId: string; interjectionId: string };
+    this.interjectionListener?.(request);
+  }
   interjectImplementation: () => Promise<void> = async () => {};
   modelImplementation: (
     request: AcpSetSessionModelRequest,
@@ -331,10 +335,15 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
     await this.shutdownImplementation();
   }
 
-  emit(update: Record<string, unknown>, source: 'extension' | 'standard' = 'standard'): void {
+  emit(
+    update: Record<string, unknown>,
+    source: 'extension' | 'standard' = 'standard',
+    metadata?: Record<string, unknown>,
+  ): void {
     this.notification?.({
       sessionId: 'session-existing',
       update,
+      ...(metadata ? { _meta: metadata } : {}),
     } as unknown as AcpSessionNotification, source);
   }
 
@@ -358,6 +367,18 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
 }
 
 describe('GrokExecutionBackend', () => {
+  it('rejects an unavailable selected model before native startup with a configuration error', async () => {
+    const host = createGrokHost();
+    host.settings.providerConfigs!.grok!.visibleModels = [];
+    const nativeFactory = { create: jest.fn() };
+    const session = new GrokExecutionBackend(host, { nativeFactory }).createSession(sessionConfig);
+    const events = await collect(session.execute(executionRequest()).events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error', category: 'configuration' }));
+    expect(events.some(event => event.type === 'turn_started' && event.accepted)).toBe(false);
+    expect(nativeFactory.create).not.toHaveBeenCalled();
+    await session.dispose();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockLoadGrokPromptIndexAfterAssistant.mockResolvedValue(3);
@@ -367,6 +388,70 @@ describe('GrokExecutionBackend', () => {
       ),
     );
   });
+
+  it.each(['notification', 'update', 'standard'] as const)(
+    'preserves Grok checkpoint IDs from %s metadata across assistant messages',
+    async location => {
+      const native = new FakeNativeConnection();
+      native.promptImplementation = async () => {
+        for (const id of ['assistant-first', 'assistant-final']) {
+          native.emit({
+            content: { text: id, type: 'text' },
+            sessionUpdate: 'agent_message_chunk',
+            ...(location === 'standard' ? { messageId: id } : {}),
+            ...(location === 'update' ? { _meta: { eventId: id } } : {}),
+          }, 'extension', location === 'notification' ? { eventId: id } : undefined);
+        }
+        return { stopReason: 'end_turn' };
+      };
+      const session = new GrokExecutionBackend(createGrokHost(), {
+        nativeFactory: { create: () => native },
+      }).createSession(sessionConfig);
+      try {
+        const events = await collect(session.execute(executionRequest()).events);
+        expect(events.filter(event => event.type === 'assistant_message_started')).toEqual([
+          expect.objectContaining({ nativeAssistantId: 'assistant-first' }),
+          expect.objectContaining({ nativeAssistantId: 'assistant-final' }),
+        ]);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it.each(['notification', 'response', 'metadata'] as const)(
+    'emits final Grok usage from %s with the streamed context window',
+    async source => {
+      const fixture = JSON.parse(readFileSync(
+        'tests/fixtures/providers/grok/runtime/turn-completed.json', 'utf8',
+      ));
+      const update = fixture.params.params.update;
+      const native = new FakeNativeConnection();
+      native.promptImplementation = async () => {
+        native.emit({ sessionUpdate: 'usage_update', size: 200_000, used: 12 });
+        if (source === 'notification') native.emit(update, 'extension');
+        return {
+          stopReason: 'end_turn',
+          ...(source === 'response' ? { usage: update.usage } : {}),
+          ...(source === 'metadata' ? { _meta: { usage: update.usage } } : {}),
+        };
+      };
+      const session = new GrokExecutionBackend(createGrokHost(), {
+        nativeFactory: { create: () => native },
+      }).createSession(sessionConfig);
+      try {
+        const events = await collect(session.execute(executionRequest()).events);
+        expect(events.filter(event => event.type === 'usage_updated').at(-1)).toMatchObject({
+          usage: {
+            inputTokens: 10327, cacheReadInputTokens: 1280, contextTokens: 10377,
+            contextWindow: 200_000, percentage: 5,
+          },
+        });
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
 
   it('loads the fixed native session, configures model/mode, and streams correlated ACP output', async () => {
     const native = new FakeNativeConnection();
@@ -378,7 +463,7 @@ describe('GrokExecutionBackend', () => {
       return { stopReason: 'end_turn' };
     };
     const nativeFactory: GrokExecutionNativeFactory = { create: jest.fn(() => native) };
-    const backend = new GrokExecutionBackend({ settings: {} } as ProviderHost, { nativeFactory });
+    const backend = new GrokExecutionBackend(createGrokHost(), { nativeFactory });
     const session = backend.createSession(sessionConfig);
 
     const run = session.execute(executionRequest());
@@ -435,7 +520,7 @@ describe('GrokExecutionBackend', () => {
     const native = new FakeNativeConnection();
     const nativeFactory: GrokExecutionNativeFactory = { create: jest.fn(() => native) };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
     const baseRequest = executionRequest('Inspect linked content');
@@ -764,7 +849,7 @@ describe('GrokExecutionBackend', () => {
       return { stopReason: 'end_turn' };
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -786,7 +871,7 @@ describe('GrokExecutionBackend', () => {
       create: jest.fn(() => native),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
     const firstRequest = executionRequest('first');
@@ -822,7 +907,7 @@ describe('GrokExecutionBackend', () => {
         .mockReturnValueOnce(secondNative),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
     const firstRequest = executionRequest('first');
@@ -854,6 +939,7 @@ describe('GrokExecutionBackend', () => {
     const native = new FakeNativeConnection();
     const host = {
       settings: {
+        ...createGrokHost().settings,
         mediaFolder: 'media',
         systemPrompt: 'Keep the shared instruction.',
         userName: 'Ada',
@@ -888,7 +974,7 @@ describe('GrokExecutionBackend', () => {
   it('bootstraps canonical history only when creating a new native session', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession({
       ...sessionConfig,
@@ -923,7 +1009,7 @@ describe('GrokExecutionBackend', () => {
       throw new Error('model configuration failed before prompt handoff');
     };
     const backend = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => firstNative } },
     );
     const firstSession = backend.createSession({
@@ -948,7 +1034,7 @@ describe('GrokExecutionBackend', () => {
 
     const secondNative = new FakeNativeConnection();
     const secondSession = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => secondNative } },
     ).createSession({
       ...sessionConfig,
@@ -969,7 +1055,7 @@ describe('GrokExecutionBackend', () => {
   it('does not bootstrap canonical history when loading native context', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -988,7 +1074,7 @@ describe('GrokExecutionBackend', () => {
     async (permissionMode) => {
       const native = new FakeNativeConnection();
       const session = new GrokExecutionBackend(
-        { settings: {} } as ProviderHost,
+        createGrokHost(),
         { nativeFactory: { create: () => native } },
       ).createSession(sessionConfig);
 
@@ -1009,7 +1095,7 @@ describe('GrokExecutionBackend', () => {
   it('normalizes a legacy plan permission selection to default native mode', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -1023,7 +1109,7 @@ describe('GrokExecutionBackend', () => {
   it('emits newly established native session state before terminal completion', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession({
       ...sessionConfig,
@@ -1078,7 +1164,7 @@ describe('GrokExecutionBackend', () => {
       create: jest.fn(() => new FakeNativeConnection()),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession({
       ...sessionConfig,
@@ -1114,7 +1200,7 @@ describe('GrokExecutionBackend', () => {
         .mockReturnValueOnce(second),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
 
@@ -1146,7 +1232,7 @@ describe('GrokExecutionBackend', () => {
     const native = new FakeNativeConnection();
     native.promptImplementation = () => new Promise(() => {});
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1180,7 +1266,7 @@ describe('GrokExecutionBackend', () => {
       rejectPrompt?.(new Error('transport closed while prompting'));
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1211,7 +1297,7 @@ describe('GrokExecutionBackend', () => {
       rejectInitialize?.(new Error('transport closed while initializing'));
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1249,7 +1335,7 @@ describe('GrokExecutionBackend', () => {
         .mockReturnValueOnce(retryNative),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
 
@@ -1303,7 +1389,7 @@ describe('GrokExecutionBackend', () => {
       native.initializeImplementation = () => initialize.promise;
       native.shutdownImplementation = () => cleanup.promise;
       const session = new GrokExecutionBackend(
-        { settings: {} } as ProviderHost,
+        createGrokHost(),
         { nativeFactory: { create: () => native } },
       ).createSession(sessionConfig);
       const run = session.execute(executionRequest());
@@ -1357,7 +1443,7 @@ describe('GrokExecutionBackend', () => {
     };
     const sessionEvents = jest.fn();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     session.onEvent(sessionEvents);
@@ -1406,7 +1492,7 @@ describe('GrokExecutionBackend', () => {
       return { stopReason: 'end_turn' };
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         commandCatalog: { setCommandSnapshot },
         nativeFactory: { create: () => native },
@@ -1441,7 +1527,7 @@ describe('GrokExecutionBackend', () => {
       return { stopReason: 'end_turn' };
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -1499,7 +1585,7 @@ describe('GrokExecutionBackend', () => {
       return { stopReason: 'end_turn' };
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -1521,11 +1607,148 @@ describe('GrokExecutionBackend', () => {
     }));
   });
 
+  it.each(['before', 'after'] as const)(
+    'keeps steered output when native interjection arrives %s the original completion',
+    async order => {
+      const native = new FakeNativeConnection();
+      const prompt = createDeferred<{ stopReason: string }>();
+      const interjection = createDeferred<void>();
+      native.promptImplementation = () => prompt.promise;
+      native.interjectImplementation = () => interjection.promise;
+      const session = new GrokExecutionBackend(createGrokHost(), {
+        nativeFactory: { create: () => native },
+      }).createSession(sessionConfig);
+      try {
+        let finished = false;
+        const eventsPromise = collect(session.execute(executionRequest()).events).then(events => {
+          finished = true;
+          return events;
+        });
+        while (native.promptRequests.length === 0) await Promise.resolve();
+        if (!isSteerableExecutionSession(session)) throw new Error('Missing steering');
+        const steering = session.steer(executionRequest('redirect'));
+        const emitSteeredResponse = () => native.emit({
+          sessionUpdate: 'agent_message_chunk', messageId: 'assistant-steered',
+          content: { type: 'text', text: 'Steered response' },
+        });
+        if (order === 'before') {
+          native.emitInterjection();
+          emitSteeredResponse();
+        }
+        native.emit({ sessionUpdate: 'turn_completed', prompt_id: 'original' }, 'extension');
+        prompt.resolve({ stopReason: 'end_turn' });
+        await new Promise(resolve => setImmediate(resolve));
+        expect(finished).toBe(false);
+        if (order === 'after') native.emitInterjection();
+        interjection.resolve();
+        await expect(steering).resolves.toBe(true);
+        if (order === 'after') {
+          emitSteeredResponse();
+          native.emit({ sessionUpdate: 'turn_completed', prompt_id: 'steered' }, 'extension');
+        }
+        const events = await eventsPromise;
+        expect(events).toContainEqual(expect.objectContaining({ type: 'text_delta', text: 'Steered response' }));
+        expect(events.at(-1)).toMatchObject({ type: 'turn_completed' });
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it('keeps successive queued interjections visible until both native turns finish', async () => {
+    const native = new FakeNativeConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    native.promptImplementation = () => prompt.promise;
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: () => native },
+    }).createSession(sessionConfig);
+    try {
+      let finished = false;
+      const eventsPromise = collect(session.execute(executionRequest()).events).then(events => {
+        finished = true;
+        return events;
+      });
+      while (native.promptRequests.length === 0) await Promise.resolve();
+      if (!isSteerableExecutionSession(session)) throw new Error('Missing steering');
+      await session.steer(executionRequest('first redirect'));
+      await session.steer(executionRequest('second redirect'));
+      native.emit({ sessionUpdate: 'turn_completed', prompt_id: 'original' });
+      prompt.resolve({ stopReason: 'end_turn' });
+      await new Promise(resolve => setImmediate(resolve));
+      for (const [index, text] of ['First redirect reply', 'Second redirect reply'].entries()) {
+        expect(finished).toBe(false);
+        native.emitInterjection(index);
+        native.emit({
+          sessionUpdate: 'agent_message_chunk', messageId: `assistant-${index}`,
+          content: { type: 'text', text },
+        });
+        native.emit({ sessionUpdate: 'turn_completed', prompt_id: `steered-${index}` });
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const events = await eventsPromise;
+      expect(events.filter(event => event.type === 'text_delta')).toEqual([
+        expect.objectContaining({ text: 'First redirect reply' }),
+        expect.objectContaining({ text: 'Second redirect reply' }),
+      ]);
+      expect(events.at(-1)).toMatchObject({ type: 'turn_completed' });
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('settles the original turn when a pending interjection is rejected before application', async () => {
+    const native = new FakeNativeConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    const interjection = createDeferred<void>();
+    native.promptImplementation = () => prompt.promise;
+    native.interjectImplementation = () => interjection.promise;
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: () => native },
+    }).createSession(sessionConfig);
+    try {
+      const eventsPromise = collect(session.execute(executionRequest()).events);
+      while (native.promptRequests.length === 0) await Promise.resolve();
+      if (!isSteerableExecutionSession(session)) throw new Error('Missing steering');
+      const steering = session.steer(executionRequest('redirect'));
+      const outcome = steering.catch((error: unknown) => error);
+      prompt.resolve({ stopReason: 'end_turn' });
+      await new Promise(resolve => setImmediate(resolve));
+      interjection.reject(new Error('interjection rejected'));
+      expect(await outcome).toEqual(new Error('interjection rejected'));
+      expect((await eventsPromise).at(-1)).toMatchObject({ type: 'turn_completed' });
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('honors abort while waiting for queued steering after the original prompt returns', async () => {
+    const native = new FakeNativeConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    native.promptImplementation = () => prompt.promise;
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: () => native },
+    }).createSession(sessionConfig);
+    try {
+      const controller = new AbortController();
+      const eventsPromise = collect(session.execute({ ...executionRequest(), signal: controller.signal }).events);
+      while (native.promptRequests.length === 0) await Promise.resolve();
+      if (!isSteerableExecutionSession(session)) throw new Error('Missing steering');
+      await session.steer(executionRequest('redirect'));
+      native.emit({ sessionUpdate: 'turn_completed', prompt_id: 'original' });
+      prompt.resolve({ stopReason: 'end_turn' });
+      await new Promise(resolve => setImmediate(resolve));
+      controller.abort();
+      expect((await eventsPromise).at(-1)).toMatchObject({ type: 'cancelled' });
+    } finally {
+      await session.dispose();
+    }
+  });
+
   it('uses native interjection and rewind without creating an unrelated session', async () => {
     const native = new FakeNativeConnection();
     native.promptImplementation = () => new Promise(() => {});
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         nativeFactory: { create: () => native },
         resolvePromptIndex: async () => 3,
@@ -1556,7 +1779,7 @@ describe('GrokExecutionBackend', () => {
       throw new Error('transport closed after interjection was written');
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1584,7 +1807,7 @@ describe('GrokExecutionBackend', () => {
       rejectInterject?.(new Error('transport closed during lifecycle disposal'));
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1614,7 +1837,7 @@ describe('GrokExecutionBackend', () => {
       resolveInterject?.();
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const run = session.execute(executionRequest());
@@ -1637,7 +1860,7 @@ describe('GrokExecutionBackend', () => {
     const native = new FakeNativeConnection();
     native.promptImplementation = () => new Promise(() => {});
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     if (!isSteerableExecutionSession(session)) {
@@ -1666,7 +1889,7 @@ describe('GrokExecutionBackend', () => {
   it('resolves fresh-session rewind through the current target session by default', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession({
       ...sessionConfig,
@@ -1707,7 +1930,7 @@ describe('GrokExecutionBackend', () => {
   it('forks from provider-owned checkpoint metadata and loads the child with system instructions', async () => {
     const native = new FakeNativeConnection();
     const host = {
-      settings: { systemPrompt: 'Keep the Grok replacement.' },
+      settings: { ...createGrokHost().settings, systemPrompt: 'Keep the Grok replacement.' },
     } as unknown as ProviderHost;
     const session = new GrokExecutionBackend(
       host,
@@ -1826,7 +2049,7 @@ describe('GrokExecutionBackend', () => {
         .mockReturnValueOnce(second),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(forkSessionConfig());
 
@@ -1886,7 +2109,7 @@ describe('GrokExecutionBackend', () => {
     }>();
     native.forkImplementation = () => fork.promise;
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(forkSessionConfig());
     const eventsPromise = collect(session.execute(executionRequest('fork then dispose')).events);
@@ -1936,7 +2159,7 @@ describe('GrokExecutionBackend', () => {
       parentSessionId: 'unexpected-parent',
     });
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(forkSessionConfig());
 
@@ -1977,7 +2200,7 @@ describe('GrokExecutionBackend', () => {
       toolPolicy: { kind: 'passive' as const },
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         modelCatalogCoordinator: { mergeLiveModels },
         nativeFactory: {
@@ -2016,7 +2239,7 @@ describe('GrokExecutionBackend', () => {
     native.promptImplementation = () => new Promise(() => {});
     let nativeOptions: GrokExecutionNativeCreateOptions | undefined;
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         nativeFactory: {
           create: options => {
@@ -2050,7 +2273,7 @@ describe('GrokExecutionBackend', () => {
     const native = new FakeNativeConnection();
     native.promptImplementation = () => new Promise(() => {});
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
     const permissions: string[] = [];
@@ -2075,7 +2298,7 @@ describe('GrokExecutionBackend', () => {
     native.promptImplementation = () => new Promise(() => {});
     let nativeOptions: GrokExecutionNativeCreateOptions | undefined;
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         nativeFactory: {
           create: options => {
@@ -2107,7 +2330,7 @@ describe('GrokExecutionBackend', () => {
       interactionId: request.interactionId,
     }));
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       {
         nativeFactory: {
           create: options => {
@@ -2151,7 +2374,7 @@ describe('GrokExecutionBackend', () => {
       create: jest.fn(() => new FakeNativeConnection()),
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory },
     ).createSession(sessionConfig);
     const request: ProviderExecutionRequest = {
@@ -2201,7 +2424,7 @@ describe('GrokExecutionBackend', () => {
       throw new Error('transport closed while prompting');
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
@@ -2230,7 +2453,7 @@ describe('GrokExecutionBackend', () => {
       throw new Error('session not found');
     };
     const session = new GrokExecutionBackend(
-      { settings: {} } as ProviderHost,
+      createGrokHost(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 

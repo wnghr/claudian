@@ -1,16 +1,12 @@
 import { decodeCollabProtocolEnvelope } from '@claudian-collab/protocol';
 
 import {
-  COLLAB_LOCAL_ERROR_CODES,
   CollabError,
   collabErrorGroup,
 } from '@/core/collab/ClaudianCollabError';
 
 describe('ClaudianCollabError', () => {
-  it('owns application-only error vocabulary outside the wire package', () => {
-    expect(COLLAB_LOCAL_ERROR_CODES).toContain('invitation-expired');
-    expect(COLLAB_LOCAL_ERROR_CODES).toContain('tls-ca-mismatch');
-    expect(COLLAB_LOCAL_ERROR_CODES).toContain('host-transfer-pending');
+  it('groups application-only errors for recovery', () => {
     expect(collabErrorGroup('invitation-expired')).toBe('connectivity');
   });
 

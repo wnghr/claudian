@@ -162,6 +162,17 @@ export function parseSDKMessageToChat(
   sdkMsg: SDKNativeMessage,
   toolResults?: Map<string, { content: string; isError: boolean; images?: ImageAttachment[] }>,
 ): ChatMessage | null {
+  if (sdkMsg.type === 'attachment') {
+    const attachment = sdkMsg.attachment;
+    if (attachment?.type !== 'queued_command' || attachment.commandMode !== 'prompt'
+      || (typeof attachment.prompt !== 'string' && !Array.isArray(attachment.prompt))) return null;
+    return parseSDKMessageToChat({
+      type: 'user',
+      uuid: attachment.source_uuid ?? sdkMsg.uuid,
+      timestamp: sdkMsg.timestamp,
+      message: { content: attachment.prompt },
+    }, toolResults);
+  }
   if (sdkMsg.type === 'file-history-snapshot') {
     return null;
   }
@@ -323,6 +334,16 @@ export function extractXmlTag(content: string, tagName: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export function isCanonicalSdkUserMessage(record: SDKNativeMessage): boolean {
+  const queuedPrompt = record.type === 'attachment'
+    && record.attachment?.type === 'queued_command' && record.attachment.commandMode === 'prompt';
+  if ((!queuedPrompt && record.type !== 'user') || isSystemInjectedMessage(record)) return false;
+  const content = queuedPrompt ? record.attachment?.prompt : record.message?.content;
+  const text = extractTextContent(content);
+  if (!text && (!content || typeof content === 'string')) return false;
+  return !isInterruptSignalText(text) && !isRebuiltContextContent(text);
+}
+
 export function isSystemInjectedMessage(sdkMsg: SDKNativeMessage): boolean {
   if (sdkMsg.type !== 'user') {
     return false;
@@ -331,7 +352,11 @@ export function isSystemInjectedMessage(sdkMsg: SDKNativeMessage): boolean {
     return true;
   }
 
-  const text = extractTextContent(sdkMsg.message?.content);
+  const content = sdkMsg.message?.content;
+  if (Array.isArray(content) && content.length > 0
+    && content.every(block => block.type === 'tool_result')) return true;
+
+  const text = extractTextContent(content);
   if (!text) {
     return false;
   }
@@ -357,6 +382,24 @@ export function isSystemInjectedMessage(sdkMsg: SDKNativeMessage): boolean {
   }
 
   return false;
+}
+
+export function parseTaskNotification(sdkMsg: SDKNativeMessage): string | null {
+  const attachment = sdkMsg.attachment;
+  const content = sdkMsg.type === 'user'
+    ? sdkMsg.message?.content
+    : sdkMsg.type === 'attachment' && attachment?.type === 'queued_command'
+      && attachment.commandMode === 'task-notification'
+      ? attachment.prompt
+      : undefined;
+  const text = extractTextContent(content);
+  if (!text?.trimStart().startsWith('<task-notification>')) return null;
+  if (!extractXmlTag(text, 'task-id')) return null;
+  const status = extractXmlTag(text, 'status');
+  if (!status) return null;
+  return extractXmlTag(text, 'result')
+    ?? extractXmlTag(text, 'summary')
+    ?? `Background task ${status}.`;
 }
 
 export function mergeAssistantMessage(target: ChatMessage, source: ChatMessage): void {

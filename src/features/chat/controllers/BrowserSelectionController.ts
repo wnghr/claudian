@@ -38,7 +38,7 @@ export class BrowserSelectionController {
   start(): void {
     if (this.pollInterval) return;
     this.pollInterval = window.setInterval(() => {
-      void this.poll();
+      void this.#poll();
     }, BROWSER_SELECTION_POLL_INTERVAL);
   }
 
@@ -50,26 +50,26 @@ export class BrowserSelectionController {
     this.clear();
   }
 
-  private async poll(): Promise<void> {
+  async #poll(): Promise<void> {
     if (this.pollInFlight) return;
     this.pollInFlight = true;
     try {
-      const browserView = this.getActiveBrowserView();
+      const browserView = this.#getActiveBrowserView();
       if (!browserView) {
-        this.clearWhenInputIsNotFocused();
+        this.#clearWhenInputIsNotFocused();
         return;
       }
 
       const selectedText = await this.extractSelectedText(browserView.containerEl);
       if (selectedText) {
-        const nextContext = this.buildContext(browserView.view, browserView.viewType, browserView.containerEl, selectedText);
-        if (!this.isSameSelection(nextContext, this.storedSelection)) {
+        const nextContext = this.#buildContext(browserView.view, browserView.viewType, browserView.containerEl, selectedText);
+        if (!this.#isSameSelection(nextContext, this.storedSelection)) {
           this.storedSelection = nextContext;
           this.updateIndicator();
           this.onUserSelectionChanged?.();
         }
       } else {
-        this.clearWhenInputIsNotFocused();
+        this.#clearWhenInputIsNotFocused();
       }
     } catch {
       // Ignore transient polling errors to keep selection tracking resilient.
@@ -78,7 +78,7 @@ export class BrowserSelectionController {
     }
   }
 
-  private getActiveBrowserView(): { view: ItemView; viewType: string; containerEl: HTMLElement } | null {
+  #getActiveBrowserView(): { view: ItemView; viewType: string; containerEl: HTMLElement } | null {
     const activeLeaf = this.app.workspace.getMostRecentLeaf?.();
     const activeView = activeLeaf?.view as ItemView | undefined;
     if (!activeView) return null;
@@ -86,12 +86,12 @@ export class BrowserSelectionController {
     if (!containerEl) return null;
 
     const viewType = activeView.getViewType?.() ?? '';
-    if (!this.isBrowserLikeView(viewType, containerEl)) return null;
+    if (!this.#isBrowserLikeView(viewType, containerEl)) return null;
 
     return { view: activeView, viewType, containerEl };
   }
 
-  private isBrowserLikeView(viewType: string, containerEl: HTMLElement): boolean {
+  #isBrowserLikeView(viewType: string, containerEl: HTMLElement): boolean {
     const normalized = viewType.toLowerCase();
     if (
       normalized === 'pdf'
@@ -109,16 +109,16 @@ export class BrowserSelectionController {
 
   private async extractSelectedText(containerEl: HTMLElement): Promise<string | null> {
     const ownerDoc = containerEl.ownerDocument;
-    const docSelection = this.extractSelectionFromDocument(ownerDoc, containerEl);
+    const docSelection = this.#extractSelectionFromDocument(ownerDoc, containerEl);
     if (docSelection) return docSelection;
 
-    const frameSelection = this.extractSelectionFromIframes(containerEl);
+    const frameSelection = this.#extractSelectionFromIframes(containerEl);
     if (frameSelection) return frameSelection;
 
-    return await this.extractSelectionFromWebviews(containerEl);
+    return await this.#extractSelectionFromWebviews(containerEl);
   }
 
-  private extractSelectionFromDocument(doc: Document, scopeEl: HTMLElement): string | null {
+  #extractSelectionFromDocument(doc: Document, scopeEl: HTMLElement): string | null {
     const selection = doc.getSelection();
     const selectedText = selection?.toString().trim();
     if (selectedText) {
@@ -129,10 +129,10 @@ export class BrowserSelectionController {
       }
     }
 
-    return this.extractSelectionFromActiveInput(doc, scopeEl);
+    return this.#extractSelectionFromActiveInput(doc, scopeEl);
   }
 
-  private extractSelectionFromActiveInput(doc: Document, scopeEl: HTMLElement): string | null {
+  #extractSelectionFromActiveInput(doc: Document, scopeEl: HTMLElement): string | null {
     const activeEl = doc.activeElement;
     if (!activeEl || !scopeEl.contains(activeEl)) return null;
 
@@ -145,16 +145,16 @@ export class BrowserSelectionController {
     return null;
   }
 
-  private extractSelectionFromIframes(containerEl: HTMLElement): string | null {
-    for (const frameDoc of this.frameDocuments(containerEl)) {
+  #extractSelectionFromIframes(containerEl: HTMLElement): string | null {
+    for (const frameDoc of this.#frameDocuments(containerEl)) {
       if (!frameDoc.body) continue;
-      const frameSelection = this.extractSelectionFromDocument(frameDoc, frameDoc.body);
+      const frameSelection = this.#extractSelectionFromDocument(frameDoc, frameDoc.body);
       if (frameSelection) return frameSelection;
     }
     return null;
   }
 
-  private frameDocuments(containerEl: HTMLElement): Document[] {
+  #frameDocuments(containerEl: HTMLElement): Document[] {
     const documents: Document[] = [];
     const visit = (root: ParentNode, depth: number): void => {
       if (depth > 4) return;
@@ -173,7 +173,7 @@ export class BrowserSelectionController {
     return documents;
   }
 
-  private async extractSelectionFromWebviews(containerEl: HTMLElement): Promise<string | null> {
+  async #extractSelectionFromWebviews(containerEl: HTMLElement): Promise<string | null> {
     const webviews = Array.from(containerEl.querySelectorAll<BrowserLikeWebview>('webview'));
     for (const webview of webviews) {
       if (typeof webview.executeJavaScript !== 'function') continue;
@@ -192,16 +192,16 @@ export class BrowserSelectionController {
     return null;
   }
 
-  private buildContext(
+  #buildContext(
     view: ItemView,
     viewType: string,
     containerEl: HTMLElement,
     selectedText: string
   ): BrowserSelectionContext {
-    const title = this.extractViewTitle(view);
-    const pdf = this.pdfIdentity(view, viewType);
+    const title = this.#extractViewTitle(view);
+    const pdf = this.#pdfIdentity(view, viewType);
     if (pdf) {
-      const page = this.selectedPdfPage(containerEl);
+      const page = this.#selectedPdfPage(containerEl);
       const navigation = page ? { position: { pageIndex: page - 1 } } : undefined;
       const url = pdf.attachmentKey && pdf.libraryID !== undefined
         ? `obsidian://zotflow?type=open-attachment&libraryID=${pdf.libraryID}&key=${pdf.attachmentKey}`
@@ -217,7 +217,7 @@ export class BrowserSelectionController {
         ...(url ? { url } : {}),
       };
     }
-    const url = this.extractViewUrl(view, containerEl);
+    const url = this.#extractViewUrl(view, containerEl);
     const source = url ? `browser:${url}` : `browser:${viewType || 'unknown'}`;
 
     return {
@@ -228,7 +228,7 @@ export class BrowserSelectionController {
     };
   }
 
-  private pdfIdentity(view: ItemView, viewType: string): {
+  #pdfIdentity(view: ItemView, viewType: string): {
     path: string;
     attachmentKey?: string;
     libraryID?: number;
@@ -245,8 +245,8 @@ export class BrowserSelectionController {
     return file ? { path: file, libraryID } : null;
   }
 
-  private selectedPdfPage(containerEl: HTMLElement): number | null {
-    const documents: Document[] = [containerEl.ownerDocument, ...this.frameDocuments(containerEl)];
+  #selectedPdfPage(containerEl: HTMLElement): number | null {
+    const documents: Document[] = [containerEl.ownerDocument, ...this.#frameDocuments(containerEl)];
     for (const doc of documents) {
       const selection = doc.getSelection();
       if (!selection?.toString().trim()) continue;
@@ -265,7 +265,7 @@ export class BrowserSelectionController {
     return null;
   }
 
-  private extractViewTitle(view: ItemView): string | undefined {
+  #extractViewTitle(view: ItemView): string | undefined {
     const displayText = view.getDisplayText?.();
     if (displayText?.trim()) return displayText.trim();
 
@@ -273,7 +273,7 @@ export class BrowserSelectionController {
     return typeof title === 'string' && title.trim() ? title.trim() : undefined;
   }
 
-  private extractViewUrl(view: ItemView, containerEl: HTMLElement): string | undefined {
+  #extractViewUrl(view: ItemView, containerEl: HTMLElement): string | undefined {
     const rawView = view as unknown as Record<string, unknown>;
     const directCandidates = [
       rawView.url,
@@ -297,7 +297,7 @@ export class BrowserSelectionController {
     return undefined;
   }
 
-  private isSameSelection(
+  #isSameSelection(
     left: BrowserSelectionContext | null,
     right: BrowserSelectionContext | null
   ): boolean {
@@ -310,7 +310,7 @@ export class BrowserSelectionController {
       && left.page === right.page;
   }
 
-  private clearWhenInputIsNotFocused(): void {
+  #clearWhenInputIsNotFocused(): void {
     if (this.inputEl.contains(this.inputEl.ownerDocument.activeElement)) return;
     if (this.storedSelection) {
       this.storedSelection = null;

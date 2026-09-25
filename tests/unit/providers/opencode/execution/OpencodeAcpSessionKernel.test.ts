@@ -40,7 +40,7 @@ function permissionRequest(
 describe('OpencodeAcpSessionKernel read policy', () => {
   it('bounds read-only callbacks to the active workspace', () => {
     expect(resolveOpencodeReadPath('/vault', 'notes/file.md')).toBe(
-      '/vault/notes/file.md',
+      path.resolve('/vault', 'notes', 'file.md'),
     );
     expect(() => resolveOpencodeReadPath('/vault', '../secret')).toThrow(
       'OpenCode read access is limited to the current workspace',
@@ -166,5 +166,14 @@ describe('OpenCode session/load errors', () => {
     new JsonRpcErrorResponse('session/prompt', -32000, 'Session not found'),
   ])('preserves non-missing or uncorrelated failures: %p', (error) => {
     expect(classifyOpencodeSessionLoadError(error, 'valid-session')).toBe(error);
+  });
+});
+
+
+it('presents a v2 command-title approval as shell execution', () => {
+  const request = permissionRequest('pwd', { command: 'pwd' });
+  request.toolCall.kind = 'execute';
+  expect(presentOpencodePermission(request, { command: 'pwd' })).toMatchObject({
+    decisionReason: 'Command execution permission required', toolName: 'bash',
   });
 });

@@ -6,7 +6,6 @@ import type { ProviderCommandDropdownConfig } from '@/core/providers/commands/Pr
 import type { ProviderCommandDiscoverySource } from '@/core/providers/commands/ProviderCommandDiscoveryStore';
 import type { ProviderCommandEntry } from '@/core/providers/commands/ProviderCommandEntry';
 import type { ProviderId } from '@/core/providers/types';
-import type { SlashCommand } from '@/core/types';
 import {
   ComposerDropdownController,
   SlashCommandSource,
@@ -20,10 +19,9 @@ import { CollabTicketReferenceSource } from './CollabTicketReferenceSource';
 export interface MainChatComposerDropdownOptions {
   readonly hiddenCommands?: ReadonlySet<string>;
   readonly collabReferences?: CollabComposerReferencePort;
-  readonly onSlashCommandSelected?: (command: SlashCommand) => void;
   readonly providerConfig?: ProviderCommandDropdownConfig;
   readonly providerDiscovery?: ProviderCommandDiscoverySource<ProviderCommandEntry>;
-  readonly providerId: ProviderId;
+  readonly providerId: ProviderId | null;
 }
 
 export class MainChatComposerDropdown {
@@ -41,7 +39,6 @@ export class MainChatComposerDropdown {
   ) {
     this.slashSource = new SlashCommandSource({
       hiddenCommands: options.hiddenCommands,
-      onSelect: options.onSlashCommandSelected,
       providerConfig: options.providerConfig,
       providerDiscovery: options.providerDiscovery,
       providerId: options.providerId,
@@ -98,6 +95,10 @@ export class MainChatComposerDropdown {
     return this.controller.isVisible();
   }
 
+  setBuiltInsEnabled(enabled: boolean): void {
+    this.slashSource.setBuiltInsEnabled(enabled);
+  }
+
   setHiddenCommands(commands: ReadonlySet<string>): void {
     this.slashSource.setHiddenCommands(commands);
   }
@@ -109,7 +110,7 @@ export class MainChatComposerDropdown {
     this.slashSource.setProviderCatalog(config, discovery);
   }
 
-  setProviderId(providerId: ProviderId): void {
+  setProviderId(providerId: ProviderId | null): void {
     this.slashSource.setProviderId(providerId);
   }
 }

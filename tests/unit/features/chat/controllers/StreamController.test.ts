@@ -333,6 +333,20 @@ describe('StreamController - Text Content', () => {
       );
     });
 
+    it.each(['```mermaid', '> ```Mermaid title="example"', '- ~~~MERMAID'])('defers %s until text finalization', async opener => {
+      deps.state.currentTextEl = createMockEl();
+      const content = `${opener}\ngraph TD\nA --> B`;
+      await controller.appendText(content);
+      jest.advanceTimersByTime(16);
+      await Promise.resolve();
+      expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(
+        deps.state.currentTextEl, content, { deferDiagrams: true }
+      );
+      const target = deps.state.currentTextEl;
+      await controller.finalizeCurrentTextBlock(createTestMessage());
+      expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(target, content);
+    });
+
     it('should defer math rendering during live text renders', async () => {
       deps.state.currentTextEl = createMockEl();
 
@@ -1422,12 +1436,11 @@ describe('StreamController - Text Content', () => {
       expect(deps.state.usage).toEqual(usage);
     });
 
-    it('uses authoritative usage chunks directly', async () => {
+    it('uses reported usage chunks directly', async () => {
       const msg = createTestMessage();
       const usage = createMockUsage({
         model: TEST_CODEX_MODEL,
         contextWindow: 258400,
-        contextWindowIsAuthoritative: true,
         contextTokens: 129200,
         percentage: 50,
       });
@@ -1435,6 +1448,19 @@ describe('StreamController - Text Content', () => {
       await controller.handleStreamChunk({ type: 'usage', usage, sessionId: 'session-1' }, msg);
 
       expect(deps.state.usage).toEqual(usage);
+    });
+
+    it('retains the same-model reported window when a partial update omits it', async () => {
+      const msg = createTestMessage();
+      await controller.handleStreamChunk({ type: 'usage', usage: createMockUsage({
+        model: TEST_CODEX_MODEL, contextWindow: 200_000, contextTokens: 50_000, percentage: 25,
+      }), sessionId: 'session-1' }, msg);
+
+      await controller.handleStreamChunk({ type: 'usage', usage: createMockUsage({
+        model: TEST_CODEX_MODEL, contextWindow: 0, contextTokens: 100_000, percentage: 0,
+      }), sessionId: 'session-1' }, msg);
+
+      expect(deps.state.usage).toMatchObject({ contextWindow: 200_000, contextTokens: 100_000, percentage: 50 });
     });
 
     it('should not update usage when ignoreUsageUpdates is true', async () => {
@@ -1730,6 +1756,22 @@ describe('StreamController - Text Content', () => {
 
       expect(deps.renderer.renderContent).toHaveBeenCalledTimes(1);
       expect(deps.renderer.renderContent).toHaveBeenCalledWith(contentEl, 'Let me think');
+    });
+
+    it('defers Mermaid in thinking and renders it at finalization', async () => {
+      const { createThinkingBlock } = jest.requireMock('@/features/chat/rendering/ThinkingBlockRenderer');
+      const contentEl = createMockEl();
+      createThinkingBlock.mockReturnValueOnce({
+        wrapperEl: createMockEl(), contentEl, labelEl: createMockEl(),
+        content: '', startTime: Date.now(), isExpanded: true,
+      });
+      const content = '> ```mermaid\n> graph TD\n> A --> B';
+      await controller.appendThinking(content);
+      jest.advanceTimersByTime(16);
+      await Promise.resolve();
+      expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(contentEl, content, { deferDiagrams: true });
+      await controller.finalizeCurrentThinkingBlock(createTestMessage());
+      expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(contentEl, content);
     });
 
     it('should defer math rendering during live thinking renders', async () => {

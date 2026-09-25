@@ -45,6 +45,24 @@ describe('ProjectEventHub', () => {
     hub.close();
   });
 
+  it('publishes ticket invalidations with only their public identity', async () => {
+    const source = new FakeEventSource({ active: true, latestSequence: 3, events: [
+      event(1, 'ticket.created', { ticketId: 'ticket-a', title: 'private title' }),
+      event(2, 'ticket.updated', { ticketId: 'ticket-a', description: 'private description' }),
+      event(3, 'ticket-comment.created', { ticketId: 'ticket-b', body: 'private comment' }),
+    ] });
+    const hub = new ProjectEventHub('project-a', source);
+    const socket = new FakeSocket();
+    await hub.connect(socket, 'member-a', 0);
+    expect(socket.messages.map(parseMessage)).toEqual([
+      expect.objectContaining({ kind: 'ticket-updated', payload: { ticketId: 'ticket-a' }, sequence: 1 }),
+      expect.objectContaining({ kind: 'ticket-updated', payload: { ticketId: 'ticket-a' }, sequence: 2 }),
+      expect.objectContaining({ kind: 'ticket-comment-added', payload: { ticketId: 'ticket-b' }, sequence: 3 }),
+    ]);
+    expect(socket.messages.join('')).not.toContain('private');
+    hub.close();
+  });
+
   it.each([
     {
       result: {
@@ -157,6 +175,19 @@ describe('ProjectEventHub', () => {
 
     socket.close(1000, 'Closed');
     expect(hub.hasAuthenticatedPresence('project-a', 'member-a')).toBe(false);
+    hub.close();
+  });
+
+  it('broadcasts a supported Host hint before closing for authority movement', async () => {
+    const source = new FakeEventSource({ active: true, events: [], latestSequence: 0 });
+    const hub = new ProjectEventHub('project-a', source);
+    const socket = new FakeSocket();
+    await hub.connect(socket, 'member-a', 0);
+    await hub.publishAuthorityChange();
+    expect(socket.messages.map(parseMessage)).toEqual([{
+      kind: 'host-state-updated', occurredAt: expect.any(String), payload: {},
+      projectId: 'project-a', protocolVersion: COLLAB_CONTROL_PROTOCOL_VERSION, sequence: 1,
+    }]);
     hub.close();
   });
 

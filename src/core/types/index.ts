@@ -21,6 +21,7 @@ export {
   isCanonicalUserMessage,
   type SessionMetadata,
   type StreamChunk,
+  type TurnStats,
   type UsageInfo,
   VIEW_TYPE_CLAUDIAN,
 } from './chat';
@@ -34,7 +35,6 @@ export {
   type EnvironmentScope,
   type EnvSnippet,
   type HostnameCliPaths,
-  type InstructionRefineResult,
   type KeyboardNavigationSettings,
   type LegacyLinkedContentSettingsInput,
   type PermissionMode,
@@ -64,15 +64,4 @@ export {
   type ToolDiffData,
   type ToolProviderPayload,
 } from './tools';
-
-// Agent types
-export {
-  type AgentDefinition,
-  type AgentFrontmatter,
-} from './agent';
-
-// Plugin types
-export {
-  type PluginInfo,
-  type PluginScope,
-} from './plugins';
+export { createTurnStats, isTokenCount } from './turnStats';

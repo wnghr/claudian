@@ -18,6 +18,7 @@ import type { ComposerInputElement } from '@/shared/composer-dropdown/types';
 
 jest.mock('@/core/providers/ProviderRegistry', () => ({
   ProviderRegistry: {
+    resolveTitleGenerationSelection: jest.fn().mockReturnValue(null),
     getCapabilities: jest.fn().mockReturnValue({
       providerId: 'claude',
       supportsFork: true,
@@ -120,6 +121,7 @@ function createFixture(overrides: Record<string, unknown> = {}) {
     rewriteLinkedContentPaths: jest.fn().mockResolvedValue(undefined),
     settings: {
       enableAutoTitleGeneration: false,
+      titleGenerationModel: '',
       permissionMode: 'normal',
     },
     updateConversation: jest.fn().mockResolvedValue(undefined),
@@ -152,6 +154,7 @@ function createFixture(overrides: Record<string, unknown> = {}) {
       updateLiveUserMessage: jest.fn(),
     },
     streamController: {
+      resetSubagentStreamingState: jest.fn(),
       appendText: jest.fn(),
       finalizeCurrentTextBlock: jest.fn(),
       finalizeCurrentThinkingBlock: jest.fn(),
@@ -186,8 +189,6 @@ function createFixture(overrides: Record<string, unknown> = {}) {
       hasImages: jest.fn().mockReturnValue(false),
       setImages: jest.fn(),
     }) as any,
-    getInstructionModeManager: () => null,
-    getInstructionRefineService: () => null,
     getTitleGenerationService: () => null,
     generateId: () => `id-${++id}`,
     getAuxiliaryModel: () => 'claude-model',
@@ -334,6 +335,18 @@ describe('InputController coordinator execution', () => {
     });
   });
 
+  it('preserves input and blocks execution for an unresolved tab provider', async () => {
+    const fixture = createFixture({ getTabProviderId: () => null });
+    fixture.state.currentConversationId = null;
+    fixture.input.value = 'keep this draft';
+    await fixture.controller.sendMessage();
+    expect(fixture.input.value).toBe('keep this draft');
+    expect(fixture.coordinator.execute).not.toHaveBeenCalled();
+    expect(fixture.deps.ensureExecutionInitialized).not.toHaveBeenCalled();
+    expect(fixture.state.messages).toEqual([]);
+    expect(Notice).toHaveBeenCalledWith('Select an available model before sending.');
+  });
+
   it('does not start a turn when its tab session has closed intent admission', async () => {
     const canStartTurn = jest.fn().mockReturnValue(false);
     const fixture = createFixture({ canStartTurn });
@@ -433,11 +446,9 @@ describe('InputController coordinator execution', () => {
       canonicalText: 'first',
       context: { linkedContent: { path: 'Projects' } },
       rawDisplayText: 'first',
-      userTurnOrdinal: 1,
       toolPolicy: { kind: 'provider-default' },
     });
     expect(first.conversationHistory).toEqual([]);
-    expect(second.userTurnOrdinal).toBe(2);
     expect(second.context).not.toHaveProperty('linkedContent');
     expect(second.conversationHistory).toHaveLength(2);
     expect(fixture.deps.conversationController.save).toHaveBeenCalledTimes(2);
@@ -560,7 +571,6 @@ describe('InputController coordinator execution', () => {
         editorSelection: editorContext,
       },
       rawDisplayText: 'B',
-      userTurnOrdinal: 2,
     });
     expect(submission.conversationHistory?.map(message => message.id)).toEqual([
       'user-a',
@@ -701,7 +711,15 @@ describe('InputController coordinator execution', () => {
   });
 
   it('restores the unsent turn after an asynchronous unaccepted configuration rejection', async () => {
-    const fixture = createFixture();
+    const image: ImageAttachment = { id: 'retry-image', name: 'retry.png', mediaType: 'image/png', data: 'aGVsbG8=', size: 5, source: 'paste' };
+    let attachedImages = [image];
+    const imageContextManager = {
+      clearImages: () => { attachedImages = []; },
+      getAttachedImages: () => attachedImages,
+      hasImages: () => attachedImages.length > 0,
+      setImages: (images: ImageAttachment[]) => { attachedImages = images; },
+    };
+    const fixture = createFixture({ getImageContextManager: () => imageContextManager });
     const rejection: ProviderExecutionEvent = {
       type: 'execution_error',
       category: 'configuration',
@@ -723,6 +741,7 @@ describe('InputController coordinator execution', () => {
     await fixture.controller.sendMessage();
 
     expect(fixture.input.value).toBe('retry after configuration');
+    expect(attachedImages).toEqual([image]);
     expect(fixture.state.messages).toEqual([]);
     expect(fixture.deps.renderer.removeMessage).toHaveBeenCalledTimes(2);
     expect(fixture.deps.conversationController.save).not.toHaveBeenCalled();
@@ -1384,7 +1403,7 @@ describe('InputController coordinator execution', () => {
       await mainTurn;
 
       expect(fixture.coordinator.acceptSteerFromProviderEvent).toHaveBeenCalledWith(
-        submission.inputRecordId,
+        submission.submissionId,
         'native-steer-user',
       );
       expect(fixture.state.messages.filter(message => (
@@ -1398,7 +1417,7 @@ describe('InputController coordinator execution', () => {
       expect((fixture.controller as any).pendingSteersByConversation.has('conversation-1'))
         .toBe(false);
       expect(fixture.coordinator.releaseSteerCorrelation).toHaveBeenCalledWith(
-        submission.inputRecordId,
+        submission.submissionId,
       );
     },
   );
@@ -1428,7 +1447,7 @@ describe('InputController coordinator execution', () => {
     ));
 
     expect(fixture.coordinator.acceptSteerFromProviderEvent).toHaveBeenCalledWith(
-      submission.inputRecordId,
+      submission.submissionId,
       'native-after-ack',
     );
     expect(fixture.state.messages.find(message => (
@@ -1467,7 +1486,7 @@ describe('InputController coordinator execution', () => {
     expect((fixture.controller as any).pendingSteersByConversation.has('conversation-1'))
       .toBe(false);
     expect(fixture.coordinator.releaseSteerCorrelation).toHaveBeenCalledWith(
-      submission.inputRecordId,
+      submission.submissionId,
     );
   });
 
@@ -1933,12 +1952,27 @@ describe('InputController coordinator execution', () => {
     expect(fixture.state.attention).toBeNull();
   });
 
+  it.each(['', 'removed-title-model'])('skips unusable title model %s without a failed status', async titleGenerationModel => {
+    const generateTitle = jest.fn();
+    const fixture = createFixture({ getTitleGenerationService: () => ({ generateTitle }) as any });
+    fixture.plugin.settings.enableAutoTitleGeneration = true;
+    fixture.plugin.settings.titleGenerationModel = titleGenerationModel;
+    await fixture.controller.sendMessage({ content: 'keep this fallback' });
+    expect(generateTitle).not.toHaveBeenCalled();
+    expect(fixture.plugin.updateConversation).not.toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ titleGenerationStatus: 'pending' }),
+    );
+    expect(fixture.plugin.renameConversation).toHaveBeenCalled();
+  });
+
   it('starts title generation independently of the execution session', async () => {
+    jest.mocked(ProviderRegistry.resolveTitleGenerationSelection).mockReturnValueOnce({ providerId: 'claude', model: 'sonnet' });
     const generateTitle = jest.fn().mockResolvedValue(undefined);
     const fixture = createFixture({
       getTitleGenerationService: () => ({ generateTitle }) as any,
     });
     fixture.plugin.settings.enableAutoTitleGeneration = true;
+    fixture.plugin.settings.titleGenerationModel = 'sonnet';
 
     await fixture.controller.sendMessage({ content: 'title this' });
 
@@ -1986,7 +2020,6 @@ describe('InputController coordinator execution', () => {
       context: expect.objectContaining({
         linkedContent: { path: 'Projects/Plan.md' },
       }),
-      userTurnOrdinal: 1,
     }));
   });
 
@@ -2056,11 +2089,9 @@ describe('InputController coordinator execution', () => {
     expect(submissions).toHaveLength(2);
     expect(submissions[0]).toMatchObject({
       context: { linkedContent: { path: 'Projects/Plan.md' } },
-      userTurnOrdinal: 1,
     });
     expect(submissions[1]).toMatchObject({
       context: { linkedContent: { path: 'Projects/Plan.md' } },
-      userTurnOrdinal: 1,
     });
     expect(fixture.plugin.createConversation).toHaveBeenCalledTimes(1);
   });
@@ -2093,7 +2124,6 @@ describe('InputController coordinator execution', () => {
     expect(fixture.coordinator.execute).toHaveBeenCalledWith(expect.objectContaining({
       context: { linkedContent: { path: 'Projects/Plan.md' } },
       rawDisplayText: 'Promoted queued turn',
-      userTurnOrdinal: 1,
     }));
   });
 
@@ -2133,7 +2163,6 @@ describe('InputController coordinator execution', () => {
     }));
     expect(fixture.coordinator.execute).toHaveBeenCalledWith(expect.objectContaining({
       context: { linkedContent: { path: 'Projects/Old' } },
-      userTurnOrdinal: 1,
     }));
     expect(linkedContentController.getSnapshot()).toMatchObject({
       mode: 'locked',
@@ -2153,4 +2182,32 @@ describe('InputController coordinator execution', () => {
     const submission = fixture.coordinator.execute.mock.calls[0][0] as ChatTurnSubmission;
     expect(submission.context).not.toHaveProperty('linkedContent');
   });
+});
+
+it('attaches completed turn statistics to the final assistant after native message boundaries', async () => {
+  const fixture = createFixture();
+  const scope = { kind: 'requested' as const, executionId: 'e', turnId: 't', sessionInstanceId: 's', sequence: 1 };
+  fixture.coordinator.execute.mockImplementationOnce(async () => {
+    await fixture.controller.handleExecutionEvent({ type: 'assistant_message_started', scope });
+    await fixture.controller.handleExecutionEvent({ type: 'assistant_message_started', scope: { ...scope, sequence: 2 } });
+    await fixture.controller.handleExecutionEvent({ type: 'turn_completed', scope: { ...scope, sequence: 3 },
+      reason: 'completed', ...{ turnStats: { outputTokens: 125, durationMs: 2500 } } });
+    return { accepted: true, status: 'completed' };
+  });
+  await fixture.controller.sendMessage({ content: 'Work' });
+  expect(fixture.state.messages.at(-1)?.turnStats).toEqual({ outputTokens: 125, durationMs: 2500 });
+});
+
+it('keeps a completed answer when cancellation loses to native completion', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.execute.mockImplementationOnce(async () => {
+    fixture.controller.cancelStreaming();
+    await fixture.controller.handleExecutionEvent({
+      type: 'turn_completed', reason: 'completed',
+      scope: { kind: 'requested', executionId: 'e', turnId: 't', sessionInstanceId: 's', sequence: 1 },
+    });
+    return { accepted: true, status: 'completed' };
+  });
+  await fixture.controller.sendMessage({ content: 'Work' });
+  expect(fixture.state.messages.at(-1)?.isInterrupt).not.toBe(true);
 });

@@ -3,17 +3,19 @@ import type {
   Query,
   SDKMessage,
   SDKUserMessage,
+  SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk';
 
 import { loadClaudeAgentQuery } from '../loadClaudeAgentSdk';
-import { runColdStartQuery } from '../runtime/claudeColdStartQuery';
 import { MessageChannel } from '../runtime/ClaudeMessageChannel';
 import { buildClaudeSDKUserMessage } from '../runtime/ClaudeUserMessageFactory';
 import type { ClaudeEncodedExecutionRequest } from './ClaudeExecutionRequestEncoder';
+import { getClaudeInputMatch } from './ClaudeResponseOwnership';
 
 export interface ClaudeExecutionStrategySink {
   readonly sessionInstanceId: string;
   getProviderSessionId(): string | null;
+  assertModelAvailable(model: string): void;
   setPendingNativeUserMessageId(
     nativeUserMessageId: string,
     queryToken: number,
@@ -30,7 +32,7 @@ export interface ClaudeExecutionStrategySink {
     model: string,
     contextWindow: number,
   ): void;
-  publishCommands(query: Query, queryToken: number): void;
+  publishCommands(query: Query, commands?: SlashCommand[]): void;
 }
 
 export interface ClaudeExecutionStrategy {
@@ -52,6 +54,7 @@ type PersistentNativeTurnOutcome =
   | { readonly type: 'failed'; readonly error: unknown };
 
 interface PersistentNativeTurn {
+  readonly nativeInputId?: string;
   readonly query: Query;
   readonly queryToken: number;
   readonly completion: Promise<PersistentNativeTurnOutcome>;
@@ -77,6 +80,7 @@ implements ClaudeExecutionStrategy {
     readonly promise: Promise<void>;
   } | null = null;
   private preparingTurnToken: number | null = null;
+  private hasNonPersistentContext = false;
   private disposed = false;
 
   constructor(private readonly sink: ClaudeExecutionStrategySink) {}
@@ -98,15 +102,15 @@ implements ClaudeExecutionStrategy {
     requestSignal?.throwIfAborted();
     this.preparingTurnToken = queryToken;
     try {
-      await this.ensureQuery(request, queryToken);
+      await this.#ensureQuery(request, queryToken);
       requestSignal?.throwIfAborted();
       if (!this.query || !this.messageChannel) {
         throw new Error('Claude persistent query is unavailable');
       }
 
-      await this.applyDynamicUpdates(request);
+      await this.#applyDynamicUpdates(request);
       requestSignal?.throwIfAborted();
-      void this.refreshAuthoritativeContextWindow(request.model);
+      void this.#refreshAuthoritativeContextWindow(request.model);
       const message = buildClaudeSDKUserMessage(
         request.prompt,
         this.sink.getProviderSessionId() ?? '',
@@ -117,8 +121,10 @@ implements ClaudeExecutionStrategy {
       }
       requestSignal?.throwIfAborted();
       const query = this.query;
+      this.sink.assertModelAvailable(request.model);
       this.messageChannel.enqueue(message);
-      this.activeNativeTurn = createPersistentNativeTurn(query, queryToken);
+      this.activeNativeTurn = createPersistentNativeTurn(query, queryToken, message.uuid);
+      this.hasNonPersistentContext ||= request.options.persistSession === false;
       this.sink.markNativeTurnHandedOff(queryToken);
     } finally {
       if (this.preparingTurnToken === queryToken) {
@@ -136,7 +142,7 @@ implements ClaudeExecutionStrategy {
       && queryToken !== null
       && this.preparingTurnToken === queryToken
     ) {
-      void this.closeCurrentQuery().catch(() => undefined);
+      void this.#closeCurrentQuery().catch(() => undefined);
       return;
     }
     if (
@@ -158,7 +164,7 @@ implements ClaudeExecutionStrategy {
     request: ClaudeEncodedExecutionRequest,
     queryToken: number,
   ): Promise<Query | null> {
-    await this.ensureQuery(request, queryToken);
+    await this.#ensureQuery(request, queryToken);
     return this.query;
   }
 
@@ -175,7 +181,7 @@ implements ClaudeExecutionStrategy {
     this.contextWindowDiscovery = null;
     if (query) {
       this.sink.handleNativeQueryClosed(query);
-      this.finishNativeTurn(query, {
+      this.#finishNativeTurn(query, {
         type: 'failed',
         error: new Error('Claude persistent query was disposed.'),
       });
@@ -186,7 +192,7 @@ implements ClaudeExecutionStrategy {
     this.currentConfig = null;
   }
 
-  private async ensureQuery(
+  async #ensureQuery(
     request: ClaudeEncodedExecutionRequest,
     queryToken: number,
   ): Promise<void> {
@@ -196,11 +202,22 @@ implements ClaudeExecutionStrategy {
       throw new Error('Claude persistent strategy is disposed');
     }
     if (
+      this.hasNonPersistentContext
+      && (
+        !this.query
+        || this.currentConfig?.restartKey !== request.restartKey
+      )
+    ) {
+      throw new Error(
+        'This non-persistent Claude session cannot be restored after its configuration or process changes. Start a new request.',
+      );
+    }
+    if (
       this.query
       && this.currentConfig
       && this.currentConfig.restartKey !== request.restartKey
     ) {
-      await this.closeCurrentQuery();
+      await this.#closeCurrentQuery();
       requestSignal?.throwIfAborted();
     }
     if (this.query) {
@@ -232,10 +249,10 @@ implements ClaudeExecutionStrategy {
     this.authoritativeContextWindow = null;
     this.contextWindowDiscovery = null;
     this.sink.handleNativeQueryOpened(query);
-    this.consumerPromise = this.consume(query, queryToken);
+    this.consumerPromise = this.#consume(query, queryToken);
   }
 
-  private async applyDynamicUpdates(
+  async #applyDynamicUpdates(
     request: ClaudeEncodedExecutionRequest,
   ): Promise<void> {
     const query = this.query;
@@ -246,8 +263,16 @@ implements ClaudeExecutionStrategy {
       await query.setModel(request.model);
       if (this.query !== query || this.disposed) return;
     }
-    if (request.effort !== current.effort) {
-      await query.applyFlagSettings({ effortLevel: request.effort });
+    const flagSettings: Parameters<Query['applyFlagSettings']>[0] = {
+      ...(request.effort !== current.effort
+        ? { effortLevel: request.effort }
+        : {}),
+      ...(request.responseStyle !== current.responseStyle
+        ? { outputStyle: request.responseStyle }
+        : {}),
+    };
+    if (Object.keys(flagSettings).length > 0) {
+      await query.applyFlagSettings(flagSettings);
       if (this.query !== query || this.disposed) return;
     }
     if (request.sdkPermissionMode !== current.sdkPermissionMode) {
@@ -257,7 +282,7 @@ implements ClaudeExecutionStrategy {
     this.currentConfig = request;
   }
 
-  private refreshAuthoritativeContextWindow(model: string): Promise<void> {
+  #refreshAuthoritativeContextWindow(model: string): Promise<void> {
     const query = this.query;
     if (!query || typeof query.getContextUsage !== 'function') {
       return Promise.resolve();
@@ -277,7 +302,7 @@ implements ClaudeExecutionStrategy {
 
     let request: ReturnType<Query['getContextUsage']>;
     try {
-      request = query.getContextUsage();
+      request = query.getContextUsage({ detail: 'summary' });
     } catch {
       return Promise.resolve();
     }
@@ -313,56 +338,51 @@ implements ClaudeExecutionStrategy {
     return promise;
   }
 
-  private async consume(query: Query, queryToken: number): Promise<void> {
+  async #consume(query: Query, queryToken: number): Promise<void> {
     try {
       for await (const message of query) {
         if (this.query !== query || this.disposed) {
           return;
         }
         if (message.type === 'system' && message.subtype === 'init') {
-          this.sink.publishCommands(query, queryToken);
+          this.sink.publishCommands(query);
         }
-        const nativeTurn = this.getNativeTurn(query);
+        if (message.type === 'system' && message.subtype === 'commands_changed') {
+          this.sink.publishCommands(query, message.commands);
+        }
+        const nativeTurn = this.#getNativeTurn(query);
         await this.sink.handleNativeMessage(
           message,
           nativeTurn?.queryToken ?? queryToken,
         );
-        if (
-          message.type === 'system'
-          && message.subtype === 'init'
-          && message.session_id
-        ) {
-          this.messageChannel?.setSessionId(message.session_id);
-        }
-        if (message.type === 'result') {
-          this.messageChannel?.onTurnComplete();
-          this.finishNativeTurn(query, { type: 'completed' });
+        if (message.type === 'result' && getClaudeInputMatch(message, nativeTurn?.nativeInputId) !== false) {
+          this.#finishNativeTurn(query, { type: 'completed' });
         }
       }
       if (this.query === query && !this.disposed) {
-        const nativeTurn = this.getNativeTurn(query);
+        const nativeTurn = this.#getNativeTurn(query);
         const nativeTurnToken = nativeTurn?.queryToken ?? queryToken;
         const error = new Error('Claude persistent query ended unexpectedly.');
-        this.detachCurrentQuery(query);
+        this.#detachCurrentQuery(query);
         this.sink.handleNativeEnd(nativeTurnToken);
-        this.finishNativeTurn(query, { type: 'failed', error });
+        this.#finishNativeTurn(query, { type: 'failed', error });
       }
     } catch (error) {
       if (this.query === query && !this.disposed) {
-        const nativeTurn = this.getNativeTurn(query);
+        const nativeTurn = this.#getNativeTurn(query);
         const nativeTurnToken = nativeTurn?.queryToken ?? queryToken;
-        this.detachCurrentQuery(query);
+        this.#detachCurrentQuery(query);
         this.sink.handleNativeFailure(error, nativeTurnToken);
-        this.finishNativeTurn(query, { type: 'failed', error });
+        this.#finishNativeTurn(query, { type: 'failed', error });
       }
     }
   }
 
-  private async closeCurrentQuery(): Promise<void> {
+  async #closeCurrentQuery(): Promise<void> {
     const query = this.query;
     if (query) {
-      this.detachCurrentQuery(query);
-      this.finishNativeTurn(query, {
+      this.#detachCurrentQuery(query);
+      this.#finishNativeTurn(query, {
         type: 'failed',
         error: new Error('Claude persistent query was replaced.'),
       });
@@ -372,23 +392,23 @@ implements ClaudeExecutionStrategy {
     }
   }
 
-  private getNativeTurn(query: Query): PersistentNativeTurn | null {
+  #getNativeTurn(query: Query): PersistentNativeTurn | null {
     return this.activeNativeTurn?.query === query
       ? this.activeNativeTurn
       : null;
   }
 
-  private finishNativeTurn(
+  #finishNativeTurn(
     query: Query,
     outcome: PersistentNativeTurnOutcome,
   ): void {
-    const nativeTurn = this.getNativeTurn(query);
+    const nativeTurn = this.#getNativeTurn(query);
     if (!nativeTurn) return;
     this.activeNativeTurn = null;
     nativeTurn.settle(outcome);
   }
 
-  private detachCurrentQuery(query: Query): void {
+  #detachCurrentQuery(query: Query): void {
     if (this.query !== query) return;
     this.messageChannel?.close();
     this.abortController?.abort();
@@ -417,12 +437,12 @@ implements ClaudeExecutionStrategy {
   ): Promise<void> {
     const turn = this.turnBarrier
       .catch(() => undefined)
-      .then(() => this.runTurn(request, queryToken));
+      .then(() => this.#runTurn(request, queryToken));
     this.turnBarrier = turn;
     await turn;
   }
 
-  private async runTurn(
+  async #runTurn(
     request: ClaudeEncodedExecutionRequest,
     queryToken: number,
   ): Promise<void> {
@@ -447,33 +467,24 @@ implements ClaudeExecutionStrategy {
     this.activeAbortController = abortController;
     let query: Query | null = null;
     try {
-      await runColdStartQuery({
-        options,
-        prompt,
-        stopAfterResult: true,
-        onQuery: (openedQuery) => {
-          query = openedQuery;
-          this.activeQuery = openedQuery;
-          this.sink.handleNativeQueryOpened(openedQuery);
-          this.sink.markNativeTurnHandedOff(queryToken);
-        },
-        onMessage: async (message) => {
-          if (
-            !query
-            || this.activeQuery !== query
-            || this.disposed
-          ) {
-            return;
-          }
-          if (
-            message.type === 'system'
-            && message.subtype === 'init'
-          ) {
-            this.sink.publishCommands(query, queryToken);
-          }
-          await this.sink.handleNativeMessage(message, queryToken);
-        },
-      });
+      const agentQuery = await loadClaudeAgentQuery();
+      abortController.signal.throwIfAborted();
+      this.sink.assertModelAvailable(request.model);
+      query = agentQuery({ options, prompt });
+      this.activeQuery = query;
+      this.sink.handleNativeQueryOpened(query);
+      this.sink.markNativeTurnHandedOff(queryToken);
+      for await (const message of query) {
+        if (this.activeQuery !== query || this.disposed) break;
+        if (message.type === 'system' && message.subtype === 'init') {
+          this.sink.publishCommands(query);
+        }
+        if (message.type === 'system' && message.subtype === 'commands_changed') {
+          this.sink.publishCommands(query, message.commands);
+        }
+        await this.sink.handleNativeMessage(message, queryToken);
+        if (message.type === 'result') break;
+      }
     } catch (error) {
       if (
         (!query || this.activeQuery === query)
@@ -537,6 +548,7 @@ async function* toSingleMessagePrompt(
 function createPersistentNativeTurn(
   query: Query,
   queryToken: number,
+  nativeInputId?: string,
 ): PersistentNativeTurn {
   let resolve!: (outcome: PersistentNativeTurnOutcome) => void;
   const completion = new Promise<PersistentNativeTurnOutcome>(
@@ -548,6 +560,7 @@ function createPersistentNativeTurn(
   return {
     query,
     queryToken,
+    nativeInputId,
     completion,
     settle: (outcome) => {
       if (settled) return;

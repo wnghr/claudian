@@ -27,7 +27,6 @@ export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
   sharedEnvironmentVariables: '',
   envSnippets: [],
   customContextLimits: {},
-  customModelAliases: {},
 
   keyboardNavigation: {
     scrollUpKey: 'w',
@@ -48,8 +47,6 @@ export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
   savedProviderThinkingBudget: {},
   savedProviderPermissionMode: {},
   pendingProviderSessionInvalidations: {},
-
-  lastCustomModel: '',
 
   maxWarmAgentProcesses: 5,
   enableAutoScroll: true,

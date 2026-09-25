@@ -5,9 +5,11 @@ import type { CollabLocalMembershipRecord } from '@/app/collab/CollabLocalProjec
 import type { CollabAuthorityControlPort } from '@/app/collab/remote-authority/CollabAuthorityControlPort';
 import type { CollabAuthorityLifecyclePort } from '@/app/collab/remote-authority/CollabAuthorityLifecyclePort';
 import type {
+  CloudAuthorityMembershipControlPort,
   CollabAuthorityMembershipControlPort,
 } from '@/app/collab/remote-authority/CollabAuthorityMembershipControlPort';
-import type { CollabAuthorityKind } from '@/core/collab';
+import type { CollabAuthorityKind, CollabProjectChanges, CollabProjectSnapshot } from '@/core/collab';
+import type { CollabError } from '@/core/collab/ClaudianCollabError';
 
 export type CollabAuthorityEventInvalidation =
   | {
@@ -18,12 +20,13 @@ export type CollabAuthorityEventInvalidation =
   }
   | { readonly kind: 'snapshot'; readonly sequence: number }
   | {
-    readonly kind: 'request';
-    readonly requestId: string;
+    readonly kind: 'changes';
+    readonly changes: CollabProjectChanges;
     readonly sequence: number;
   };
 
 export interface CollabAuthorityEventConnectionInput {
+  readonly onConnectionResult?: (error?: CollabError) => void;
   readonly afterSequence: number;
   readonly onInvalidation: (
     invalidation: CollabAuthorityEventInvalidation,
@@ -52,11 +55,19 @@ export interface CollabAuthoritySession extends CollabProjectResource {
   readonly events: CollabAuthorityEventPort;
   readonly git: CollabAuthorityGitNetwork;
   readonly lifecycle?: CollabAuthorityLifecyclePort;
-  readonly membership?: CollabAuthorityMembershipControlPort;
+  readonly membership?: CollabAuthorityMembershipControlPort | CloudAuthorityMembershipControlPort;
   supports(capability: CollabCloudCapability): boolean;
+}
+
+export interface CollabAuthoritySessionCreationOptions {
+  /** Construction output only; consume after the session passes its generation fence. */
+  readonly onInitialSnapshot?: (snapshot: CollabProjectSnapshot) => void;
 }
 
 export interface CollabAuthorityAdapter {
   readonly authorityKind: CollabAuthorityKind;
-  create(membership: CollabLocalMembershipRecord): Promise<CollabAuthoritySession>;
+  create(
+    membership: CollabLocalMembershipRecord,
+    options?: CollabAuthoritySessionCreationOptions,
+  ): Promise<CollabAuthoritySession>;
 }

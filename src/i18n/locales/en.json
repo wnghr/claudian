@@ -23,6 +23,8 @@
     "rewind": "Rewind"
   },
   "chat": {
+    "selectAvailableModel": "Select an available model before sending.",
+    "selectAvailableTitleModel": "Select an available title model in Claudian settings.",
     "rewind": {
       "confirmMessage": "Rewind to this point? File changes after this message may be overwritten or removed. This cannot be undone.",
       "confirmMessageConflicts": "Rewind to this point? {count} file(s) were modified outside the agent and will be overwritten:\n{files}",
@@ -57,6 +59,32 @@
       "errorNoActiveTab": "No active tab",
       "commandNoMessages": "Cannot fork: no messages in conversation",
       "commandNoAssistantUuid": "Cannot fork: no assistant response with identifiers"
+    },
+    "quote": {
+      "buttonLabel": "Quote"
+    },
+    "sideChat": {
+      "title": "Side chat",
+      "collapse": "Collapse",
+      "discard": "Discard",
+      "statusPreparing": "Preparing",
+      "statusQueued": "{count} queued",
+      "statusWorking": "Working",
+      "statusError": "Needs attention",
+      "statusActionRequired": "Needs input",
+      "placeholder": "Ask a follow-up in the side chat",
+      "composerLabel": "Side chat message",
+      "needsPrompt": "Add a prompt after /side to start a side chat.",
+      "unsupportedProvider": "Side chat is not supported by this provider.",
+      "unavailableBusy": "Side chat needs a completed reply. Wait for the current turn to finish.",
+      "unavailableNoCheckpoint": "Side chat needs a completed reply in this conversation first.",
+      "unavailableNoSession": "Side chat could not resolve this conversation's provider session.",
+      "alreadyExists": "A side chat already exists for this conversation. Discard it to start another.",
+      "nestedUnavailable": "Side chat cannot start another side chat. Collapse to Main first.",
+      "mainOnlyCommand": "/{command} is available in the main chat only.",
+      "startFailed": "Side chat could not start: {error}",
+      "queued": "Queued for the side chat.",
+      "busySide": "The side chat is still responding. Wait for it to finish."
     }
   },
   "collab": {
@@ -94,6 +122,11 @@
       "savePath": "Save path"
     },
     "createProject": {
+      "authority": "Collaboration authority",
+      "authorityLan": "LAN Host on this device",
+      "authorityCloud": "Cloud server",
+      "serverUrl": "Cloud server URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "title": "Create Collab project",
       "projectName": "Project name",
       "projectNamePlaceholder": "Research notes",
@@ -108,6 +141,9 @@
     },
     "joinProject": {
       "title": "Join Collab project",
+      "materialLan": "LAN invitation",
+      "materialCloud": "Cloud invitation",
+      "materialClaim": "Imported membership claim",
       "invitation": "Invitation",
       "invitationPlaceholder": "Paste the invitation string",
       "memberName": "Your display name",
@@ -120,26 +156,43 @@
       "resumeFailed": "Joining still needs attention. Try again."
     },
     "reconnectProject": {
+      "restoreWithLink": "Use a link to restore connection",
       "title": "Reconnect project",
-      "description": "Paste a fresh invitation from the Host to reconnect {name}.",
+      "descriptionLan": "Reconnect {name} with a fresh invitation or membership claim. After migration to Cloud, use the Cloud server URL while the former Host is reachable and retains your claim.",
+      "descriptionCloud": "Reconnect {name} with a Cloud invitation, imported membership claim, or its new server URL.",
+      "method": "Reconnect method",
+      "invitationOrClaim": "Invitation or imported membership claim",
+      "cloudMigration": "Reconnect to Cloud after migration",
+      "relocation": "Same Cloud project at a new server URL",
+      "serverUrl": "Cloud server URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "invitation": "Invitation",
       "invitationPlaceholder": "Paste the new invitation string",
       "reconnect": "Reconnect",
       "reconnecting": "Reconnecting project...",
-      "failed": "Could not reconnect the project. Check the invitation and try again."
+      "failedInvitation": "Could not reconnect the project. Check the invitation and try again.",
+      "failedCloudMaterial": "Could not reconnect the project. Check the Cloud invitation or imported membership claim and try again.",
+      "failedRelocation": "Could not reconnect the project. Check the Cloud server URL and try again."
     },
     "panel": {
+      "projectFolderRenameFailed": "Could not update the project folder location. Open Collab and retry.",
       "title": "Collab",
       "addProject": "Add project",
       "createProject": "Create",
       "projectPicker": "Select project",
-      "emptyDescription": "Create a local project or join one from another Claudian user.",
+      "emptyDescription": "Create a project or join an existing one.",
       "joinProject": "Join",
       "reconnectProject": "Reconnect project...",
       "joinUnavailable": "Joining becomes available with LAN collaboration.",
       "openProject": "Open project",
       "setupIncomplete": "Project setup is incomplete, but its saved authority is safe.",
+      "leaveRecovery": "Leaving this project needs attention. Its saved cleanup choice is safe.",
+      "resumeLeave": "Resume leaving",
+      "leaveRecoveryFailed": "Leaving could not finish. Check the connection and try again.",
       "workingCopyMissing": "The working copy is missing. The saved project was not deleted.",
+      "setupRecoveryUnavailable": "Setup information could not be read. Refresh and try again.",
+      "restoreWorkingCopy": "Restore working copy",
+      "restoreWorkingCopyFailed": "Could not restore the working copy. Try again.",
       "myChanges": "My changes",
       "myChangesReady": "This project is ready. Change publishing arrives in the next milestone.",
       "membersAccess": "Members & access",
@@ -158,21 +211,26 @@
       "loadFailed": "Collab needs attention before it can continue.",
       "retry": "Retry"
     },
-  "projectManagement": {
-    "title": "Project management"
-  },
-  "retired": {
-    "title": "Retired",
-    "ended": "Collaboration ended on {date}.",
-    "unknownDate": "an unknown date",
-    "files": "Your current files are still in {path}.",
-    "keepFiles": "Keep files",
-    "deleteFiles": "Delete files",
-    "retryCleanup": "Retry cleanup",
-    "finishingCleanup": "Finishing local cleanup…",
-    "cleanupFailed": "Project cleanup needs attention. Retry when ready."
-  },
-  "access": {
+    "projectManagement": {
+      "title": "Project management"
+    },
+    "retired": {
+      "title": "Retired",
+      "ended": "Collaboration ended on {date}.",
+      "unknownDate": "an unknown date",
+      "files": "Your current files are still in {path}.",
+      "keepFiles": "Keep files",
+      "deleteFiles": "Delete files",
+      "retryCleanup": "Retry cleanup",
+      "finishingCleanup": "Finishing local cleanup…",
+      "cleanupFailed": "Project cleanup needs attention. Retry when ready."
+    },
+    "access": {
+      "activeInvitations": "Active invitations",
+      "loadingInvitations": "Loading invitations…",
+      "noInvitations": "No active invitations.",
+      "members": "Members",
+      "memberCountSingle": "{count} member",
       "memberCount": "{count} members",
       "noMembers": "No members are available.",
       "loading": "Loading members…",
@@ -180,14 +238,75 @@
       "retry": "Retry",
       "invitations": "Invitations",
       "createInvitation": "Create invitation",
+      "resumeInvitation": "Resume invitation",
       "creatingInvitation": "Creating invitation…",
       "invitation": "Invitation string",
+      "copyInvitationId": "Copy invitation ID",
+      "invitationIdCopied": "Invitation ID copied.",
       "copyInvitation": "Copy invitation",
       "revokeInvitation": "Revoke invitation",
       "invitationCopied": "Invitation copied.",
       "invitationRevoked": "Invitation revoked.",
+      "invitationExpiresIn": "This link will expire in {minutes} min.",
+      "invitationExpired": "This link has expired.",
+      "invitationUnavailable": "This invitation is no longer available.",
+      "createNewInvitation": "Create new invitation",
+      "invitationManagementPending": "Finish the pending action in Project management first.",
       "invitationFailed": "The invitation action could not be completed.",
+      "invitationStatus": {
+        "active": "Active",
+        "redeeming": "Being used",
+        "redeemed": "Used",
+        "revoked": "Revoked",
+        "expired": "Expired"
+      },
       "copyFailed": "The invitation could not be copied.",
+      "reissueMemberClaim": "Reissue membership claim",
+      "revokeMemberClaim": "Revoke membership claim",
+      "memberClaim": "Membership claim",
+      "copyMemberClaim": "Copy membership claim",
+      "copyRecoveryLink": "Recovery link",
+      "recoveryLinkCopied": "Recovery link copied.",
+      "memberClaimReady": "The replacement membership claim is ready.",
+      "memberClaimCopied": "Membership claim copied.",
+      "cloudHostingDescription": "Shared through a Cloud server.",
+      "lanHostingDescription": "Shared through a Host on your local network.",
+      "leaveProjectDescription": "Leave this Project. You can choose to keep your local files.",
+      "retireProjectDescription": "End collaboration for everyone in this Project.",
+      "hosting": "Hosting",
+      "moveToCloud": "Move to Cloud",
+      "moveToLan": "Move to LAN",
+      "projectActions": "Project actions",
+      "cloudServerUrl": "Cloud server URL",
+      "cloudServerUrlPlaceholder": "http://server.example:8787",
+      "proposeLanToCloud": "Request move to Cloud",
+      "lanToCloudProposal": "Cloud target: {url} · {phase}",
+      "acceptLanToCloud": "Accept move to Cloud",
+      "retryLanToCloud": "Retry move to Cloud",
+      "lanHost": "LAN host",
+      "thisDevice": "This device",
+      "anotherDevice": "Another device",
+      "prepareLanHelp": "Prepare this device to host the Project on your local network.",
+      "lanTargetReady": "This device is ready to receive the Project.",
+      "otherLanTargetHelp": "On the receiving device, open Move to LAN and request hosting. Its request will appear here.",
+      "shareLanHandleHelp": "Send this handle to the target device to accept the transfer.",
+      "prepareCloudToLan": "Prepare LAN target",
+      "withdrawCloudToLan": "Withdraw target",
+      "cloudToLanDescriptor": "LAN target descriptor",
+      "cloudToLanHandle": "Transfer handle",
+      "beginCloudToLan": "Begin move to LAN",
+      "acceptCloudToLan": "Accept transfer on this device",
+      "observeTransfer": "Refresh transfer status",
+      "copyTransferData": "Copy transfer data",
+      "transferUpdated": "Move status updated.",
+      "transferConnectionRequired": "This saved transfer needs a compatible server connection before it can continue.",
+      "transferStatus": {
+        "pending": "Pending",
+        "active": "In progress",
+        "completed": "Completed",
+        "cancelled": "Cancelled"
+      },
+      "finishOperation": "Finish completed action",
       "manager": "Manager",
       "managerCount": "Managers: {count}",
       "host": "Host",
@@ -198,43 +317,48 @@
         "revoked": "Removed",
         "left": "Left"
       },
-    "makeManager": "Make Manager",
-    "makeMember": "Make Member",
-    "completePromotion": "Complete promotion",
-    "promotionPending": "Waiting for acknowledgement",
-    "cancelPromotion": "Cancel promotion",
-    "cancelManagerSuccession": "Cancel successor selection",
-    "transferHost": "Transfer Host",
-    "acceptHost": "Accept Host",
-    "decline": "Decline",
-    "cancelTransfer": "Cancel transfer",
-    "managerSuccessorRequired": "Choose a successor before leaving.",
-    "lastManagerRequired": "At least one Manager must remain.",
-    "chooseManagerSuccessor": "Choose a successor to receive Manager responsibility.",
-    "waitingForManagerAcknowledgement": "Waiting for {name} to acknowledge Manager responsibility.",
-    "managerSuccessorAcknowledged": "The successor acknowledged. You can now leave.",
-    "hostTransferRequired": "Transfer Host before leaving.",
+      "makeManager": "Make Manager",
+      "makeMember": "Make Member",
+      "completePromotion": "Complete promotion",
+      "promotionPending": "Waiting for acknowledgement",
+      "cancelPromotion": "Cancel promotion",
+      "cancelManagerSuccession": "Cancel successor selection",
+      "transferHost": "Transfer Host",
+      "acceptHost": "Accept Host",
+      "decline": "Decline",
+      "cancelTransfer": "Cancel transfer",
+      "managerSuccessorRequired": "Choose a successor before leaving.",
+      "lastManagerRequired": "At least one Manager must remain.",
+      "chooseManagerSuccessor": "Choose a successor to receive Manager responsibility.",
+      "waitingForManagerAcknowledgement": "Waiting for {name} to acknowledge Manager responsibility.",
+      "managerSuccessorAcknowledged": "The successor acknowledged. You can now leave.",
+      "hostTransferRequired": "Transfer Host before leaving.",
       "removeMember": "Remove",
-    "leaveProject": "Leave project",
-    "retireProject": "Retire project",
+      "leaveProject": "Leave project",
+      "retireProject": "Retire project",
       "hostRemovalBlocked": "The LAN Host membership cannot be removed.",
       "confirmPromote": "Make {name} a Manager? You will both remain Managers.",
       "confirmDemote": "Make {name} a Member?",
       "demoteHostUnchanged": "This changes their role only. If they are the LAN Host, Host responsibility stays with them.",
       "confirmRemove": "Remove {name} from collaboration?",
-    "confirmLeave": "Leave this collaboration?",
-    "confirmRetire": "Retire this project for everyone?",
+      "confirmLeave": "Leave this collaboration?",
+      "confirmRetire": "Retire this project for everyone?",
       "removedFilesRetained": "Their local Project files and history stay on their device.",
-    "leaveCleanupWarning": "Choose what happens to this local copy. Git history and unpublished Git-only work cannot be recovered after cleanup.",
-    "retireWarning": "This ends collaboration for every Member. Visible files remain on each device, but collaboration history and Git-only work are not recoverable.",
+      "leaveCleanupWarning": "Choose what happens to this local copy. Git history and unpublished Git-only work cannot be recovered after cleanup.",
+      "offlineLeaveLan": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the Host.",
+      "offlineLeaveCloud": "You are offline. You will leave this Project locally now. Your departure will be synced when this device reconnects to the server.",
+      "immediateLocalDeletion": "Local files will be deleted immediately.",
+      "retireWarning": "This ends collaboration for every Member. Visible files remain on each device, but collaboration history and Git-only work are not recoverable.",
       "confirm": "Confirm",
       "actionFailed": "The access change could not be completed. You can retry safely.",
-      "actionComplete": "Access updated."
+      "actionComplete": "Access updated.",
+      "waitingCloudToLanApproval": "Waiting for Manager approval. This device will continue automatically.",
+      "resumeCloudToLan": "Resume",
+      "cloudToLanApproved": "Approved. The receiving device will continue automatically, or its user can select Resume."
     },
     "host": {
-      "summary": "LAN Host",
-      "hostedHere": "Hosted on this device",
-      "hostedElsewhere": "Hosted on another device",
+      "hostedHereSummary": "LAN Host (on this device)",
+      "hostedElsewhereSummary": "LAN Host (on another device)",
       "legacyClaimConfirmation": "Use this device as the Host owner?",
       "legacyClaimAction": "Use this device",
       "status": {
@@ -255,6 +379,19 @@
       "retry": "Retry",
       "startFailed": "Host could not be started. Check diagnostics and retry.",
       "stopFailed": "Host could not be stopped cleanly. Check diagnostics and retry."
+    },
+    "update": {
+      "reconnect": "Reconnect to continue.",
+      "finishPublish": "Finish publishing",
+      "action": "Update",
+      "updating": "Updating…",
+      "reviewTitle": "Review project update",
+      "failed": "Update failed. Retry",
+      "conflictTitle": "Project update conflicts",
+      "editAndContinue": "Edit the project files, then continue Update from the project sidebar.",
+      "reviewAction": "Review",
+      "conflictAction": "Conflict",
+      "resumeAction": "Resume"
     },
     "publish": {
       "title": "My changes",
@@ -346,6 +483,15 @@
       "save": "Save",
       "saving": "Saving…",
       "saveFailed": "The Ticket could not be saved.",
+      "contentChanged": "This Ticket changed while you were editing. Review the latest version before saving your draft.",
+      "latestVersion": "Latest version",
+      "keepMine": "Keep my version",
+      "savedRefreshing": "Saved. Refreshing…",
+      "savedRefreshFailed": "Saved. The latest Ticket could not be loaded.",
+      "retryRefresh": "Retry refresh",
+      "created": "Ticket created.",
+      "openCreated": "Open Ticket",
+      "useLatest": "Use latest version",
       "close": "Close",
       "reopen": "Reopen",
       "acceptedChanges": "Accepted changes",
@@ -452,7 +598,8 @@
     "titleModel": {
       "name": "Title generation model",
       "desc": "Model used for auto-generating conversation titles.",
-      "auto": "Auto (Haiku)"
+      "select": "Select a model",
+      "unavailableWarning": "Automatic titles are paused. Select an available title model."
     },
     "navMappings": {
       "name": "Vim-style navigation mappings",
@@ -487,58 +634,10 @@
       "desc": "Hide specific commands and skills from the dropdown. Useful for hiding Claude Code entries that are not relevant to Claudian. Enter names without the leading slash, one per line.",
       "placeholder": "commit\nbuild\ntest"
     },
-    "mcpServers": {
-      "name": "MCP Servers",
-      "descBeforeCommand": "Claude Code manages MCP servers via its own CLI. Configure with ",
-      "descAfterCommand": " and they will be available in Claudian. ",
-      "learnMore": "Learn more"
-    },
-    "plugins": {
-      "name": "Claude Code Plugins",
-      "desc": "Manage Claude Code plugins discovered from ~/.claude/plugins. Enabled plugins are stored per vault in .claude/settings.json."
-    },
-    "subagents": {
-      "name": "Subagents",
-      "desc": "Manage vault-level subagents stored in .claude/agents/. Each Markdown file defines one custom agent.",
-      "noAgents": "No subagents configured. Click + to create one.",
-      "deleteConfirm": "Delete subagent \"{name}\"?",
-      "saveFailed": "Failed to save subagent: {message}",
-      "refreshFailed": "Failed to refresh subagents: {message}",
-      "deleteFailed": "Failed to delete subagent: {message}",
-      "renameCleanupFailed": "Warning: could not remove old file for \"{name}\"",
-      "created": "Subagent \"{name}\" created",
-      "updated": "Subagent \"{name}\" updated",
-      "deleted": "Subagent \"{name}\" deleted",
-      "duplicateName": "An agent named \"{name}\" already exists",
-      "descriptionRequired": "Description is required",
-      "promptRequired": "System prompt is required",
-      "modal": {
-        "titleEdit": "Edit Subagent",
-        "titleAdd": "Add Subagent",
-        "name": "Name",
-        "nameDesc": "Lowercase letters, numbers, and hyphens only",
-        "namePlaceholder": "code-reviewer",
-        "description": "Description",
-        "descriptionDesc": "Brief description of this agent",
-        "descriptionPlaceholder": "Reviews code for bugs and style",
-        "advancedOptions": "Advanced options",
-        "model": "Model",
-        "modelDesc": "Model override for this agent",
-        "tools": "Tools",
-        "toolsDesc": "Comma-separated list of allowed tools (empty = all)",
-        "disallowedTools": "Disallowed tools",
-        "disallowedToolsDesc": "Comma-separated list of tools to disallow",
-        "skills": "Skills",
-        "skillsDesc": "Comma-separated list of skills",
-        "prompt": "System prompt",
-        "promptDesc": "Instructions for the agent",
-        "promptPlaceholder": "You are a code reviewer. Analyze the given code for..."
-      }
-    },
     "safety": "Safety",
     "loadUserSettings": {
       "name": "Load user Claude settings",
-      "desc": "Load ~/.claude/settings.json. When enabled, user's Claude Code permission rules may bypass Safe mode."
+      "desc": "Load user-level Claude Code configuration from ~/.claude: settings.json, skills, commands, agents, and plugins. When disabled, only vault-level configuration is available. When enabled, user permission rules may bypass Safe mode."
     },
     "claudeSafeMode": {
       "name": "Safe mode",
@@ -583,11 +682,6 @@
       "name": "Custom Context Limits",
       "desc": "Set context window sizes for your custom models. Leave empty to use the default (200k tokens).",
       "invalid": "Invalid format. Use: 256k, 1m, or exact count (1000-10000000)."
-    },
-    "customModels": {
-      "name": "Custom models",
-      "desc": "Append additional Claude model IDs to the picker, one per line. Environment model overrides still replace the picker.",
-      "placeholder": "claude-opus-4-6\nclaude-opus-4-5-20251101"
     },
     "enableChrome": {
       "name": "Enable Chrome extension",
@@ -664,6 +758,17 @@
       "leftSidebar": "Left sidebar",
       "mainTab": "Main editor tab"
     },
+    "cliInstallation": {
+      "disclosure": "{name} installation",
+      "description": "Optional CLI path for this computer. Leave empty to detect automatically.",
+      "checking": "Checking CLI…",
+      "versionUnavailable": "Version unavailable",
+      "notFound": "Not found",
+      "custom": "Custom path",
+      "auto": "Auto-detected",
+      "checkFailed": "Could not check CLI",
+      "saveFailed": "Could not save the path. Try again."
+    },
     "cliPath": {
       "name": "Claude CLI path",
       "desc": "Custom path to Claude Code CLI. Leave empty for auto-detection.",
@@ -683,6 +788,14 @@
       "desc": "Make enabled {provider} models available for new conversations. Existing sessions are preserved when disabled.",
       "lastProviderWarning": "At least one provider must remain enabled for Claudian to work.",
       "noModelsWarning": "No {provider} models are enabled. Go to Models below and enable at least one model."
+    },
+    "claude": {
+      "responseStyle": {
+        "name": "Response style",
+        "desc": "Default uses Claude’s normal style. Concise leads with results and skips preamble. Requires Claude Code 2.1.237 or later.",
+        "default": "Default",
+        "concise": "Concise"
+      }
     },
     "codex": {
       "installationMethod": {
@@ -708,10 +821,11 @@
         "workspaceWrite": "Workspace write",
         "readOnly": "Read only"
       },
-      "customModels": {
-        "name": "Custom models",
-        "desc": "Append additional Codex model IDs to the picker, one per line. `OPENAI_MODEL` still takes precedence when set.",
-        "placeholder": "gpt-5.4\ngpt-5.3-codex-spark"
+      "responseStyle": {
+        "name": "Response style",
+        "desc": "Choose how Codex communicates on supported models. Applies from the next message.",
+        "pragmatic": "Pragmatic",
+        "friendly": "Friendly"
       },
       "reasoningSummary": {
         "name": "Reasoning summary",
@@ -731,15 +845,6 @@
         "hiddenName": "Hidden Skills",
         "hiddenDesc": "Hide specific Codex skills from the dropdown. Enter skill names without the leading $, one per line.",
         "hiddenPlaceholder": "analyze\nexplain\nfix"
-      },
-      "subagents": {
-        "name": "Codex subagents",
-        "desc": "Manage vault-level Codex subagents stored in .codex/agents/. Each TOML file defines one custom agent."
-      },
-      "mcp": {
-        "descBeforeCommand": "Codex manages MCP servers via its own CLI. Configure with ",
-        "descAfterCommand": " and they will be available in Claudian. ",
-        "learnMore": "Learn more"
       },
       "environment": {
         "name": "Codex environment",
@@ -781,76 +886,6 @@
         "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.",
         "confirm": "Move to trash"
       }
-    },
-    "codexSkills": {
-      "modal": {
-        "titleEdit": "Edit Codex Skill",
-        "titleAdd": "Add Codex Skill",
-        "directory": "Directory",
-        "directoryDesc": "Where to store the skill",
-        "skillName": "Skill name",
-        "skillNameDesc": "The name used after $ (e.g., \"analyze\" for $analyze)",
-        "description": "Description",
-        "descriptionDesc": "Optional description shown in dropdown",
-        "instructions": "Instructions",
-        "instructionsDesc": "The skill instructions (SKILL.md content)",
-        "instructionsPlaceholder": "Analyze the code for..."
-      },
-      "instructionsRequired": "Instructions are required",
-      "saveFailed": "Failed to save Codex skill",
-      "header": "Codex Skills",
-      "noSkills": "No Codex skills in vault. Click + to create one.",
-      "skillBadge": "skill",
-      "deleted": "Codex skill \"{name}\" deleted",
-      "deleteFailed": "Failed to delete Codex skill",
-      "created": "Codex skill \"{name}\" created",
-      "updated": "Codex skill \"{name}\" updated"
-    },
-    "codexSubagents": {
-      "modal": {
-        "titleEdit": "Edit Codex Subagent",
-        "titleAdd": "Add Codex Subagent",
-        "nameDesc": "Agent name Codex uses when spawning (lowercase, hyphens, underscores)",
-        "descriptionDesc": "When Codex should use this agent",
-        "modelDesc": "Model override (leave empty to inherit)",
-        "namePlaceholder": "code_reviewer"
-      },
-      "reasoningEffort": {
-        "name": "Reasoning effort",
-        "desc": "Model reasoning effort level",
-        "inherit": "Inherit",
-        "low": "Low",
-        "medium": "Medium",
-        "high": "High",
-        "xhigh": "Extra High"
-      },
-      "sandboxMode": {
-        "name": "Sandbox mode",
-        "desc": "Sandbox restriction for this agent",
-        "inherit": "Inherit",
-        "readOnly": "Read only",
-        "dangerFullAccess": "Danger full access",
-        "workspaceWrite": "Workspace write"
-      },
-      "nicknameCandidates": {
-        "name": "Nickname candidates",
-        "desc": "Comma-separated display nicknames (e.g., atlas, delta, echo)"
-      },
-      "developerInstructions": {
-        "name": "Developer instructions",
-        "desc": "Core instructions that define the agent's behavior",
-        "placeholder": "Review code like an owner.\nPrioritize correctness, security, and missing test coverage.",
-        "required": "Developer instructions are required"
-      },
-      "validation": {
-        "nameRequired": "Subagent name is required",
-        "nameTooLong": "Subagent name must be {count} characters or fewer",
-        "nameInvalid": "Subagent name can only contain lowercase letters, numbers, hyphens, and underscores",
-        "nicknameInvalid": "Nickname candidates can only contain ASCII letters, numbers, spaces, hyphens, and underscores",
-        "nicknameDuplicate": "Nickname candidates must be unique"
-      },
-      "header": "Codex Subagents",
-      "noAgents": "No Codex subagents in vault. Click + to create one."
     }
   }
 }

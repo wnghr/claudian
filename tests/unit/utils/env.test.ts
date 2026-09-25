@@ -12,7 +12,6 @@ const {
   findNodeExecutable,
   formatContextLimit,
   getEnhancedPath,
-  getMissingNodeError,
   getHostnameKey,
   getInstallationKey,
   parseContextLimit,
@@ -753,37 +752,6 @@ describe('cliPathRequiresNode', () => {
   });
 });
 
-describe('getMissingNodeError', () => {
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  it('returns null when CLI does not require Node.js', () => {
-    jest.spyOn(fs, 'existsSync').mockReturnValue(false);
-    const error = getMissingNodeError('/path/to/claude');
-    expect(error).toBeNull();
-  });
-
-  it('returns error when Node.js is missing and CLI requires Node.js', () => {
-    jest.spyOn(fs, 'existsSync').mockReturnValue(false);
-    const error = getMissingNodeError('/path/to/cli.js', '/missing');
-    expect(error).toContain('Node.js');
-  });
-
-  it('returns null when Node.js is found on PATH', () => {
-    const nodeDir = isWindows ? 'C:\\custom\\bin' : '/custom/bin';
-    const nodePath = path.join(nodeDir, isWindows ? 'node.exe' : 'node');
-
-    jest.spyOn(fs, 'existsSync').mockImplementation(p => String(p) === nodePath);
-    jest.spyOn(fs, 'statSync').mockImplementation(
-      p => ({ isFile: () => String(p) === nodePath }) as fsType.Stats
-    );
-
-    const error = getMissingNodeError('/path/to/cli.js', nodeDir);
-    expect(error).toBeNull();
-  });
-});
-
 describe('findNodeDirectory', () => {
   const originalEnv = { ...process.env };
 
@@ -791,19 +759,6 @@ describe('findNodeDirectory', () => {
     jest.restoreAllMocks();
     Object.keys(process.env).forEach(key => delete process.env[key]);
     Object.assign(process.env, originalEnv);
-  });
-
-  it('returns string or null', () => {
-    const result = findNodeDirectory();
-    expect(result === null || typeof result === 'string').toBe(true);
-  });
-
-  it('returns a non-empty string when node is found', () => {
-    const result = findNodeDirectory();
-    // On most dev machines, node should be findable
-    // Result is either null (not found) or a non-empty directory path
-    const isValidResult = result === null || (typeof result === 'string' && result.length > 0);
-    expect(isValidResult).toBe(true);
   });
 
   it('uses NVM_SYMLINK when set on Windows', () => {
@@ -1074,7 +1029,6 @@ describe('parseContextLimit with comma-formatted input', () => {
   });
 });
 
-
 describe('getExtraBinaryPaths (Windows branches)', () => {
   const originalPlatform = process.platform;
   const originalEnv = { ...process.env };
@@ -1267,16 +1221,20 @@ describe('Obsidian CLI path integration', () => {
     return require('../../../src/utils/env');
   }
 
-  it('uses the top-level app bundle binary dir on macOS helper processes', () => {
-    const helperExecPath = '/Applications/Obsidian.app/Contents/Frameworks/Obsidian Helper (Renderer).app/Contents/MacOS/Obsidian Helper (Renderer)';
-    process.env.PATH = '';
+  it.each([
+    '/Applications/Obsidian.app/Contents/MacOS/Obsidian',
+    '/Applications/Obsidian.app/Contents/Frameworks/Obsidian Helper (Renderer).app/Contents/MacOS/Obsidian Helper (Renderer)',
+  ])('preserves inherited CLI precedence when running %s', (execPath) => {
+    const cliDirectory = '/custom/obsidian-cli/bin';
+    const appDirectory = '/Applications/Obsidian.app/Contents/MacOS';
+    process.env.PATH = `${cliDirectory}:${appDirectory}`;
 
-    const mod = loadWithPlatform('darwin', helperExecPath);
-    const result = mod.getEnhancedPath();
-    const segments = result.split(':');
+    const mod = loadWithPlatform('darwin', execPath);
+    const segments = mod.getEnhancedPath().split(':');
 
-    expect(segments).toContain('/Applications/Obsidian.app/Contents/MacOS');
-    expect(segments).not.toContain('/Applications/Obsidian.app/Contents/Frameworks/Obsidian Helper (Renderer).app/Contents/MacOS');
+    expect(segments).toContain(cliDirectory);
+    expect(segments).toContain(appDirectory);
+    expect(segments.indexOf(cliDirectory)).toBeLessThan(segments.indexOf(appDirectory));
   });
 
   it('does not add transient Linux AppImage mount dirs', () => {
@@ -1291,6 +1249,62 @@ describe('Obsidian CLI path integration', () => {
 
     expect(segments).not.toContain(appImageDir);
     expect(segments).toContain('/usr/local/bin');
-    expect(segments).toContain('/home/test/.local/bin');
+    expect(segments).toContain(path.join('/home/test', '.local', 'bin'));
+  });
+});
+
+describe('environment variable parsing edge cases', () => {
+  it('should skip lines without = sign', () => {
+    const input = 'VALID=value\nINVALID_LINE\nANOTHER=test';
+    const result = parseEnvironmentVariables(input);
+
+    expect(result).toEqual({
+      VALID: 'value',
+      ANOTHER: 'test',
+    });
+  });
+
+  it('should skip lines with = at start (no key)', () => {
+    const input = '=value\nKEY=valid\n =also-no-key';
+    const result = parseEnvironmentVariables(input);
+
+    expect(result).toEqual({
+      KEY: 'valid',
+    });
+  });
+
+  it('should return empty object for empty input', () => {
+    expect(parseEnvironmentVariables('')).toEqual({});
+    expect(parseEnvironmentVariables('   ')).toEqual({});
+    expect(parseEnvironmentVariables('\n\n')).toEqual({});
+  });
+
+  it('should handle values with spaces', () => {
+    const input = 'MESSAGE=Hello World';
+    const result = parseEnvironmentVariables(input);
+
+    expect(result).toEqual({
+      MESSAGE: 'Hello World',
+    });
+  });
+
+  it('should not strip mismatched quotes', () => {
+    const input = 'VAL1="not-closed\nVAL2=\'also-not-closed\nVAL3="mixed\'';
+    const result = parseEnvironmentVariables(input);
+
+    expect(result).toEqual({
+      VAL1: '"not-closed',
+      VAL2: "'also-not-closed",
+      VAL3: '"mixed\'',
+    });
+  });
+
+  it('should preserve quotes inside values', () => {
+    const input = 'JSON={"key": "value"}';
+    const result = parseEnvironmentVariables(input);
+
+    expect(result).toEqual({
+      JSON: '{"key": "value"}',
+    });
   });
 });

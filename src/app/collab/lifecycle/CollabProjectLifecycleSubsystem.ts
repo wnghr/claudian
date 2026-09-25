@@ -1,7 +1,6 @@
 import { type CollabProjectId } from '@claudian-collab/protocol';
 
 import type {
-  CollabCloudBootstrapPort,
   CollabHostTransferPort,
   CollabLifecycleRecoveryPort,
   CollabLocalExitPort,
@@ -25,11 +24,17 @@ export type CollabProjectLifecycleDurableState =
   | 'absent'
   | 'nonterminal'
   | 'proposal'
+  // Authority has moved, but retained recovery work still needs guarded admission.
   | 'terminal';
 
 export interface CollabProjectLifecycleDurableOwner {
   readonly name: string;
   inspect(projectId: CollabProjectId): Promise<CollabProjectLifecycleDurableState>;
+  runHostTransferOffer?(
+    projectId: CollabProjectId,
+    options: CollabOperationOptions,
+    createOffer: () => Promise<void>,
+  ): Promise<boolean>;
 }
 
 export type CollabProjectLifecycleAdmissionMode = 'continuation' | 'operation' | 'recovery';
@@ -58,7 +63,6 @@ export class CollabProjectLifecycleSubsystem {
   private readonly durableOwners = new Map<string, CollabProjectLifecycleDurableOwner>();
   private readonly projectQueues = new Map<CollabProjectId, Promise<void>>();
   private readonly recoveryStages: CollabProjectLifecycleRecoveryStage[];
-  private cloudBootstrapBound = false;
   private closePromise: Promise<void> | null = null;
   private closed = false;
   private membershipBound = false;
@@ -81,12 +85,21 @@ export class CollabProjectLifecycleSubsystem {
         options.hostTransfer.cancelHostTransfer(request, operationOptions)
       ),
       close: () => options.hostTransfer.close(),
-      createHostTransfer: (request, operationOptions) => this.runExclusive(
-        request.projectId,
-        'host-transfer',
-        'operation',
-        () => options.hostTransfer.createHostTransfer(request, operationOptions),
-      ),
+      createHostTransfer: async (request, operationOptions = {}) => {
+        const predecessor = this.durableOwners.get('authority-transfer');
+        if (predecessor?.runHostTransferOffer) {
+          const handled = await this.runExclusive(request.projectId, 'authority-transfer', 'continuation',
+            () => predecessor.runHostTransferOffer!(request.projectId, operationOptions,
+              () => options.hostTransfer.createHostTransfer(request, operationOptions)));
+          if (handled) return;
+        }
+        return this.runExclusive(
+          request.projectId,
+          'host-transfer',
+          'operation',
+          () => options.hostTransfer.createHostTransfer(request, operationOptions),
+        );
+      },
       declineHostTransfer: (request, operationOptions) => this.runExclusive(
         request.projectId,
         'host-transfer',
@@ -95,12 +108,18 @@ export class CollabProjectLifecycleSubsystem {
       ),
     });
     this.localExit = Object.freeze<CollabLocalExitPort>({
-      leaveProject: (request, operationOptions) => this.runExclusiveWithPredecessor(
+      leaveProject: (request, operationOptions) => this.#runExclusiveWithPredecessor(
         request.projectId,
         'local-exit',
-        'manager-responsibility',
+        ['manager-responsibility'],
         'continuation',
         () => options.localExit.leaveProject(request, operationOptions),
+      ),
+      resumeLeave: (projectId, operationOptions) => this.runExclusive(
+        projectId,
+        'local-exit',
+        'recovery',
+        () => options.localExit.resumeLeave(projectId, operationOptions),
       ),
     });
     this.retirement = Object.freeze<CollabRetirementPort>({
@@ -127,12 +146,12 @@ export class CollabProjectLifecycleSubsystem {
     this.recoveryStages = [...options.recoveryStages];
     this.lifecycleRecovery = {
       close: () => this.close(),
-      resume: recoveryOptions => this.startRecovery(recoveryOptions),
+      resume: recoveryOptions => this.#startRecovery(recoveryOptions),
     };
   }
 
   registerDurableOwner(owner: CollabProjectLifecycleDurableOwner): void {
-    this.assertRegistrationOpen();
+    this.#assertRegistrationOpen();
     if (!owner.name || this.durableOwners.has(owner.name)) {
       throw new Error('Collab lifecycle durable owner is already registered');
     }
@@ -140,7 +159,7 @@ export class CollabProjectLifecycleSubsystem {
   }
 
   registerRecoveryStage(stage: CollabProjectLifecycleRecoveryStage): void {
-    this.assertRegistrationOpen();
+    this.#assertRegistrationOpen();
     if (!stage.name || this.recoveryStages.some(existing => existing.name === stage.name)) {
       throw new Error('Collab lifecycle recovery stage is already registered');
     }
@@ -153,10 +172,116 @@ export class CollabProjectLifecycleSubsystem {
     mode: CollabProjectLifecycleAdmissionMode,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return this.runExclusiveWithPredecessor(
+    return this.#runExclusiveWithPredecessor(
       projectId,
       ownerName,
-      null,
+      [],
+      mode,
+      operation,
+    );
+  }
+
+  runRetainedAuthorityTransferRecovery<T>(
+    projectId: CollabProjectId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'authority-transfer',
+      ['authority-transfer-claimant', 'host-transfer'],
+      'recovery',
+      operation,
+    );
+  }
+
+  runAuthorityTransferRecovery<T>(
+    projectId: CollabProjectId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'authority-transfer',
+      ['authority-transfer-claimant'],
+      'recovery',
+      operation,
+    );
+  }
+
+  runAuthorityTransferManagerContinuation<T>(
+    projectId: CollabProjectId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'authority-transfer',
+      ['authority-transfer-claimant'],
+      'continuation',
+      operation,
+    );
+  }
+
+  runCloudManagement<T>(
+    projectId: CollabProjectId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'cloud-management',
+      ['manager-responsibility'],
+      'continuation',
+      operation,
+    );
+  }
+
+  runAuthorityTransferClaimant<T>(projectId: CollabProjectId,
+    assertAuthorityTransferPredecessor: () => Promise<void>, operation: () => Promise<T>): Promise<T> {
+    return this.#runExclusiveWithPredecessor(projectId, 'authority-transfer-claimant', ['authority-transfer'], 'continuation',
+      operation, assertAuthorityTransferPredecessor, 'when-present');
+  }
+
+  runCloudRecoveryLinkManagement<T>(projectId: CollabProjectId,
+    assertAuthorityTransferPredecessor: () => Promise<void>, operation: () => Promise<T>): Promise<T> {
+    return this.#runExclusiveWithPredecessor(projectId, 'cloud-management', ['authority-transfer'], 'continuation',
+      operation, assertAuthorityTransferPredecessor, 'when-present');
+  }
+
+  runCloudImportedClaimManagement<T>(
+    projectId: CollabProjectId,
+    assertAuthorityTransferPredecessor: () => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'cloud-management',
+      ['authority-transfer'],
+      'continuation',
+      operation,
+      assertAuthorityTransferPredecessor,
+    );
+  }
+
+  runCloudManagerLeaveManagement<T>(
+    projectId: CollabProjectId,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'cloud-management',
+      ['local-exit'],
+      'continuation',
+      operation,
+    );
+  }
+
+  runManagerResponsibility<T>(
+    projectId: CollabProjectId,
+    mode: CollabProjectLifecycleAdmissionMode,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#runExclusiveWithPredecessor(
+      projectId,
+      'manager-responsibility',
+      ['cloud-management'],
       mode,
       operation,
     );
@@ -166,21 +291,23 @@ export class CollabProjectLifecycleSubsystem {
     projectId: CollabProjectId,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return this.runExclusiveWithPredecessor(
+    return this.#runExclusiveWithPredecessor(
       projectId,
       'retirement',
-      'local-exit',
+      ['local-exit', 'manager-responsibility'],
       'continuation',
       operation,
     );
   }
 
-  private runExclusiveWithPredecessor<T>(
+  #runExclusiveWithPredecessor<T>(
     projectId: CollabProjectId,
     ownerName: string,
-    predecessorOwnerName: string | null,
+    predecessorOwnerNames: readonly string[],
     mode: CollabProjectLifecycleAdmissionMode,
     operation: () => Promise<T>,
+    assertAuthorityTransferPredecessor?: () => Promise<void>,
+    authorityTransferProof: 'always' | 'when-present' = 'always',
   ): Promise<T> {
     if (this.closed) {
       return Promise.reject(new CollabError({
@@ -216,18 +343,83 @@ export class CollabProjectLifecycleSubsystem {
         }
         if (state === 'nonterminal') pendingOwners.push(owner.name);
       }
-      if (pendingOwners.length > 1) {
+      const isCloudManagementResponsibilityPair = pendingOwners.length === 2
+        && pendingOwners.includes('cloud-management')
+        && pendingOwners.includes('manager-responsibility');
+      const permitsCloudManagementResponsibilityPair = isCloudManagementResponsibilityPair
+        && predecessorOwnerNames.length === 1
+        && (
+          (ownerName === 'manager-responsibility'
+            && predecessorOwnerNames[0] === 'cloud-management')
+          || (ownerName === 'cloud-management'
+            && mode === 'continuation'
+            && predecessorOwnerNames[0] === 'manager-responsibility')
+        );
+      const isCloudManagementLeavePair = pendingOwners.length === 2
+        && pendingOwners.includes('cloud-management')
+        && pendingOwners.includes('local-exit');
+      const permitsCloudManagerLeaveContinuation = isCloudManagementLeavePair
+        && ownerName === 'cloud-management'
+        && mode === 'continuation'
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'local-exit';
+      const permitsManagerLeaveOfferRetry = isCloudManagementLeavePair
+        && ownerName === 'manager-responsibility'
+        && mode === 'operation'
+        && predecessorOwnerNames.length === 2
+        && predecessorOwnerNames.includes('cloud-management')
+        && predecessorOwnerNames.includes('local-exit');
+      const permitsAuthorityTransferManagerClaimantPair = pendingOwners.length === 2
+        && pendingOwners.includes('authority-transfer')
+        && pendingOwners.includes('authority-transfer-claimant')
+        && ownerName === 'authority-transfer'
+        && mode === 'continuation'
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'authority-transfer-claimant';
+      const permitsAuthorityTransferClaimantPair = pendingOwners.length === 2
+        && pendingOwners.includes('authority-transfer-claimant') && pendingOwners.includes('authority-transfer')
+        && ownerName === 'authority-transfer-claimant' && mode === 'continuation'
+        && predecessorOwnerNames.length === 1 && predecessorOwnerNames[0] === 'authority-transfer'
+        && assertAuthorityTransferPredecessor !== undefined;
+      const permitsCloudImportedClaimTransferPair = pendingOwners.length === 2
+        && pendingOwners.includes('cloud-management')
+        && pendingOwners.includes('authority-transfer')
+        && ownerName === 'cloud-management'
+        && mode === 'continuation'
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'authority-transfer'
+        && assertAuthorityTransferPredecessor !== undefined;
+      if (
+        pendingOwners.length > 1
+        && !permitsCloudManagementResponsibilityPair
+        && !permitsCloudManagerLeaveContinuation
+        && !permitsManagerLeaveOfferRetry
+        && !permitsAuthorityTransferManagerClaimantPair
+        && !permitsAuthorityTransferClaimantPair
+        && !permitsCloudImportedClaimTransferPair
+      ) {
         throw new CollabError({
           code: 'durable-progress-recovery-required',
           recoveryActions: ['resume'],
           safeContext: { reason: 'lifecycle-owner-ambiguous' },
         });
       }
-      const pendingOwner = pendingOwners[0];
+      const unexpectedOwner = pendingOwners.find(name => (
+        name !== ownerName && !predecessorOwnerNames.includes(name)
+      ));
+      if (unexpectedOwner !== undefined) {
+        throw new CollabError({
+          code: 'durable-progress-recovery-required',
+          recoveryActions: ['resume'],
+          safeContext: { reason: 'lifecycle-owner-pending' },
+        });
+      }
       if (
-        pendingOwner !== undefined
-        && pendingOwner !== ownerName
-        && pendingOwner !== predecessorOwnerName
+        ownerName === 'cloud-management'
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'manager-responsibility'
+        && pendingOwners.includes('manager-responsibility')
+        && !pendingOwners.includes(ownerName)
       ) {
         throw new CollabError({
           code: 'durable-progress-recovery-required',
@@ -235,12 +427,39 @@ export class CollabProjectLifecycleSubsystem {
           safeContext: { reason: 'lifecycle-owner-pending' },
         });
       }
-      if (pendingOwner === ownerName && mode === 'operation') {
+      if (
+        ownerName === 'cloud-management'
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'local-exit'
+        && pendingOwners.includes('local-exit')
+        && !pendingOwners.includes(ownerName)
+      ) {
+        throw new CollabError({
+          code: 'durable-progress-recovery-required',
+          recoveryActions: ['resume'],
+          safeContext: { reason: 'lifecycle-owner-pending' },
+        });
+      }
+      if (pendingOwners.includes(ownerName) && mode === 'operation') {
         throw new CollabError({
           code: 'durable-progress-recovery-required',
           recoveryActions: ['resume'],
           safeContext: { reason: 'lifecycle-owner-recovery-required' },
         });
+      }
+      if (
+        (ownerName === 'cloud-management' || ownerName === 'authority-transfer-claimant')
+        && predecessorOwnerNames.length === 1
+        && predecessorOwnerNames[0] === 'authority-transfer'
+      ) {
+        if (!assertAuthorityTransferPredecessor) {
+          throw new CollabError({
+            code: 'durable-progress-recovery-required',
+            recoveryActions: ['resume'],
+            safeContext: { reason: 'lifecycle-owner-pending' },
+          });
+        }
+        if (authorityTransferProof === 'always' || pendingOwners.includes('authority-transfer')) await assertAuthorityTransferPredecessor();
       }
       return operation();
     });
@@ -252,58 +471,44 @@ export class CollabProjectLifecycleSubsystem {
     return result;
   }
 
-  bindCloudBootstrap(cloudBootstrap: CollabCloudBootstrapPort): CollabCloudBootstrapPort {
-    this.assertRegistrationOpen();
-    if (this.cloudBootstrapBound) {
-      throw new Error('Cloud bootstrap lifecycle port is already bound');
-    }
-    this.cloudBootstrapBound = true;
-    return Object.freeze<CollabCloudBootstrapPort>({
-      cancel: projectId => this.runExclusive(
-        projectId,
-        'cloud-bootstrap',
-        'continuation',
-        () => cloudBootstrap.cancel(projectId),
-      ),
-      close: () => cloudBootstrap.close(),
-      prepareLocalRecovery: () => cloudBootstrap.prepareLocalRecovery(),
-      recoverPending: () => cloudBootstrap.recoverPending(),
-      startFormerHost: input => this.runExclusive(
-        input.projectId,
-        'cloud-bootstrap',
-        'operation',
-        () => cloudBootstrap.startFormerHost(input),
-      ),
-      submitParticipant: input => this.runExclusive(
-        input.projectId,
-        'cloud-bootstrap',
-        'operation',
-        () => cloudBootstrap.submitParticipant(input),
-      ),
-    });
-  }
-
   bindMembership(membership: CollabMembershipPort): CollabMembershipPort {
-    this.assertRegistrationOpen();
+    this.#assertRegistrationOpen();
     if (this.membershipBound) {
       throw new Error('Manager responsibility lifecycle port is already bound');
     }
     this.membershipBound = true;
     return Object.freeze<CollabMembershipPort>({
-      cancelManagerResponsibilityOffer: (request, operationOptions) => this.runExclusive(
+      openInvitation: request => membership.openInvitation(request),
+      listMembers: (...args) => membership.listMembers(...args),
+      reissueMemberClaim: (...args) => membership.reissueMemberClaim(...args),
+      revokeMemberClaim: (...args) => membership.revokeMemberClaim(...args),
+      listManagerResponsibilityOffers: (...args) => membership.listManagerResponsibilityOffers(...args),
+      listInvitations: (...args) => membership.listInvitations(...args),
+      readManagementOperation: (...args) => membership.readManagementOperation(...args),
+      resumeManagementOperation: (...args) => membership.resumeManagementOperation(...args),
+      completeManagementOperation: (...args) => membership.completeManagementOperation(...args),
+      cancelManagerResponsibilityOffer: (request, operationOptions) => this.runManagerResponsibility(
         request.projectId,
-        'manager-responsibility',
         'operation',
         () => membership.cancelManagerResponsibilityOffer(request, operationOptions),
       ),
       createInvitation: (projectId, operationOptions) => (
         membership.createInvitation(projectId, operationOptions)
       ),
-      createManagerResponsibilityOffer: (request, operationOptions) => this.runExclusive(
-        request.projectId,
-        'manager-responsibility',
-        'operation',
-        () => membership.createManagerResponsibilityOffer(request, operationOptions),
+      createManagerResponsibilityOffer: (request, operationOptions) => (
+        request.purpose === 'manager-leave'
+          ? this.#runExclusiveWithPredecessor(
+            request.projectId,
+            'manager-responsibility',
+            ['cloud-management', 'local-exit'],
+            'operation',
+            () => membership.createManagerResponsibilityOffer(request, operationOptions),
+          )
+          : this.runManagerResponsibility(
+            request.projectId,
+            'operation',
+            () => membership.createManagerResponsibilityOffer(request, operationOptions),
+          )
       ),
       demoteManager: (request, operationOptions) => (
         membership.demoteManager(request, operationOptions)
@@ -357,7 +562,7 @@ export class CollabProjectLifecycleSubsystem {
     }
   }
 
-  private startRecovery(options: CollabOperationOptions = {}): Promise<void> {
+  #startRecovery(options: CollabOperationOptions = {}): Promise<void> {
     if (this.closed) {
       return Promise.reject(new CollabError({
         code: 'durable-progress-recovery-required',
@@ -399,7 +604,7 @@ export class CollabProjectLifecycleSubsystem {
     return this.closePromise;
   }
 
-  private assertRegistrationOpen(): void {
+  #assertRegistrationOpen(): void {
     if (this.closed) throw new Error('Collab lifecycle subsystem is closed');
     if (this.started) throw new Error('Collab lifecycle subsystem has already started');
   }

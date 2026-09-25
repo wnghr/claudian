@@ -23,6 +23,8 @@
     "rewind": "回退"
   },
   "chat": {
+    "selectAvailableModel": "请先选择可用的模型再发送。",
+    "selectAvailableTitleModel": "请在 Claudian 设置中选择可用的标题生成模型。",
     "rewind": {
       "confirmMessage": "回退到此处？此消息之后的文件更改可能被覆盖或删除。此操作无法撤销。",
       "confirmMessageConflicts": "回退到此处？检测到 {count} 个文件在代理之外被修改，继续操作将覆盖这些更改：\n{files}",
@@ -57,6 +59,32 @@
       "errorNoActiveTab": "没有活动标签页",
       "commandNoMessages": "无法分叉：对话中没有消息",
       "commandNoAssistantUuid": "无法分叉：没有带标识符的助手回复"
+    },
+    "quote": {
+      "buttonLabel": "引用"
+    },
+    "sideChat": {
+      "title": "侧边对话",
+      "collapse": "收起",
+      "discard": "放弃",
+      "statusPreparing": "准备中",
+      "statusQueued": "{count} 条排队中",
+      "statusWorking": "处理中",
+      "statusError": "需要处理",
+      "statusActionRequired": "需要输入",
+      "placeholder": "在侧边对话中继续提问",
+      "composerLabel": "侧边对话消息",
+      "needsPrompt": "请在 /side 后输入提示词以开始侧边对话。",
+      "unsupportedProvider": "此提供方不支持侧边对话。",
+      "unavailableBusy": "侧边对话需要一条已完成的回复。请等待当前回合结束。",
+      "unavailableNoCheckpoint": "请先在此对话中完成一次回复，再开始侧边对话。",
+      "unavailableNoSession": "无法解析该对话的提供方会话。",
+      "alreadyExists": "该对话已有侧边对话。请先放弃后再新建。",
+      "nestedUnavailable": "侧边对话中无法再开启侧边对话。请先收起回到主对话。",
+      "mainOnlyCommand": "/{command} 仅可在主对话中使用。",
+      "startFailed": "侧边对话启动失败：{error}",
+      "queued": "已加入侧聊队列。",
+      "busySide": "侧边对话仍在回复，请等待其完成。"
     }
   },
   "collab": {
@@ -94,6 +122,11 @@
       "savePath": "保存路径"
     },
     "createProject": {
+      "authority": "协作管理方",
+      "authorityLan": "此设备上的局域网 Host",
+      "authorityCloud": "Cloud 服务器",
+      "serverUrl": "Cloud 服务器 URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "title": "创建协作项目",
       "projectName": "项目名称",
       "projectNamePlaceholder": "研究笔记",
@@ -107,6 +140,9 @@
       "resumeFailed": "Setup 仍需处理，请再次尝试继续。"
     },
     "joinProject": {
+      "materialLan": "局域网邀请",
+      "materialCloud": "Cloud 邀请",
+      "materialClaim": "导入的成员身份凭据",
       "title": "加入协作项目",
       "invitation": "邀请字符串",
       "invitationPlaceholder": "粘贴邀请字符串",
@@ -120,26 +156,43 @@
       "resumeFailed": "加入流程仍需处理，请重试。"
     },
     "reconnectProject": {
+      "restoreWithLink": "使用链接恢复连接",
       "title": "重新连接项目",
-      "description": "粘贴 Host 新生成的邀请字符串，以重新连接 {name}。",
+      "descriptionLan": "使用新的邀请或成员认领信息重新连接 {name}。迁移到 Cloud 后，可在原 Host 仍可连接且保留你的认领信息时，使用 Cloud 服务器 URL 重连。",
+      "descriptionCloud": "使用 Cloud 邀请、导入的成员身份凭据或新服务器 URL 重新连接 {name}。",
+      "method": "重新连接方式",
+      "invitationOrClaim": "邀请或导入的成员身份凭据",
+      "cloudMigration": "迁移到 Cloud 后重新连接",
+      "relocation": "同一 Cloud 项目的新服务器 URL",
+      "serverUrl": "Cloud 服务器 URL",
+      "serverUrlPlaceholder": "http://server.example:8787",
       "invitation": "邀请字符串",
       "invitationPlaceholder": "粘贴新的邀请字符串",
       "reconnect": "重新连接",
       "reconnecting": "正在重新连接项目…",
-      "failed": "无法重新连接项目，请检查邀请字符串后重试。"
+      "failedInvitation": "无法重新连接项目，请检查邀请字符串后重试。",
+      "failedCloudMaterial": "无法重新连接项目，请检查 Cloud 邀请或导入的成员身份凭据后重试。",
+      "failedRelocation": "无法重新连接项目，请检查 Cloud 服务器 URL 后重试。"
     },
     "panel": {
+      "projectFolderRenameFailed": "未能更新项目文件夹位置。请打开 Collab 重试。",
       "title": "协作",
       "addProject": "添加项目",
       "createProject": "创建",
       "projectPicker": "选择项目",
-      "emptyDescription": "创建一个本地项目，或加入其他 Claudian 用户的项目。",
+      "emptyDescription": "创建项目，或加入已有项目。",
       "joinProject": "加入",
       "reconnectProject": "重新连接项目…",
       "joinUnavailable": "局域网协作完成后即可加入项目。",
       "openProject": "打开项目",
       "setupIncomplete": "项目 setup 尚未完成，已保存的 authority 不会丢失。",
+      "leaveRecovery": "退出此项目需要处理。已保存的清理选项不会丢失。",
+      "resumeLeave": "继续退出",
+      "leaveRecoveryFailed": "无法完成退出。请检查连接后重试。",
       "workingCopyMissing": "本地工作副本缺失，但已保存的项目没有被删除。",
+      "setupRecoveryUnavailable": "无法读取设置恢复信息，请刷新后重试。",
+      "restoreWorkingCopy": "恢复工作副本",
+      "restoreWorkingCopyFailed": "无法恢复工作副本，请重试。",
       "myChanges": "我的修改",
       "myChangesReady": "项目已就绪；修改发布将在下一个里程碑加入。",
       "membersAccess": "成员与权限",
@@ -162,6 +215,13 @@
       "title": "项目管理"
     },
     "access": {
+      "copyRecoveryLink": "恢复链接",
+      "recoveryLinkCopied": "已复制恢复链接。",
+      "activeInvitations": "有效邀请",
+      "loadingInvitations": "正在加载邀请…",
+      "noInvitations": "没有有效邀请。",
+      "members": "成员",
+      "memberCountSingle": "{count} 位成员",
       "memberCount": "{count} 位成员",
       "noMembers": "暂无成员。",
       "loading": "正在加载成员…",
@@ -169,14 +229,73 @@
       "retry": "重试",
       "invitations": "邀请",
       "createInvitation": "创建邀请",
+      "resumeInvitation": "继续邀请",
       "creatingInvitation": "正在创建邀请…",
       "invitation": "邀请字符串",
+      "copyInvitationId": "复制邀请 ID",
+      "invitationIdCopied": "已复制邀请 ID。",
       "copyInvitation": "复制邀请",
       "revokeInvitation": "撤销邀请",
       "invitationCopied": "邀请已复制。",
       "invitationRevoked": "邀请已撤销。",
+      "invitationExpiresIn": "此链接将在 {minutes} 分钟后过期。",
+      "invitationExpired": "此链接已过期。",
+      "invitationUnavailable": "此邀请已不可用。",
+      "createNewInvitation": "创建新邀请",
+      "invitationManagementPending": "请先在项目管理中完成待处理的操作。",
       "invitationFailed": "无法完成邀请操作。",
+      "invitationStatus": {
+        "active": "有效",
+        "redeeming": "使用中",
+        "redeemed": "已使用",
+        "revoked": "已撤销",
+        "expired": "已过期"
+      },
       "copyFailed": "无法复制邀请。",
+      "reissueMemberClaim": "重新签发成员身份凭据",
+      "revokeMemberClaim": "撤销成员身份凭据",
+      "memberClaim": "成员身份凭据",
+      "copyMemberClaim": "复制成员身份凭据",
+      "memberClaimReady": "新的成员身份凭据已就绪。",
+      "memberClaimCopied": "已复制成员身份凭据。",
+      "cloudHostingDescription": "通过 Cloud 服务器协作。",
+      "lanHostingDescription": "通过局域网中的 Host 协作。",
+      "leaveProjectDescription": "离开此项目。你可以选择保留本地文件。",
+      "retireProjectDescription": "结束此项目所有成员的协作。",
+      "hosting": "托管",
+      "moveToCloud": "迁移至 Cloud",
+      "moveToLan": "迁移至局域网",
+      "projectActions": "项目操作",
+      "cloudServerUrl": "Cloud 服务器 URL",
+      "cloudServerUrlPlaceholder": "http://server.example:8787",
+      "proposeLanToCloud": "请求迁移至 Cloud",
+      "lanToCloudProposal": "Cloud 目标：{url} · {phase}",
+      "acceptLanToCloud": "接受迁移至 Cloud",
+      "retryLanToCloud": "重试迁移至 Cloud",
+      "lanHost": "局域网 Host",
+      "thisDevice": "本机",
+      "anotherDevice": "另一台设备",
+      "prepareLanHelp": "准备在本机上通过局域网托管项目。",
+      "lanTargetReady": "本机已准备好接收项目。",
+      "otherLanTargetHelp": "在接收设备上打开“迁移到局域网”并申请托管，请求会显示在这里。",
+      "shareLanHandleHelp": "将此句柄发给目标设备，在目标设备上接受迁移。",
+      "prepareCloudToLan": "准备局域网目标",
+      "withdrawCloudToLan": "撤回目标",
+      "cloudToLanDescriptor": "局域网目标描述",
+      "cloudToLanHandle": "迁移句柄",
+      "beginCloudToLan": "开始迁移至局域网",
+      "acceptCloudToLan": "在此设备上接受迁移",
+      "observeTransfer": "刷新迁移状态",
+      "copyTransferData": "复制迁移数据",
+      "transferUpdated": "迁移状态已更新。",
+      "transferConnectionRequired": "继续此已保存的迁移前，需要连接兼容的服务器。",
+      "transferStatus": {
+        "pending": "待处理",
+        "active": "进行中",
+        "completed": "已完成",
+        "cancelled": "已取消"
+      },
+      "finishOperation": "结束已完成的操作",
       "manager": "Manager",
       "managerCount": "Manager：{count}",
       "host": "Host",
@@ -217,13 +336,18 @@
       "retireProject": "Retire project",
       "confirmRetire": "Retire this project for everyone?",
       "leaveCleanupWarning": "Choose what happens to this local copy. Git history and unpublished Git-only work cannot be recovered after cleanup.",
+      "offlineLeaveLan": "当前离线。你将在本地立即退出此 Project，退出请求会在此设备重新连接 Host 后同步。",
+      "offlineLeaveCloud": "当前离线。你将在本地立即退出此 Project，退出请求会在此设备重新连接服务器后同步。",
+      "immediateLocalDeletion": "本地文件将立即删除。",
       "retireWarning": "This ends collaboration for every Member. Visible files remain on each device, but collaboration history and Git-only work are not recoverable.",
-      "actionComplete": "权限已更新。"
+      "actionComplete": "权限已更新。",
+      "waitingCloudToLanApproval": "等待 Manager 批准，随后本设备会自动继续。",
+      "resumeCloudToLan": "继续",
+      "cloudToLanApproved": "已批准。接收设备会自动继续，也可以点击“继续”。"
     },
     "host": {
-      "summary": "局域网 Host",
-      "hostedHere": "托管于此设备",
-      "hostedElsewhere": "托管于另一台设备",
+      "hostedHereSummary": "局域网 Host（此设备）",
+      "hostedElsewhereSummary": "局域网 Host（另一台设备）",
       "legacyClaimConfirmation": "使用此设备作为 Host 所有者？",
       "legacyClaimAction": "使用此设备",
       "status": {
@@ -244,6 +368,19 @@
       "retry": "重试",
       "startFailed": "无法启动 Host，请查看诊断后重试。",
       "stopFailed": "无法正常停止 Host，请查看诊断后重试。"
+    },
+    "update": {
+      "reconnect": "请重新连接后继续。",
+      "finishPublish": "完成发布",
+      "action": "更新",
+      "updating": "正在更新…",
+      "reviewTitle": "审阅项目更新",
+      "failed": "更新失败，请重试",
+      "conflictTitle": "项目更新冲突",
+      "editAndContinue": "编辑项目文件，然后从项目侧栏继续更新。",
+      "reviewAction": "审阅",
+      "conflictAction": "冲突",
+      "resumeAction": "继续"
     },
     "publish": {
       "title": "我的修改",
@@ -335,6 +472,15 @@
       "save": "保存",
       "saving": "正在保存…",
       "saveFailed": "无法保存 Ticket。",
+      "contentChanged": "此 Ticket 在你编辑期间发生了变化。请先查看最新版本，再保存草稿。",
+      "latestVersion": "最新版本",
+      "keepMine": "保留我的版本",
+      "savedRefreshing": "已保存。正在刷新…",
+      "savedRefreshFailed": "已保存，但无法加载最新的 Ticket。",
+      "retryRefresh": "重试刷新",
+      "created": "Ticket 已创建。",
+      "openCreated": "打开 Ticket",
+      "useLatest": "使用最新版本",
       "close": "关闭",
       "reopen": "重新打开",
       "acceptedChanges": "已接受的改动",
@@ -452,7 +598,8 @@
     "titleModel": {
       "name": "标题生成模型",
       "desc": "用于自动生成对话标题的模型。",
-      "auto": "自动 (Haiku)"
+      "select": "选择模型",
+      "unavailableWarning": "自动标题已暂停。请选择一个可用的标题模型。"
     },
     "navMappings": {
       "name": "Vim 风格导航映射",
@@ -487,58 +634,10 @@
       "desc": "从下拉菜单中隐藏特定的命令与技能。适用于隐藏与 Claudian 无关的 Claude Code 条目。每行输入一个名称，无需前导斜杠。",
       "placeholder": "commit\nbuild\ntest"
     },
-    "mcpServers": {
-      "name": "MCP 服务器",
-      "descBeforeCommand": "Claude Code 通过自己的 CLI 管理 MCP 服务器。请使用 ",
-      "descAfterCommand": " 进行配置，它们会在 Claudian 中可用。",
-      "learnMore": "了解更多"
-    },
-    "plugins": {
-      "name": "Claude Code 插件",
-      "desc": "管理从 ~/.claude/plugins 发现的 Claude Code 插件。启用的插件按 Vault 存储在 .claude/settings.json 中。"
-    },
-    "subagents": {
-      "name": "子代理",
-      "desc": "管理存储在 .claude/agents/ 中的 Vault 级子代理。每个 Markdown 文件定义一个自定义代理。",
-      "noAgents": "尚未配置子代理。点击 + 创建一个。",
-      "deleteConfirm": "删除子代理“{name}”？",
-      "saveFailed": "保存子代理失败：{message}",
-      "refreshFailed": "刷新子代理失败：{message}",
-      "deleteFailed": "删除子代理失败：{message}",
-      "renameCleanupFailed": "警告：无法删除“{name}”的旧文件",
-      "created": "已创建子代理“{name}”",
-      "updated": "已更新子代理“{name}”",
-      "deleted": "已删除子代理“{name}”",
-      "duplicateName": "名为“{name}”的代理已存在",
-      "descriptionRequired": "描述为必填项",
-      "promptRequired": "系统提示词为必填项",
-      "modal": {
-        "titleEdit": "编辑子代理",
-        "titleAdd": "添加子代理",
-        "name": "名称",
-        "nameDesc": "仅允许小写字母、数字和连字符",
-        "namePlaceholder": "code-reviewer",
-        "description": "描述",
-        "descriptionDesc": "该代理的简要描述",
-        "descriptionPlaceholder": "审查代码中的错误和风格问题",
-        "advancedOptions": "高级选项",
-        "model": "模型",
-        "modelDesc": "该代理的模型覆盖",
-        "tools": "工具",
-        "toolsDesc": "允许使用的工具列表，用逗号分隔（留空 = 全部）",
-        "disallowedTools": "禁用工具",
-        "disallowedToolsDesc": "要禁用的工具列表，用逗号分隔",
-        "skills": "技能",
-        "skillsDesc": "技能列表，用逗号分隔",
-        "prompt": "系统提示词",
-        "promptDesc": "给代理的指令",
-        "promptPlaceholder": "你是一名代码审查员。请分析给定代码中的..."
-      }
-    },
     "safety": "安全",
     "loadUserSettings": {
       "name": "加载用户 Claude 设置",
-      "desc": "加载 ~/.claude/settings.json。启用后，用户的 Claude Code 权限规则可能绕过安全模式。"
+      "desc": "从 ~/.claude 加载用户级 Claude Code 配置：settings.json、技能、命令、智能体和插件。禁用时仅可使用仓库级配置。启用后，用户的权限规则可能绕过安全模式。"
     },
     "claudeSafeMode": {
       "name": "安全模式",
@@ -583,11 +682,6 @@
       "name": "自定义上下文限制",
       "desc": "为您的自定义模型设置上下文窗口大小。留空使用默认值（200k 令牌）。",
       "invalid": "格式无效。使用：256k、1m 或精确数量（1000-10000000）。"
-    },
-    "customModels": {
-      "name": "自定义模型",
-      "desc": "向选择器追加额外的 Claude 模型 ID，每行一个。环境中的模型覆盖仍会替换选择器。",
-      "placeholder": "claude-opus-4-6\nclaude-opus-4-5-20251101"
     },
     "enableChrome": {
       "name": "启用 Chrome 扩展",
@@ -664,6 +758,17 @@
       "leftSidebar": "左侧边栏",
       "mainTab": "主编辑器标签页"
     },
+    "cliInstallation": {
+      "disclosure": "{name} 安装",
+      "description": "此电脑的可选 CLI 路径。留空以自动检测。",
+      "checking": "正在检测 CLI…",
+      "versionUnavailable": "版本未知",
+      "notFound": "未找到",
+      "custom": "自定义路径",
+      "auto": "自动检测",
+      "checkFailed": "无法检测 CLI",
+      "saveFailed": "无法保存路径，请重试。"
+    },
     "cliPath": {
       "name": "Claude CLI 路径",
       "desc": "Claude Code CLI 的自定义路径。留空使用自动检测。",
@@ -683,6 +788,14 @@
       "desc": "让已启用的 {provider} 模型可用于新对话。禁用后，现有会话仍会保留。",
       "lastProviderWarning": "至少需要启用一个提供商，Claudian 才能正常工作。",
       "noModelsWarning": "未启用任何 {provider} 模型。请前往下方的“模型”部分并至少启用一个模型。"
+    },
+    "claude": {
+      "responseStyle": {
+        "name": "回复风格",
+        "desc": "默认使用 Claude 的常规风格。简洁模式先给出结果，省略开场白。需要 Claude Code 2.1.237 或更高版本。",
+        "default": "默认",
+        "concise": "简洁"
+      }
     },
     "codex": {
       "installationMethod": {
@@ -708,10 +821,11 @@
         "workspaceWrite": "工作区可写",
         "readOnly": "只读"
       },
-      "customModels": {
-        "name": "自定义模型",
-        "desc": "向选择器追加额外的 Codex 模型 ID，每行一个。设置 `OPENAI_MODEL` 时仍优先生效。",
-        "placeholder": "gpt-5.4\ngpt-5.3-codex-spark"
+      "responseStyle": {
+        "name": "回复风格",
+        "desc": "选择支持此功能的模型中 Codex 的沟通风格。从下一条消息开始生效。",
+        "pragmatic": "务实",
+        "friendly": "友好"
       },
       "reasoningSummary": {
         "name": "推理摘要",
@@ -732,94 +846,46 @@
         "hiddenDesc": "从下拉菜单中隐藏特定 Codex 技能。每行输入一个技能名称，不带前导 $。",
         "hiddenPlaceholder": "analyze\nexplain\nfix"
       },
-      "subagents": {
-        "name": "Codex 子代理",
-        "desc": "管理存储在 .codex/agents/ 中的 Vault 级 Codex 子代理。每个 TOML 文件定义一个自定义代理。"
-      },
-      "mcp": {
-        "descBeforeCommand": "Codex 通过自己的 CLI 管理 MCP 服务器。请使用 ",
-        "descAfterCommand": " 进行配置，它们会在 Claudian 中可用。",
-        "learnMore": "了解更多"
-      },
       "environment": {
         "name": "Codex 环境",
         "desc": "仅限 Codex 拥有的运行时变量。用于 OPENAI_* 和 CODEX_* 设置。如果 Codex 自动检测需要帮助，请把安装目录添加到共享 PATH，而不是此提供商环境。"
       }
     },
     "agentSkills": {
-      "sectionTitle": "Skills", "fixedRoot": "Managed in .agents/skills", "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.", "noSkills": "No shared skills configured. Click + to create one.", "skillBadge": "skill", "diagnosticsTitle": "Skills needing attention", "loadFailed": "Could not load shared skills.", "savedRefreshFailed": "Saved, but provider refresh failed.", "validationFailed": "Invalid skill: {message}", "collisionFailed": "A skill named \"{name}\" already exists.", "saveFailed": "Failed to save shared skill: {message}", "deleteFailed": "Failed to move shared skill to trash: {message}", "staleConflict": "This skill changed elsewhere; refresh before saving.", "created": "Shared skill \"{name}\" created.", "updated": "Shared skill \"{name}\" updated.", "deleted": "Shared skill \"{name}\" moved to trash.",
-      "modal": { "titleEdit": "Edit Shared Skill", "titleAdd": "Add Shared Skill", "name": "Skill name", "nameDesc": "Lowercase letters and numbers separated by single hyphens", "namePlaceholder": "code-reviewer", "description": "Description", "descriptionDesc": "Required portable description used by providers to select the skill", "descriptionPlaceholder": "Reviews code for correctness and maintainability", "instructions": "Instructions", "instructionsDesc": "Required SKILL.md instructions", "instructionsPlaceholder": "Review the supplied code and report actionable findings..." },
-      "delete": { "title": "Delete Shared Skill", "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.", "confirm": "Move to trash" }
-    },
-    "codexSkills": {
+      "sectionTitle": "Skills",
+      "fixedRoot": "Managed in .agents/skills",
+      "sharedExpectation": "Manage shared skills in .agents/skills/ for compatible providers.",
+      "noSkills": "No shared skills configured. Click + to create one.",
+      "skillBadge": "skill",
+      "diagnosticsTitle": "Skills needing attention",
+      "loadFailed": "Could not load shared skills.",
+      "savedRefreshFailed": "Saved, but provider refresh failed.",
+      "validationFailed": "Invalid skill: {message}",
+      "collisionFailed": "A skill named \"{name}\" already exists.",
+      "saveFailed": "Failed to save shared skill: {message}",
+      "deleteFailed": "Failed to move shared skill to trash: {message}",
+      "staleConflict": "This skill changed elsewhere; refresh before saving.",
+      "created": "Shared skill \"{name}\" created.",
+      "updated": "Shared skill \"{name}\" updated.",
+      "deleted": "Shared skill \"{name}\" moved to trash.",
       "modal": {
-        "titleEdit": "编辑 Codex 技能",
-        "titleAdd": "添加 Codex 技能",
-        "directory": "目录",
-        "directoryDesc": "技能的存储位置",
-        "skillName": "技能名称",
-        "skillNameDesc": "在 $ 后使用的名称（例如 $analyze 的名称为 “analyze”）",
-        "description": "描述",
-        "descriptionDesc": "下拉菜单中显示的可选描述",
-        "instructions": "指令",
-        "instructionsDesc": "技能指令（SKILL.md 内容）",
-        "instructionsPlaceholder": "Analyze the code for..."
+        "titleEdit": "Edit Shared Skill",
+        "titleAdd": "Add Shared Skill",
+        "name": "Skill name",
+        "nameDesc": "Lowercase letters and numbers separated by single hyphens",
+        "namePlaceholder": "code-reviewer",
+        "description": "Description",
+        "descriptionDesc": "Required portable description used by providers to select the skill",
+        "descriptionPlaceholder": "Reviews code for correctness and maintainability",
+        "instructions": "Instructions",
+        "instructionsDesc": "Required SKILL.md instructions",
+        "instructionsPlaceholder": "Review the supplied code and report actionable findings..."
       },
-      "instructionsRequired": "指令为必填项",
-      "saveFailed": "保存 Codex 技能失败",
-      "header": "Codex 技能",
-      "noSkills": "Vault 中没有 Codex 技能。点击 + 创建一个。",
-      "skillBadge": "技能",
-      "deleted": "已删除 Codex 技能“{name}”",
-      "deleteFailed": "删除 Codex 技能失败",
-      "created": "已创建 Codex 技能“{name}”",
-      "updated": "已更新 Codex 技能“{name}”"
-    },
-    "codexSubagents": {
-      "modal": {
-        "titleEdit": "编辑 Codex 子代理",
-        "titleAdd": "添加 Codex 子代理",
-        "nameDesc": "Codex 派生代理时使用的代理名称（小写、连字符、下划线）",
-        "descriptionDesc": "Codex 应在何时使用该代理",
-        "modelDesc": "模型覆盖（留空表示继承）",
-        "namePlaceholder": "code_reviewer"
-      },
-      "reasoningEffort": {
-        "name": "推理强度",
-        "desc": "模型推理强度级别",
-        "inherit": "继承",
-        "low": "低",
-        "medium": "中",
-        "high": "高",
-        "xhigh": "极高"
-      },
-      "sandboxMode": {
-        "name": "沙盒模式",
-        "desc": "该代理的沙盒限制",
-        "inherit": "继承",
-        "readOnly": "只读",
-        "dangerFullAccess": "完全访问",
-        "workspaceWrite": "工作区可写"
-      },
-      "nicknameCandidates": {
-        "name": "昵称候选",
-        "desc": "显示昵称，使用逗号分隔（例如 atlas, delta, echo）"
-      },
-      "developerInstructions": {
-        "name": "开发者指令",
-        "desc": "定义代理行为的核心指令",
-        "placeholder": "Review code like an owner.\nPrioritize correctness, security, and missing test coverage.",
-        "required": "开发者指令为必填项"
-      },
-      "validation": {
-        "nameRequired": "子代理名称为必填项",
-        "nameTooLong": "子代理名称必须不超过 {count} 个字符",
-        "nameInvalid": "子代理名称只能包含小写字母、数字、连字符和下划线",
-        "nicknameInvalid": "昵称候选只能包含 ASCII 字母、数字、空格、连字符和下划线",
-        "nicknameDuplicate": "昵称候选必须唯一"
-      },
-      "header": "Codex 子代理",
-      "noAgents": "Vault 中没有 Codex 子代理。点击 + 创建一个。"
+      "delete": {
+        "title": "Delete Shared Skill",
+        "description": "The entire skill folder, including scripts, references, and assets, will be moved to trash.",
+        "confirm": "Move to trash"
+      }
     }
   }
 }

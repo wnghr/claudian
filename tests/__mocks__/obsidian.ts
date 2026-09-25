@@ -43,9 +43,10 @@ export class PluginSettingTab {
 }
 
 export class ItemView {
-  app: any;
+  app: any = { workspace: { on: jest.fn(), offref: jest.fn() } };
   leaf: any;
   containerEl: any = {
+    isShown: () => true,
     children: [{}, { empty: jest.fn(), addClass: jest.fn(), createDiv: jest.fn().mockReturnValue({
       createEl: jest.fn().mockReturnValue({ addEventListener: jest.fn(), setAttribute: jest.fn() }),
       createDiv: jest.fn().mockReturnValue({ createEl: jest.fn().mockReturnValue({ addEventListener: jest.fn() }) }),
@@ -299,6 +300,8 @@ export const MarkdownRenderer = {
   ),
   renderMarkdown: renderMarkdownMock,
 };
+
+export const loadMermaid = jest.fn();
 
 export const loadPrism = jest.fn().mockResolvedValue({
   highlightElement: jest.fn(),

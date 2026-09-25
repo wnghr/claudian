@@ -1,8 +1,12 @@
 import { TextDecoder, TextEncoder } from 'node:util';
 
-import { toHaveNoViolations } from 'jest-axe';
+import type * as JestAxe from 'jest-axe';
 
-expect.extend(toHaveNoViolations);
+// Node-only suites do not need to load the accessibility engine.
+if (typeof document !== 'undefined') {
+  const { toHaveNoViolations } = jest.requireActual<typeof JestAxe>('jest-axe');
+  expect.extend(toHaveNoViolations);
+}
 
 type TestWindow = typeof globalThis & {
   cancelAnimationFrame?: (handle: number) => void;

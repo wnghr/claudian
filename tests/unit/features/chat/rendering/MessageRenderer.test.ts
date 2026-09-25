@@ -56,12 +56,12 @@ function createMockComponent() {
 function mockCapabilities(providerId: 'claude' | 'codex' | 'grok' = 'claude') {
   return () => ({
     providerId,
+    supportsEphemeralSessions: false,
     supportsNativeHistory: providerId === 'claude',
     supportsRewind: true,
     supportsFork: true,
     supportsProviderCommands: true,
     supportsImageAttachments: true,
-    supportsInstructionMode: true,
     reasoningControl: 'effort' as const,
   });
 }

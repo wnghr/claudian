@@ -7,6 +7,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -15,6 +16,7 @@ import {
   writeGitFixtureTree,
 } from '@test/helpers/collabGitObjects';
 
+import { rotateAuthorityTransferOrigin } from '@/app/collab/git/CollabGitOriginPolicy';
 import { GitCommandRunner } from '@/app/collab/git/GitCommandRunner';
 import {
   type GitRepositoryReadSession,
@@ -48,6 +50,143 @@ describe('GitRepositoryService integration', () => {
 
   afterEach(async () => {
     await rm(root, { force: true, recursive: true });
+  });
+
+  it.each([false, true])('restores a Cloud origin across skipped generations (same server: %s)', async sameServer => {
+    const repositoryPath = path.join(root, 'working');
+    await mkdir(repositoryPath);
+    await service.initializeWorkingRepository(repositoryPath);
+    const oldServerUrl = 'https://old.example.test/';
+    const newServerUrl = sameServer ? oldServerUrl : 'https://current.example.test/';
+    const oldRemoteUrl = oldServerUrl + 'v10/projects/project-a/repository.git';
+    const newRemoteUrl = newServerUrl + 'v10/projects/project-a/repository.git';
+    await service.addRemote(repositoryPath, 'origin', oldRemoteUrl);
+    await rotateAuthorityTransferOrigin(service, { repositoryPath, projectId: 'project-a', oldRemoteUrl, oldServerUrl, newRemoteUrl, newServerUrl });
+    expect(await service.listRemoteUrls(repositoryPath, 'origin')).toEqual([newRemoteUrl]);
+  });
+
+  it('recovers an interrupted origin write only from an explicitly retained binding', async () => {
+    const repositoryPath = path.join(root, 'working');
+    await mkdir(repositoryPath);
+    await service.initializeWorkingRepository(repositoryPath);
+    const oldServerUrl = 'https://old.example.test/';
+    const interruptedServerUrl = 'https://intermediate.example.test/';
+    const newServerUrl = 'https://current.example.test/';
+    const suffix = 'v10/projects/project-a/repository.git';
+    await service.addRemote(repositoryPath, 'origin', interruptedServerUrl + suffix);
+    const transition = { repositoryPath, projectId: 'project-a', oldServerUrl, newServerUrl,
+      oldRemoteUrl: oldServerUrl + suffix, newRemoteUrl: newServerUrl + suffix };
+    await expect(rotateAuthorityTransferOrigin(service, transition)).rejects.toMatchObject({ code: 'repository-invalid' });
+    await rotateAuthorityTransferOrigin(service, { ...transition,
+      retainedBindings: [{ serverUrl: interruptedServerUrl, remoteUrl: interruptedServerUrl + suffix }] });
+    expect(await service.listRemoteUrls(repositoryPath, 'origin')).toEqual([newServerUrl + suffix]);
+  });
+
+  it('recovers a retained LAN origin after the authenticated listener changed address', async () => {
+    const repositoryPath = path.join(root, 'working');
+    await mkdir(repositoryPath);
+    await service.initializeWorkingRepository(repositoryPath);
+    const oldServerUrl = 'https://old.example.test/';
+    const newServerUrl = 'https://current.example.test/';
+    const suffix = 'v10/projects/project-a/repository.git';
+    await service.addRemote(repositoryPath, 'origin', 'https://192.168.1.44:54546/v1/git/project-a/repository.git');
+    await rotateAuthorityTransferOrigin(service, { repositoryPath, projectId: 'project-a', oldServerUrl, newServerUrl,
+      oldRemoteUrl: oldServerUrl + suffix, newRemoteUrl: newServerUrl + suffix,
+      retainedBindings: [{ serverUrl: null, remoteUrl: 'https://192.168.1.20:54545/v1/git/project-a/repository.git' }] });
+    expect(await service.listRemoteUrls(repositoryPath, 'origin')).toEqual([newServerUrl + suffix]);
+  });
+
+  it('retains parallel read operations until every cancelled native child settles', async () => {
+    const repositoryPath = path.join(root, 'working');
+    await mkdir(repositoryPath);
+    await service.initializeWorkingRepository(repositoryPath);
+    const script = path.join(root, 'delayed-git.cjs');
+    await writeFile(script, '#!/usr/bin/env node\n' + [
+      "const fs = require('node:fs');",
+      "const command = process.argv[2];",
+      "if (command === 'status' || command === 'cat-file') {",
+      "  if (command === 'status') process.on('SIGTERM', () => setTimeout(() => process.exit(0), 700));",
+      `  fs.writeFileSync(require('node:path').join(${JSON.stringify(root)}, command + '.started'), 'ready');`,
+      "  setTimeout(() => process.exit(0), 10000);",
+      "} else {",
+      `  const result = require('node:child_process').spawnSync(${JSON.stringify(gitExecutablePath)}, process.argv.slice(2), { stdio: 'inherit' });`,
+      "  process.exit(result.status ?? 1);",
+      "}",
+    ].join('\n'), { mode: 0o700 });
+    let shim = script;
+    if (process.platform === 'win32') {
+      shim = path.join(root, 'delayed-git.cmd');
+      await writeFile(shim, `@"${process.execPath}" "${script}" %*\r\n`);
+    }
+    const delayedRunner = new GitCommandRunner({
+      emptyConfigPath: path.join(root, 'empty.gitconfig'), executablePath: shim,
+    });
+    const delayedGit = new GitRepositoryService(delayedRunner);
+    const controller = new AbortController();
+    let operations: readonly Promise<unknown>[] = [];
+    const result = delayedGit.withReadSession(repositoryPath, 'working', async session => {
+      operations = [session.resolveRefs(['HEAD']), session.getWorkingTreeStatus()];
+      return Promise.all(operations);
+    }, controller.signal).then(
+      () => ({ code: 'success', activeProcesses: delayedRunner.activeProcessCount }),
+      error => ({ code: error.code, activeProcesses: delayedRunner.activeProcessCount }),
+    );
+    try {
+      const deadline = Date.now() + 5000;
+      for (const command of ['cat-file', 'status']) {
+        const marker = path.join(root, command + '.started');
+        while (Date.now() < deadline) {
+          try { await access(marker); break; }
+          catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+        }
+        await access(marker);
+      }
+      controller.abort();
+      expect(await result).toEqual({ code: 'cancelled', activeProcesses: 0 });
+    } finally {
+      controller.abort();
+      await result;
+      await Promise.allSettled(operations);
+    }
+  });
+
+  it('rejects an initial Git HTTP redirect without contacting its destination', async () => {
+    let destinationRequests = 0;
+    let sourceRequests = 0;
+    const destination = createServer((_request, response) => {
+      destinationRequests++;
+      response.writeHead(404).end();
+    });
+    await new Promise<void>(resolve => destination.listen(0, '127.0.0.1', resolve));
+    const destinationAddress = destination.address();
+    if (!destinationAddress || typeof destinationAddress === 'string') throw new Error('Missing destination address');
+    const source = createServer((request, response) => {
+      sourceRequests++;
+      response.writeHead(302, { location: `http://127.0.0.1:${destinationAddress.port}${request.url}` }).end();
+    });
+    await new Promise<void>(resolve => source.listen(0, '127.0.0.1', resolve));
+    const sourceAddress = source.address();
+    if (!sourceAddress || typeof sourceAddress === 'string') throw new Error('Missing source address');
+    try {
+      await expect(service.cloneRepository({
+        branch: 'main', directoryName: 'redirect-copy', parentDirectory: root,
+        network: { headers: [] }, remoteUrl: `http://127.0.0.1:${sourceAddress.port}/repository.git`,
+      })).rejects.toBeDefined();
+      expect(sourceRequests).toBeGreaterThan(0);
+      expect(destinationRequests).toBe(0);
+    } finally {
+      source.closeAllConnections(); destination.closeAllConnections();
+      await Promise.all([new Promise<void>(resolve => source.close(() => resolve())), new Promise<void>(resolve => destination.close(() => resolve()))]);
+    }
+  });
+
+  it('retains a non-loopback HTTP Cloud remote and deployment prefix without upgrading the scheme', async () => {
+    const repositoryPath = path.join(root, 'working');
+    await mkdir(repositoryPath);
+    await service.initializeWorkingRepository(repositoryPath);
+    const remoteUrl = 'http://192.0.2.25:8080/operator/cloud/v10/projects/project-alpha/repository.git';
+    await service.addRemote(repositoryPath, 'origin', remoteUrl);
+    expect(await service.listRemoteUrls(repositoryPath, 'origin')).toEqual([remoteUrl]);
   });
 
   it('creates commits, parses status, reads objects and diffs, and preserves refs', async () => {
@@ -302,6 +441,47 @@ describe('GitRepositoryService integration', () => {
       .resolves.toBe(baseCommit);
     await expect(service.countDivergence(repositoryPath, acceptedCommit, memberCommit))
       .resolves.toEqual({ leftOnly: 1, rightOnly: 1 });
+  });
+
+  it('installs a bundle whose packed-object paths exceed the Windows legacy limit', async () => {
+    const sourcePath = path.join(root, 'source');
+    await mkdir(sourcePath);
+    await service.initializeWorkingRepository(sourcePath);
+    await service.configureLocalRepository(sourcePath, {
+      memberId: 'member-host',
+      personalRef: 'refs/heads/members/member-host',
+      projectId: 'project-host',
+      userDisplayName: 'Host',
+    });
+    const contents = 'Content retained across a long-path authority installation\n';
+    await writeFile(path.join(sourcePath, 'content.md'), contents);
+    await service.stageAll(sourcePath);
+    const mainOid = await service.createCommitFromIndex(sourcePath, {
+      expectedRefOid: null,
+      message: 'Initial project',
+      parents: [],
+      ref: 'refs/heads/main',
+    });
+    const bundlePath = path.join(root, 'authority.bundle');
+    await runner.run({ args: ['bundle', 'create', bundlePath, 'refs/heads/main'], cwd: sourcePath });
+    // Git for Windows caps GIT_DIR at MAX_PATH - 40; only packed-object paths should overflow.
+    const repositoryName = '.repository-00000000-0000-4000-8000-000000000001.tmp';
+    const parentName = 'authority-'.padEnd(210 - root.length - repositoryName.length - 2, 'x');
+    const parentPath = path.join(root, parentName);
+    await mkdir(parentPath);
+    const repositoryPath = path.join(parentPath, repositoryName);
+    const clone = await runner.run({
+      acceptedExitCodes: [0, 128],
+      args: ['clone', '--bare', '--no-local', bundlePath, repositoryPath],
+      cwd: parentPath,
+      suppressHooks: true,
+    });
+
+    if (clone.exitCode !== 0) throw new Error(`Bundle installation failed: ${clone.stderr}`);
+    await service.assertHealthy(repositoryPath);
+    expect(await service.resolveRef(repositoryPath, 'refs/heads/main')).toBe(mainOid);
+    const restored = await runner.run({ args: ['show', 'refs/heads/main:content.md'], cwd: repositoryPath });
+    expect(restored.stdout.toString('utf8')).toBe(contents);
   });
 
   it('initializes a bare authority, installs an executable hook, and clones refs', async () => {

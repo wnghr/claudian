@@ -18,17 +18,9 @@ function getHomeDir(): string {
   return process.env.HOME || process.env.USERPROFILE || '';
 }
 
-// Linux excluded: Obsidian registers the CLI through stable symlinks (/usr/local/bin,
-// ~/.local/bin), while process.execPath may point to a transient AppImage mount.
+// Windows ships Obsidian.com beside the app. Unix uses registered CLI locations;
+// adding the macOS app directory can select the GUI executable as `obsidian`.
 function getAppProvidedCliPaths(): string[] {
-  if (process.platform === 'darwin') {
-    const appBundleMatch = process.execPath.match(/^(.+?\.app)\//);
-    if (appBundleMatch) {
-      return [path.join(appBundleMatch[1], 'Contents', 'MacOS')];
-    }
-    return [path.dirname(process.execPath)];
-  }
-
   if (process.platform === 'win32') {
     return [path.dirname(process.execPath)];
   }
@@ -259,19 +251,6 @@ export function cliPathRequiresNode(cliPath: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function getMissingNodeError(cliPath: string, enhancedPath?: string): string | null {
-  if (!cliPathRequiresNode(cliPath)) {
-    return null;
-  }
-
-  const nodePath = findNodeExecutable(enhancedPath);
-  if (nodePath) {
-    return null;
-  }
-
-  return 'Claude Code CLI requires Node.js, but Node was not found on PATH. Install Node.js or use the native Claude Code binary, then restart Obsidian.';
 }
 
 export function getEnhancedPath(additionalPaths?: string, cliPath?: string): string {

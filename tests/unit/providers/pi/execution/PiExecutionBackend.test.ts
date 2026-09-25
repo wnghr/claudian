@@ -15,7 +15,7 @@ import {
   isSteerableExecutionSession,
   ProviderExecutionLifecycleRegistry,
 } from '@/core/execution';
-import type { Conversation } from '@/core/types';
+import type { ChatMessage, Conversation } from '@/core/types';
 import { createPiWorkspaceServices } from '@/providers/pi/app/PiWorkspaceServices';
 import {
   PiCommandMetadataProbe,
@@ -280,6 +280,78 @@ function createHarness(
 }
 
 describe('PiExecutionBackend', () => {
+  it('rejects an unavailable selected model before native startup with a configuration error', async () => {
+    const { host, session, kernels } = createHarness();
+    host.settings.providerConfigs.pi.visibleModels = [];
+    const events = await collect(session.execute(createRequest()).events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error', category: 'configuration' }));
+    expect(events.some(event => event.type === 'turn_started' && event.accepted)).toBe(false);
+    expect(kernels).toEqual([]);
+    await session.dispose();
+  });
+
+  it('publishes the same native turn statistics live and after reload', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-throughput-'));
+    const sessionFile = path.join(tempDir, 'session.jsonl');
+    const content = [
+      { type: 'session', version: 3, id: 'pi-session-1', cwd: tempDir },
+      { type: 'message', id: 'u', parentId: null, timestamp: '2026-09-20T11:00:00Z', message: { role: 'user', content: 'Work' } },
+      { type: 'message', id: 'a', parentId: 'u', timestamp: '2026-09-20T11:00:02.500Z',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop', usage: { output: 125 } } },
+    ].map(record => JSON.stringify(record)).join('\n');
+    const harness = createHarness(createConfig({ vaultWorkingDirectory: tempDir }));
+    harness.responses.set('get_state', { sessionId: 'pi-session-1', sessionFile });
+    try {
+      const eventsPromise = collect(harness.session.execute(createRequest()).events);
+      await waitFor(() => harness.kernels[0]?.requests.some(r => r.type === 'prompt') ?? false);
+      await fs.writeFile(sessionFile, content);
+      harness.kernels[0].emit({ type: 'agent_start' });
+      harness.kernels[0].emit({ type: 'agent_end' });
+      expect((await eventsPromise).at(-1)).toMatchObject({ type: 'turn_completed',
+        turnStats: { outputTokens: 125, durationMs: 2500 } });
+    } finally {
+      await harness.session.dispose();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([true, false])('advances the Pi assistant checkpoint (stored leaf: %s)', async storedLeaf => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-review-'));
+    const sessionFile = path.join(tempDir, 'session.jsonl');
+    const records = [
+      { type: 'session', version: 3, id: 'pi-session-1', cwd: tempDir },
+      { type: 'message', id: 'user-1', parentId: null, message: { role: 'user', content: 'First' } },
+      { type: 'message', id: 'assistant-1', parentId: 'user-1', message: { role: 'assistant', content: 'First answer' } },
+    ];
+    await fs.writeFile(sessionFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+    const harness = createHarness(createConfig({
+      vaultWorkingDirectory: tempDir,
+      resumeSeed: { providerSessionId: 'pi-session-1', providerState: {
+        sessionId: 'pi-session-1', sessionFile, ...(storedLeaf ? { leafEntryId: 'assistant-1' } : {}),
+      } },
+    }));
+    // Pi's documented get_state has sessionId/sessionFile, but no leafEntryId.
+    harness.responses.set('get_state', { sessionId: 'pi-session-1', sessionFile });
+    try {
+      const eventsPromise = collect(harness.session.execute(createRequest()).events);
+      await waitFor(() => harness.kernels[0]?.requests.some(r => r.type === 'prompt') ?? false);
+      await fs.appendFile(sessionFile, [
+        { type: 'message', id: 'user-2', parentId: 'assistant-1', message: { role: 'user', content: 'Second' } },
+        { type: 'message', id: 'assistant-2', parentId: 'user-2', message: { role: 'assistant', content: 'Second answer' } },
+      ].map(r => JSON.stringify(r)).join('\n') + '\n');
+      harness.kernels[0].emit({ type: 'agent_start' });
+      harness.kernels[0].emit({ type: 'agent_end' });
+      const events = await eventsPromise;
+      expect(events.at(-1)).toMatchObject({
+        type: 'turn_completed', nativeAssistantId: 'assistant-2', nativeCheckpointId: 'assistant-2',
+      });
+      expect(harness.session.getSnapshot().providerState).toMatchObject({ leafEntryId: 'assistant-2' });
+    } finally {
+      await harness.session.dispose();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('uses an isolated no-session kernel for command metadata probes', async () => {
     const responses = new Map<string, unknown>([
       ['get_commands', {
@@ -1495,14 +1567,18 @@ describe('PiExecutionBackend', () => {
       },
     }));
 
-    const conversationHistory = createConversationHistory('ephemeral prior');
+    const conversationHistory: ChatMessage[] = createConversationHistory('ephemeral prior');
+    conversationHistory[0].images = [{
+      id: 'captured', name: 'captured.png', data: 'aW1hZ2U=',
+      mediaType: 'image/png', source: 'paste', size: 5,
+    }];
     for (const text of ['First', 'Clarification']) {
       const run = harness.session.execute(createRequest({
         conversationHistory,
         input: [{ text, type: 'text' }],
       }));
       const eventsPromise = collect(run.events);
-      await waitFor(() => harness.kernels.length === 1);
+      await waitFor(() => harness.kernels[0]?.requests.some(request => request.type === 'prompt' && String(request.payload.message).includes(text)) ?? false);
       completeTurn(harness.kernels[0]);
       await eventsPromise;
     }
@@ -1526,6 +1602,10 @@ describe('PiExecutionBackend', () => {
       'forkSourceSessionFile',
     ]);
     expect(Object.isFrozen(snapshot.providerStateDeletes)).toBe(true);
+    harness.kernels[0].close();
+    const ended = await collect(harness.session.execute(createRequest({ conversationHistory })).events);
+    expect(ended.at(-1)).toMatchObject({ type: 'execution_error', message: expect.stringContaining('cannot be restored') });
+    expect(harness.kernels).toHaveLength(1);
   });
 
   it.each([
@@ -1601,6 +1681,31 @@ describe('PiExecutionBackend', () => {
       },
       type: 'set_model',
     });
+  });
+
+  it('rejects a model removed during asynchronous preparation before native input', async () => {
+    const harness = createHarness(createConfig(), () => {
+      harness.host.settings.providerConfigs.pi.visibleModels = [];
+    });
+    const events = await collect(harness.session.execute(createRequest()).events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error', category: 'configuration' }));
+    expect(events.some(event => event.type === 'turn_started' && event.accepted)).toBe(false);
+    expect(harness.kernels[0].requests.some(request => request.type === 'prompt')).toBe(false);
+    await harness.session.dispose();
+  });
+
+  it('rejects steering after the active model is deselected', async () => {
+    const harness = createHarness();
+    const session = harness.session;
+    if (!isSteerableExecutionSession(session)) throw new Error('Pi must expose steering');
+    const events = collect(session.execute(createRequest()).events);
+    await flush();
+    harness.host.settings.providerConfigs.pi.visibleModels = [];
+    await expect(session.steer(createRequest())).resolves.toBe(false);
+    expect(harness.kernels[0].requests.some(request => request.type === 'steer')).toBe(false);
+    harness.kernels[0].emit({ type: 'agent_end' });
+    await events;
+    await session.dispose();
   });
 
   it('supports native steer with prompt images', async () => {
@@ -2343,7 +2448,7 @@ describe('PiExecutionBackend', () => {
     expect(forkFile).not.toBe(sourceFile);
     expect(path.dirname(forkFile)).toBe(tempDir);
     expect(await fs.readFile(forkFile, 'utf8')).toContain(
-      `"parentSession":"${sourceFile}"`,
+      `"parentSession":${JSON.stringify(sourceFile)}`,
     );
     const snapshot = harness.session.getSnapshot();
     expect(snapshot.providerState).toMatchObject({

@@ -267,11 +267,11 @@ function migrateCurrentDeviceProviderConfigKeys(
   return { changed, providerConfigs };
 }
 
-function projectPersistableProviderConfigs(value: unknown): {
+function normalizeLoadedProviderConfigs(settings: Record<string, unknown>): {
   changed: boolean;
   providerConfigs: ProviderConfigMap;
 } {
-  const providerConfigs = normalizeProviderConfigs(value);
+  const providerConfigs = normalizeProviderConfigs(settings.providerConfigs);
   let changed = false;
 
   for (const { adapter, providerId } of getProviderSettingsAdapters()) {
@@ -279,6 +279,11 @@ function projectPersistableProviderConfigs(value: unknown): {
     const config = providerConfigs[providerId];
     if (!config) {
       continue;
+    }
+
+    const projected = adapter.projectPersistedConfig?.(settings);
+    if (projected) {
+      changed = JSON.stringify(projected) !== JSON.stringify(config) || changed;
     }
 
     for (const field of fields) {
@@ -290,6 +295,18 @@ function projectPersistableProviderConfigs(value: unknown): {
   }
 
   return { changed, providerConfigs };
+}
+
+function projectPersistableProviderConfigs(settings: Record<string, unknown>): ProviderConfigMap {
+  const providerConfigs = normalizeProviderConfigs(settings.providerConfigs);
+  for (const { adapter, providerId } of getProviderSettingsAdapters()) {
+    const config = providerConfigs[providerId];
+    if (!config) continue;
+    const persisted = adapter.projectPersistedConfig?.(settings) ?? config;
+    for (const field of adapter.runtimeOnlyFields ?? []) delete persisted[field];
+    providerConfigs[providerId] = persisted;
+  }
+  return providerConfigs;
 }
 
 function hasHostScopedProviderConfigNormalization(
@@ -477,9 +494,9 @@ export class ClaudianSettingsStorage {
   constructor(private adapter: VaultFileAdapter) {}
 
   async load(): Promise<StoredClaudianSettings> {
-    const settingsPath = await this.getLoadPath();
+    const settingsPath = await this.#getLoadPath();
     if (!settingsPath) {
-      return this.getDefaults();
+      return this.#getDefaults();
     }
 
     const content = await this.adapter.read(settingsPath);
@@ -498,11 +515,10 @@ export class ClaudianSettingsStorage {
       stored.hiddenSlashCommands,
     );
     const envSnippets = normalizeEnvSnippets(stored.envSnippets);
-    const customModelAliases = normalizeModelAliases(stored.customModelAliases);
     const {
       changed: didStripRuntimeProviderConfig,
       providerConfigs: projectedProviderConfigs,
-    } = projectPersistableProviderConfigs(stored.providerConfigs);
+    } = normalizeLoadedProviderConfigs(stored);
     const {
       changed: didMigrateCurrentDeviceProviderConfigs,
       providerConfigs,
@@ -547,7 +563,6 @@ export class ClaudianSettingsStorage {
       ...storedWithoutLegacy,
       sharedEnvironmentVariables: getSharedEnvironmentVariables(legacyProviderSettings),
       envSnippets,
-      customModelAliases,
       hiddenProviderCommands,
       providerConfigs,
       chatViewPlacement,
@@ -566,7 +581,7 @@ export class ClaudianSettingsStorage {
     };
 
     const merged = {
-      ...this.getDefaults(),
+      ...this.#getDefaults(),
       ...legacyNormalized,
     };
 
@@ -629,10 +644,6 @@ export class ClaudianSettingsStorage {
           !== JSON.stringify(pinnedLinkedContentPaths)
       )
       || JSON.stringify(envSnippets) !== JSON.stringify(stored.envSnippets ?? [])
-      || (
-        'customModelAliases' in stored
-        && JSON.stringify(customModelAliases) !== JSON.stringify(stored.customModelAliases ?? {})
-      )
       || didNormalizeProviderSettings
       || didStripRuntimeProviderConfig
       || didMigrateCurrentDeviceProviderConfigs
@@ -647,7 +658,7 @@ export class ClaudianSettingsStorage {
   }
 
   async save(settings: StoredClaudianSettings): Promise<void> {
-    const { providerConfigs } = projectPersistableProviderConfigs(settings.providerConfigs);
+    const providerConfigs = projectPersistableProviderConfigs(settings);
     const content = JSON.stringify(
       stripLegacyFields({
         ...settings,
@@ -663,7 +674,7 @@ export class ClaudianSettingsStorage {
       2,
     );
     await this.adapter.write(CLAUDIAN_SETTINGS_PATH, content);
-    await this.deleteLegacyFileIfPresent();
+    await this.#deleteLegacyFileIfPresent();
   }
 
   async exists(): Promise<boolean> {
@@ -679,11 +690,11 @@ export class ClaudianSettingsStorage {
     await this.save({ ...current, ...updates });
   }
 
-  private getDefaults(): StoredClaudianSettings {
+  #getDefaults(): StoredClaudianSettings {
     return DEFAULT_CLAUDIAN_SETTINGS;
   }
 
-  private async getLoadPath(): Promise<string | null> {
+  async #getLoadPath(): Promise<string | null> {
     if (await this.adapter.exists(CLAUDIAN_SETTINGS_PATH)) {
       return CLAUDIAN_SETTINGS_PATH;
     }
@@ -695,7 +706,7 @@ export class ClaudianSettingsStorage {
     return null;
   }
 
-  private async deleteLegacyFileIfPresent(): Promise<void> {
+  async #deleteLegacyFileIfPresent(): Promise<void> {
     if (await this.adapter.exists(LEGACY_CLAUDIAN_SETTINGS_PATH)) {
       await this.adapter.delete(LEGACY_CLAUDIAN_SETTINGS_PATH);
     }

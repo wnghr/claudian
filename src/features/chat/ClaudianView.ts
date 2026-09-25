@@ -10,10 +10,6 @@ import {
 } from '../../core/bootstrap/tabManagerState';
 import { StartupProfiler } from '../../core/performance/StartupProfiler';
 import { getHiddenProviderCommandSet } from '../../core/providers/commands/hiddenCommands';
-import {
-  getProviderSettingsSnapshotWithModel,
-  resolveConversationModel,
-} from '../../core/providers/conversationModel';
 import { ProviderRegistry } from '../../core/providers/ProviderRegistry';
 import { type AppTabManagerState, DEFAULT_CHAT_PROVIDER_ID, type ProviderId } from '../../core/providers/types';
 import { type ConversationMeta, VIEW_TYPE_CLAUDIAN } from '../../core/types';
@@ -29,22 +25,25 @@ import type {
   FeatureTabManagerHost,
   TabWorkspaceStateDeliveryRegistration,
 } from '../FeatureHost';
-import type { HistoryConversationStatus } from './controllers/ConversationController';
 import { MentionCacheCoordinator } from './services/MentionCacheCoordinator';
 import { TabStatePersistenceCoordinator } from './services/TabStatePersistenceCoordinator';
 import { getObsidianLanguage } from './session-manager/ProvisionalNoteNames';
+import { type HistoryConversationStatus, SessionBrowser } from './session-manager/SessionBrowser';
 import { renderSessionGroupToggleIcon } from './session-manager/SessionManagerIcons';
 import { getTabProviderId } from './tabs/providerResolution';
 import { TabBar } from './tabs/TabBar';
-import { sendTabInputMessageFromExplicitEnterShortcut } from './tabs/TabInputEvents';
+import {
+  cancelSelectedDestinationTurn,
+  sendTabInputMessageFromExplicitEnterShortcut,
+} from './tabs/TabInputEvents';
 import { commitProvisionalTab } from './tabs/TabLifecycle';
 import { TabManager } from './tabs/TabManager';
+import { refreshTabContextUsage } from './tabs/TabProviderState';
 import type { AssembledTabRuntime, TabId } from './tabs/types';
 import {
   HorizontalPanelPager,
   type HorizontalPanelPagerPanel,
 } from './ui/HorizontalPanelPager';
-import { recalculateUsageForModel } from './utils/usageInfo';
 
 type LoadableView = {
   containerEl?: HTMLElement;
@@ -76,6 +75,8 @@ export class ClaudianView extends ItemView {
   private tabContentEl: HTMLElement | null = null;
   private navRowContent: HTMLElement | null = null;
   private inputFooterEl: HTMLElement | null = null;
+  private sideChatChipHostEl: HTMLElement | null = null;
+  private sideChatChipController: AssembledTabRuntime['controllers']['sideChatController'] | null = null;
   private inputNavRowHostEl: HTMLElement | null = null;
   private activeInputSlotEl: HTMLElement | null = null;
   private activeInputTabId: TabId | null = null;
@@ -142,10 +143,21 @@ export class ClaudianView extends ItemView {
   private shutdownSnapshotPromise: Promise<void> | null = null;
   private viewLifecycleRevision = 0;
   private viewShutdownStarted = false;
+  private sessionBrowser: SessionBrowser;
 
   constructor(leaf: WorkspaceLeaf, plugin: FeatureHost) {
     super(leaf);
     this.plugin = plugin;
+    this.sessionBrowser = new SessionBrowser({
+      plugin,
+      getCurrentConversationId: () => this.tabManager?.getActiveTab()?.state.currentConversationId ?? null,
+      isStreaming: () => this.tabManager?.getActiveTab()?.state.isStreaming ?? false,
+      reloadActiveConversation: async () => {
+        await this.tabManager?.getActiveTab()?.controllers.conversationController.loadActive();
+      },
+      getTitleGenerationService: () => this.tabManager?.getActiveTab()?.services.titleGenerationService ?? null,
+      onListChanged: () => this.updateHistoryDropdown(),
+    });
 
     // Hover Editor compatibility: Define load as an instance method that can't be
     // overwritten by prototype patching. Hover Editor patches ClaudianView.prototype.load
@@ -241,30 +253,7 @@ export class ClaudianView extends ItemView {
       ) {
         continue;
       }
-      const conversation = tab.conversationId
-        ? this.plugin.getConversationSync(tab.conversationId)
-        : null;
-      const modelOverride = conversation
-        ? resolveConversationModel(this.plugin.settings, providerId, conversation).model
-        : tab.conversationId === null
-        ? tab.draftModel
-        : null;
-      const providerSettings = getProviderSettingsSnapshotWithModel(
-        this.plugin.settings,
-        providerId,
-        modelOverride,
-      );
-      const model = providerSettings.model;
-      const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
-      const contextWindow = uiConfig.getContextWindowSize(
-        model,
-        providerSettings.customContextLimits,
-        providerSettings,
-      );
-
-      if (tab.state.usage) {
-        tab.state.usage = recalculateUsageForModel(tab.state.usage, model, contextWindow);
-      }
+      refreshTabContextUsage(tab, this.plugin);
 
       tab.ui.modelSelector.updateDisplay();
       tab.ui.modelSelector.renderOptions();
@@ -291,8 +280,11 @@ export class ClaudianView extends ItemView {
   /** Updates provider-scoped hidden commands on all tabs after settings changes. */
   updateHiddenProviderCommands(): void {
     for (const tab of this.tabManager?.getAllTabs() ?? []) {
+      const providerId = getTabProviderId(tab, this.plugin);
       tab.ui.composerDropdown.setHiddenCommands(
-        getHiddenProviderCommandSet(this.plugin.settings, getTabProviderId(tab, this.plugin)),
+        providerId
+          ? getHiddenProviderCommandSet(this.plugin.settings, providerId)
+          : new Set(),
       );
     }
   }
@@ -483,6 +475,7 @@ export class ClaudianView extends ItemView {
 
   async onClose() {
     this.viewShutdownStarted = true;
+    this.sessionBrowser.dispose();
     const lifecycleRevision = (this.viewLifecycleRevision ?? 0) + 1;
     this.viewLifecycleRevision = lifecycleRevision;
     const tabManager = this.tabManager;
@@ -799,6 +792,7 @@ export class ClaudianView extends ItemView {
   refreshMessageTimestamps(): void {
     for (const tab of this.tabManager?.getAllTabs() ?? []) {
       tab.renderer.refreshMessageTimestamps();
+      tab.controllers.sideChatController.runtime?.renderer.refreshMessageTimestamps();
     }
   }
 
@@ -834,6 +828,7 @@ export class ClaudianView extends ItemView {
     if (!this.chatPanelEl) return;
 
     this.inputFooterEl = this.chatPanelEl.createDiv({ cls: 'claudian-input-footer' });
+    this.sideChatChipHostEl = this.inputFooterEl.createDiv({ cls: 'claudian-side-chat-chip-slot' });
     this.inputNavRowHostEl = this.inputFooterEl.createDiv({
       cls: 'claudian-input-nav-row claudian-view-input-nav-row',
     });
@@ -851,6 +846,7 @@ export class ClaudianView extends ItemView {
   private updateInputLocation(): void {
     const activeTab = this.tabManager?.getActiveTab();
     if (!this.activeInputSlotEl) return;
+    this.updateSideChatChipLocation();
 
     if (!activeTab) {
       this.activeInputSlotEl.empty();
@@ -878,6 +874,8 @@ export class ClaudianView extends ItemView {
   }
 
   private restoreActiveInputToTabContent(): void {
+    this.sideChatChipController?.setCollapsedHost(null);
+    this.sideChatChipController = null;
     if (!this.activeInputTabId) return;
 
     const activeInputTab = this.tabManager?.getTab(this.activeInputTabId);
@@ -949,6 +947,7 @@ export class ClaudianView extends ItemView {
     const showTabBar = tabCount >= 2;
 
     this.tabBarContainerEl.toggleClass('claudian-hidden', !showTabBar);
+    this.updateSideChatChipLocation();
 
     this.updateNewTabButtonVisibility();
   }
@@ -983,7 +982,8 @@ export class ClaudianView extends ItemView {
     if (!this.viewContainerEl) return;
     const activeTab = this.tabManager?.getActiveTab();
     const providerId = activeTab ? getTabProviderId(activeTab, this.plugin) : DEFAULT_CHAT_PROVIDER_ID;
-    this.viewContainerEl.dataset.provider = providerId;
+    if (providerId) this.viewContainerEl.dataset.provider = providerId;
+    else delete this.viewContainerEl.dataset.provider;
   }
 
   // ============================================
@@ -1133,15 +1133,8 @@ export class ClaudianView extends ItemView {
     signal: AbortSignal,
     navigationMode: 'history' | 'sessions' = 'history',
   ): void {
-    const activeTab = this.tabManager?.getActiveTab();
-    const conversationController = activeTab?.controllers.conversationController;
-    if (!conversationController) {
-      container.empty();
-      return;
-    }
-
     const isArchiveView = this.isArchiveSessionView;
-    conversationController.renderHistoryDropdown(container, {
+    this.sessionBrowser.renderHistoryDropdown(container, {
       onSelectConversation: (id) => navigationMode === 'sessions'
         ? this.openSessionConversation(id)
         : this.openHistoryConversation(id),
@@ -1552,7 +1545,23 @@ export class ClaudianView extends ItemView {
     return surfaces;
   }
 
+  private updateSideChatChipLocation(): void {
+    if (!this.sideChatChipHostEl) return;
+    if (this.navRowContent && this.inputFooterEl && this.inputNavRowHostEl) {
+      const useNavRow = !this.isWideSessionLayout && this.tabManager?.getTabCount() === 1;
+      const parent = useNavRow ? this.navRowContent : this.inputFooterEl;
+      if (this.sideChatChipHostEl.parentElement !== parent) {
+        parent.insertBefore(this.sideChatChipHostEl, useNavRow ? parent.firstChild : this.inputNavRowHostEl);
+      }
+    }
+    const controller = this.tabManager?.getActiveTab()?.controllers?.sideChatController ?? null;
+    if (this.sideChatChipController !== controller) this.sideChatChipController?.setCollapsedHost(null);
+    this.sideChatChipController = controller;
+    controller?.setCollapsedHost(this.isWideSessionLayout ? null : this.sideChatChipHostEl);
+  }
+
   private updateSidebarSurfaceVisibility(): void {
+    this.updateSideChatChipLocation();
     const collabEnabled = Boolean(
       this.plugin?.collabSurfaceFactory
       && this.isCollabAvailable()
@@ -2315,6 +2324,7 @@ export class ClaudianView extends ItemView {
       if (!this.isWideSessionLayout) {
         this.isWideSessionLayout = true;
         this.viewContainerEl.addClass('claudian-wide-session-layout');
+        this.updateSideChatChipLocation();
       }
       this.refreshSidebarSurfacePager();
       this.historyDropdown?.removeClass('visible');
@@ -2513,15 +2523,13 @@ export class ClaudianView extends ItemView {
         || this.isSessionSearchComposing
       ) return;
       const activeTab = this.tabManager?.getActiveTab();
-      if (activeTab?.controllers.conversationController.cancelInlineRename()) return false;
+      if (this.sessionBrowser.cancelInlineRename()) return false;
       if (this.isSessionSearchActive) {
         this.closeSessionSearch();
         return false;
       }
-      if (!e.defaultPrevented) {
-        if (activeTab?.state.isStreaming) {
-          activeTab.controllers.inputController.cancelStreaming();
-        }
+      if (!e.defaultPrevented && activeTab) {
+        cancelSelectedDestinationTurn(activeTab);
       }
       return false;
     });

@@ -36,7 +36,8 @@ const PI_PROVIDER_STATE_KEYS = [
 ] as const;
 
 export class PiConversationHistoryService implements ProviderConversationHistoryService {
-  private hydratedKeys = new Map<string, string>();
+  // A discarded repository draft must not mark another projection hydrated.
+  private hydratedKeys = new WeakMap<Conversation, string>();
 
   hasConversationModelRecoverySource(conversation: Conversation): boolean {
     const state = getPiState(conversation.providerState);
@@ -84,7 +85,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
   ): Promise<void> {
     const state = getPiState(conversation.providerState);
     if (this.isPendingForkConversation(conversation)) {
-      const sourceSessionFile = await this.resolvePreviousSessionFile(
+      const sourceSessionFile = await this.#resolvePreviousSessionFile(
         {
           leafEntryId: state.forkSource!.resumeAt,
           sessionFile: state.forkSourceSessionFile,
@@ -94,7 +95,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
         pathContext,
         true,
       );
-      this.replaceResolvedPath(
+      this.#replaceResolvedPath(
         conversation,
         'forkSourceSessionFile',
         state.forkSourceSessionFile,
@@ -104,7 +105,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
         return;
       }
       if (!sourceSessionFile) {
-        this.hydratedKeys.delete(conversation.id);
+        this.hydratedKeys.delete(conversation);
         return;
       }
 
@@ -116,14 +117,14 @@ export class PiConversationHistoryService implements ProviderConversationHistory
           syntheticIdNamespace: sourceSessionFile,
         });
         if (messages.length === 0) {
-          this.hydratedKeys.delete(conversation.id);
+          this.hydratedKeys.delete(conversation);
           return;
         }
 
         conversation.messages = messages;
-        this.hydratedKeys.set(conversation.id, `fork::${sourceSessionFile}::${state.forkSource!.resumeAt}`);
+        this.hydratedKeys.set(conversation, `fork::${sourceSessionFile}::${state.forkSource!.resumeAt}`);
       } catch {
-        this.hydratedKeys.delete(conversation.id);
+        this.hydratedKeys.delete(conversation);
       }
       return;
     }
@@ -146,7 +147,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
         : []),
     ];
     if (sources.length === 0) {
-      this.hydratedKeys.delete(conversation.id);
+      this.hydratedKeys.delete(conversation);
       return;
     }
 
@@ -159,7 +160,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
     }> = [];
     for (const item of sources) {
       const sessionFile = item.kind === 'previous'
-        ? await this.resolvePreviousSessionFile(
+        ? await this.#resolvePreviousSessionFile(
           item.source,
           vaultPath,
           pathContext,
@@ -171,7 +172,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
           pathContext,
         );
       if (item.kind === 'current') {
-        this.replaceResolvedPath(
+        this.#replaceResolvedPath(
           conversation,
           'sessionFile',
           item.source.sessionFile,
@@ -189,14 +190,14 @@ export class PiConversationHistoryService implements ProviderConversationHistory
       }
     }
     if (resolvedSources.length === 0) {
-      this.hydratedKeys.delete(conversation.id);
+      this.hydratedKeys.delete(conversation);
       return;
     }
 
     const hydrationKey = JSON.stringify(resolvedSources);
     if (
       conversation.messages.length > 0
-      && this.hydratedKeys.get(conversation.id) === hydrationKey
+      && this.hydratedKeys.get(conversation) === hydrationKey
     ) {
       return;
     }
@@ -217,7 +218,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
           && source.index !== undefined
           && source.sessionFile !== source.persistedPath
         ) {
-          this.replacePreviousSessionPath(
+          this.#replacePreviousSessionPath(
             conversation,
             source.index,
             source.sessionFile,
@@ -228,12 +229,12 @@ export class PiConversationHistoryService implements ProviderConversationHistory
       }
     }
     if (messages.length === 0) {
-      this.hydratedKeys.delete(conversation.id);
+      this.hydratedKeys.delete(conversation);
       return;
     }
 
     conversation.messages = dedupeMessages(messages);
-    this.hydratedKeys.set(conversation.id, hydrationKey);
+    this.hydratedKeys.set(conversation, hydrationKey);
   }
 
   resolveSessionIdForConversation(conversation: Conversation | null): string | null {
@@ -294,7 +295,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
         ? providerState
         : undefined;
     }
-    this.hydratedKeys.delete(conversation.id);
+    this.hydratedKeys.delete(conversation);
     return 'reset';
   }
 
@@ -340,7 +341,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
       };
       addCandidate(
         pendingSource,
-        await this.resolvePreviousSessionFile(
+        await this.#resolvePreviousSessionFile(
           pendingSource,
           vaultPath,
           pathContext,
@@ -351,7 +352,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
     for (const source of [...(sourceState.previousSessions ?? [])].reverse()) {
       addCandidate(
         source,
-        await this.resolvePreviousSessionFile(source, vaultPath, pathContext),
+        await this.#resolvePreviousSessionFile(source, vaultPath, pathContext),
       );
     }
     const dedupedCandidates = dedupeForkSources(candidates);
@@ -378,7 +379,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
     );
   }
 
-  private replaceResolvedPath(
+  #replaceResolvedPath(
     conversation: Conversation,
     field: 'forkSourceSessionFile' | 'sessionFile',
     persistedPath: string | undefined,
@@ -401,7 +402,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
     );
   }
 
-  private async resolvePreviousSessionFile(
+  async #resolvePreviousSessionFile(
     source: PiPreviousSession,
     vaultPath: string | null,
     pathContext?: ProviderHistoryPathContext,
@@ -435,7 +436,7 @@ export class PiConversationHistoryService implements ProviderConversationHistory
     return null;
   }
 
-  private replacePreviousSessionPath(
+  #replacePreviousSessionPath(
     conversation: Conversation,
     index: number,
     sessionFile: string,

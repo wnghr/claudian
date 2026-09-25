@@ -88,6 +88,39 @@ describe('TicketService', () => {
     })).resolves.toEqual({ tickets: [] });
   });
 
+  it('resolves immutable Ticket numbers for open and closed Tickets without scanning pages', async () => {
+    const created = await createTicket();
+    await expect(service.resolveNumber('member-other', {
+      projectId: 'project-alpha', ticketNumber: 1,
+    })).resolves.toEqual({ ticketId: created.ticket.id });
+    await service.close('member-author', {
+      expectedRevision: 1, idempotencyKey: 'close-resolved',
+      projectId: 'project-alpha', ticketId: created.ticket.id,
+    });
+    await expect(service.resolveNumber('member-other', {
+      projectId: 'project-alpha', ticketNumber: 1,
+    })).resolves.toEqual({ ticketId: created.ticket.id });
+    await expect(service.resolveNumber('member-other', {
+      projectId: 'project-alpha', ticketNumber: 9_001,
+    })).resolves.toEqual({ ticketId: null });
+  });
+
+  it('authorizes the Project and active Member before resolving Ticket numbers', async () => {
+    await createTicket();
+    await expect(service.resolveNumber('member-missing', {
+      projectId: 'project-alpha', ticketNumber: 1,
+    })).rejects.toMatchObject({ code: 'membership-revoked' });
+    await expect(service.resolveNumber('member-other', {
+      projectId: 'project-other', ticketNumber: 1,
+    })).rejects.toMatchObject({ code: 'project-not-found' });
+    await database.mutate(connection => {
+      connection.run("UPDATE members SET status = 'revoked', revoked_at = ? WHERE member_id = ?", [CREATED_AT, 'member-other']);
+    });
+    await expect(service.resolveNumber('member-other', {
+      projectId: 'project-alpha', ticketNumber: 1,
+    })).rejects.toMatchObject({ code: 'membership-revoked' });
+  });
+
   it('enforces author/Manager content editing and revision CAS', async () => {
     const created = await createTicket();
     await expect(service.updateContent('member-other', {
@@ -352,14 +385,16 @@ describe('TicketService', () => {
     // Control characters are valid title content and expand sixfold in JSON,
     // forcing the count-maximal result across multiple byte-bounded pages.
     const title = '\u0001'.repeat(COLLAB_LIMITS.maxTicketTitleUtf16);
-    for (let index = 1; index <= 100; index += 1) {
-      await service.create('member-author', {
-        body: `Body ${index}`,
-        idempotencyKey: `create-${index}`,
+    // Queue independent fixture writes together so the real database can batch
+    // durable image promotion, as it does for concurrent production mutations.
+    await Promise.all(Array.from({ length: 100 }, (_, index) => (
+      service.create('member-author', {
+        body: `Body ${index + 1}`,
+        idempotencyKey: `create-${index + 1}`,
         projectId: 'project-alpha',
         title,
-      });
-    }
+      })
+    )));
 
     const numbers: number[] = [];
     let cursor: string | undefined;

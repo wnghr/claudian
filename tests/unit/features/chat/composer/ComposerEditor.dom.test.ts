@@ -259,6 +259,17 @@ it('allows input listeners to update composer modes and forwards dropdown access
   parent.remove();
 });
 
+it('leaves native spellcheck and text replacement enabled in the focused textbox', () => {
+  const parent = document.body.createDiv();
+  const editor = createEditor(parent);
+  editor.element.focus();
+  const content = within(parent).getByRole('textbox', { name: 'Message' });
+  expect(content.getAttribute('spellcheck')).toBe('true');
+  expect(content.getAttribute('autocorrect')).toBe('on');
+  editor.destroy();
+  parent.remove();
+});
+
 it('keeps the explicit send shortcut focused inside the editor', () => {
   const parent = document.body.createDiv();
   const editor = createEditor(parent);
@@ -385,5 +396,24 @@ it('retains Canvas selection while typing into the composer', () => {
     editor.destroy();
     parent.remove();
     jest.useRealTimers();
+  }
+});
+
+it('upgrades to the editor when a focusin reaches the composer host', () => {
+  const parent = document.body.createDiv();
+  const outside = document.body.createDiv();
+  outside.tabIndex = 0;
+  const editor = createEditor(parent);
+  try {
+    // Chromium skips an element's `focusin` when its `focus` handler moves focus
+    // elsewhere, so the lazy upgrade hangs off `focusin` instead; otherwise the
+    // ancestors tracking the note-to-composer handoff never observe it.
+    editor.element.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: outside }));
+
+    expect(document.activeElement).toBe(parent.querySelector('.cm-content'));
+  } finally {
+    editor.destroy();
+    parent.remove();
+    outside.remove();
   }
 });

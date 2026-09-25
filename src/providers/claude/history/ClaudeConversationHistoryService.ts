@@ -395,19 +395,20 @@ function sanitizeProviderState(
 }
 
 export class ClaudeConversationHistoryService implements ProviderConversationHistoryService {
-  private hydratedConversationIds = new Set<string>();
-  private historyCacheKeysByConversation = new Map<string, string>();
-  private pendingSessionLocationsByConversation = new Map<
-    string,
+  // A discarded repository draft must not mark another projection hydrated.
+  private hydratedConversations = new WeakSet<Conversation>();
+  private historyCacheKeysByConversation = new WeakMap<Conversation, string>();
+  private pendingSessionLocationsByConversation = new WeakMap<
+    Conversation,
     Map<string, SDKSessionLocation>
   >();
-  private relocatedSessionPathsByConversation = new Map<string, Map<string, string>>();
+  private relocatedSessionPathsByConversation = new WeakMap<Conversation, Map<string, string>>();
 
-  private getConversationSessionIds(conversation: Conversation): string[] {
+  #getConversationSessionIds(conversation: Conversation): string[] {
     return getClaudeConversationSessionIds(conversation);
   }
 
-  private synchronizeHistoryCache(
+  #synchronizeHistoryCache(
     conversation: Conversation,
     vaultPath: string,
     pathContext?: ProviderHistoryPathContext,
@@ -416,17 +417,17 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
     const cacheKey = JSON.stringify([
       getSDKProjectsPath(pathContext),
       encodeVaultPathForSDK(vaultPath),
-      this.getConversationSessionIds(conversation),
+      this.#getConversationSessionIds(conversation),
       conversation.resumeAtMessageId ?? null,
       state.forkSource?.resumeAt ?? null,
     ]);
-    const previousKey = this.historyCacheKeysByConversation.get(conversation.id);
+    const previousKey = this.historyCacheKeysByConversation.get(conversation);
     if (previousKey !== undefined && previousKey !== cacheKey) {
-      this.hydratedConversationIds.delete(conversation.id);
-      this.pendingSessionLocationsByConversation.delete(conversation.id);
-      this.relocatedSessionPathsByConversation.delete(conversation.id);
+      this.hydratedConversations.delete(conversation);
+      this.pendingSessionLocationsByConversation.delete(conversation);
+      this.relocatedSessionPathsByConversation.delete(conversation);
     }
-    this.historyCacheKeysByConversation.set(conversation.id, cacheKey);
+    this.historyCacheKeysByConversation.set(conversation, cacheKey);
   }
 
   async getConversationSessionAvailability(
@@ -438,37 +439,37 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
     if (!vaultPath) {
       return 'unknown';
     }
-    this.synchronizeHistoryCache(conversation, vaultPath, pathContext);
+    this.#synchronizeHistoryCache(conversation, vaultPath, pathContext);
     if (!sessionId) return 'unknown';
 
     const location = await (pathContext
       ? locateSDKSession(vaultPath, sessionId, pathContext)
       : locateSDKSession(vaultPath, sessionId));
     this.pendingSessionLocationsByConversation.set(
-      conversation.id,
+      conversation,
       new Map([[sessionId, location]]),
     );
     if (location.availability === 'relocated' && location.sessionPath) {
       const relocatedSessionPaths = new Map(
-        this.relocatedSessionPathsByConversation.get(conversation.id) ?? [],
+        this.relocatedSessionPathsByConversation.get(conversation) ?? [],
       );
       relocatedSessionPaths.set(sessionId, location.sessionPath);
       this.relocatedSessionPathsByConversation.set(
-        conversation.id,
+        conversation,
         relocatedSessionPaths,
       );
     } else if (location.availability !== 'unknown') {
       const relocatedSessionPaths = new Map(
-        this.relocatedSessionPathsByConversation.get(conversation.id) ?? [],
+        this.relocatedSessionPathsByConversation.get(conversation) ?? [],
       );
       relocatedSessionPaths.delete(sessionId);
       if (relocatedSessionPaths.size > 0) {
         this.relocatedSessionPathsByConversation.set(
-          conversation.id,
+          conversation,
           relocatedSessionPaths,
         );
       } else {
-        this.relocatedSessionPathsByConversation.delete(conversation.id);
+        this.relocatedSessionPathsByConversation.delete(conversation);
       }
     }
     return location.availability;
@@ -485,7 +486,7 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
     }
 
     await this.hydrateConversationHistory(conversation, vaultPath, pathContext);
-    if (!this.hydratedConversationIds.has(conversation.id)) {
+    if (!this.hydratedConversations.has(conversation)) {
       return false;
     }
 
@@ -521,9 +522,9 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
       return 'preserve';
     }
 
-    this.synchronizeHistoryCache(conversation, vaultPath, pathContext);
+    this.#synchronizeHistoryCache(conversation, vaultPath, pathContext);
 
-    const sessionIds = this.getConversationSessionIds(conversation);
+    const sessionIds = this.#getConversationSessionIds(conversation);
     const locations = await (pathContext
       ? locateSDKSessions(vaultPath, sessionIds, pathContext)
       : locateSDKSessions(vaultPath, sessionIds));
@@ -531,9 +532,9 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
       sessionId => locations.get(sessionId)?.availability !== 'missing',
     );
     if (preservedSessionIds.length === 0) {
-      this.pendingSessionLocationsByConversation.delete(conversation.id);
-      this.relocatedSessionPathsByConversation.delete(conversation.id);
-      this.hydratedConversationIds.delete(conversation.id);
+      this.pendingSessionLocationsByConversation.delete(conversation);
+      this.relocatedSessionPathsByConversation.delete(conversation);
+      this.hydratedConversations.delete(conversation);
       return 'delete';
     }
 
@@ -547,8 +548,8 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
 
     conversation.sessionId = null;
     conversation.providerState = sanitizeProviderState(state);
-    this.pendingSessionLocationsByConversation.delete(conversation.id);
-    this.hydratedConversationIds.delete(conversation.id);
+    this.pendingSessionLocationsByConversation.delete(conversation);
+    this.hydratedConversations.delete(conversation);
     return 'reset';
   }
 
@@ -641,10 +642,10 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
     }
 
     await this.recoverConversationSessionReference(conversation, vaultPath, pathContext);
-    const allSessionIds = this.getConversationSessionIds(conversation);
+    const allSessionIds = this.#getConversationSessionIds(conversation);
 
-    this.synchronizeHistoryCache(conversation, vaultPath, pathContext);
-    if (this.hydratedConversationIds.has(conversation.id)) return;
+    this.#synchronizeHistoryCache(conversation, vaultPath, pathContext);
+    if (this.hydratedConversations.has(conversation)) return;
 
     const state = getClaudeState(conversation.providerState);
     const isPendingFork = this.isPendingForkConversation(conversation);
@@ -659,12 +660,12 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
     let errorCount = 0;
     let successCount = 0;
     const relocatedSessionPaths = new Map(
-      this.relocatedSessionPathsByConversation.get(conversation.id) ?? [],
+      this.relocatedSessionPathsByConversation.get(conversation) ?? [],
     );
     const cachedLocations = new Map(
-      this.pendingSessionLocationsByConversation.get(conversation.id) ?? [],
+      this.pendingSessionLocationsByConversation.get(conversation) ?? [],
     );
-    this.pendingSessionLocationsByConversation.delete(conversation.id);
+    this.pendingSessionLocationsByConversation.delete(conversation);
     const unresolvedSessionIds = allSessionIds.filter(
       id => !relocatedSessionPaths.has(id) && !cachedLocations.has(id),
     );
@@ -678,7 +679,7 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
       }
     }
     if (relocatedSessionPaths.size > 0) {
-      this.relocatedSessionPathsByConversation.set(conversation.id, relocatedSessionPaths);
+      this.relocatedSessionPathsByConversation.set(conversation, relocatedSessionPaths);
     }
 
     const resumableSessionId = isPendingFork
@@ -752,7 +753,7 @@ export class ClaudeConversationHistoryService implements ProviderConversationHis
 
     conversation.messages = merged;
     if (errorCount === 0 && unknownSessionCount === 0) {
-      this.hydratedConversationIds.add(conversation.id);
+      this.hydratedConversations.add(conversation);
     }
   }
 

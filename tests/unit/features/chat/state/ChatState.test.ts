@@ -1,4 +1,4 @@
-import { ChatState, createInitialState } from '@/features/chat/state/ChatState';
+import { ChatState } from '@/features/chat/state/ChatState';
 import type { ChatStateCallbacks } from '@/features/chat/state/types';
 
 describe('ChatState', () => {
@@ -33,37 +33,6 @@ describe('ChatState', () => {
     Object.defineProperty(globalThis, 'window', {
       value: originalWindow,
       configurable: true,
-    });
-  });
-
-  describe('createInitialState', () => {
-    it('returns correct default values', () => {
-      const state = createInitialState();
-
-      expect(state.messages).toEqual([]);
-      expect(state.isStreaming).toBe(false);
-      expect(state.cancelRequested).toBe(false);
-      expect(state.streamGeneration).toBe(0);
-      expect(state.isCreatingConversation).toBe(false);
-      expect(state.isSwitchingConversation).toBe(false);
-      expect(state.currentConversationId).toBeNull();
-      expect(state.queuedMessage).toBeNull();
-      expect(state.currentContentEl).toBeNull();
-      expect(state.currentTextEl).toBeNull();
-      expect(state.currentTextContent).toBe('');
-      expect(state.currentThinkingState).toBeNull();
-      expect(state.thinkingEl).toBeNull();
-      expect(state.queueIndicatorEl).toBeNull();
-      expect(state.thinkingIndicatorTimeout).toBeNull();
-      expect(state.toolCallElements).toBeInstanceOf(Map);
-      expect(state.writeEditStates).toBeInstanceOf(Map);
-      expect(state.pendingTools).toBeInstanceOf(Map);
-      expect(state.usage).toBeNull();
-      expect(state.ignoreUsageUpdates).toBe(false);
-      expect(state.attention).toBeNull();
-      expect(state.autoScrollEnabled).toBe(true);
-      expect(state.responseStartTime).toBeNull();
-      expect(state.flavorTimerInterval).toBeNull();
     });
   });
 

@@ -13,11 +13,15 @@ import {
   type OpencodeAcpSessionKernel,
   type OpencodeNativeSessionInfo,
 } from '../execution/OpencodeAcpSessionKernel';
+import { OpencodeServerService } from '../http/OpencodeServerService';
 import { decodeOpencodeModelId } from '../models';
+import { buildOpencodeRuntimeEnv } from '../runtime/OpencodeRuntimeEnvironment';
+import { detectOpencodeNativeVersion } from '../runtime/OpencodeVersion';
 import {
   type OpencodeMetadataProjectionInput,
   projectOpencodeMetadata,
 } from './OpencodeMetadataProjection';
+import { OpencodeV2MetadataProbe } from './OpencodeV2MetadataProbe';
 
 export interface OpencodeMetadataCatalogResult
   extends OpencodeMetadataProjectionInput {
@@ -40,16 +44,18 @@ export interface OpencodeMetadataProbe {
 
 export interface OpencodeMetadataServiceOptions {
   readonly commandCatalog?: Pick<OpencodeCommandCatalog, 'setCommandSnapshot'>;
+  readonly serverService?: OpencodeServerService;
   readonly createProbe?: () => OpencodeMetadataProbe;
 }
 
 export class OpencodeMetadataService {
-  private readonly createProbe: () => OpencodeMetadataProbe;
+  private readonly createProbe: (signal: AbortSignal) => OpencodeMetadataProbe | Promise<OpencodeMetadataProbe>;
   private readonly probes: OwnedProbeRegistry<OpencodeMetadataProbe>;
   private readonly transitionFence = new ProviderTransitionFence({
     abortMessage: 'OpenCode metadata probe aborted',
   });
   private readonly unregisterTransitionHook: () => void;
+  private readonly serverService: OpencodeServerService;
   private disposed = false;
   private disposeFlight: Promise<void> | null = null;
 
@@ -57,8 +63,16 @@ export class OpencodeMetadataService {
     private readonly plugin: ProviderHost,
     private readonly options: OpencodeMetadataServiceOptions = {},
   ) {
+    this.serverService = options.serverService ?? new OpencodeServerService();
     this.createProbe = options.createProbe
-      ?? (() => new DefaultOpencodeMetadataProbe(plugin));
+      ?? (async (signal) => {
+        const cliPath = await plugin.getResolvedProviderCliPath('opencode') ?? 'opencode';
+        const environment = buildOpencodeRuntimeEnv(plugin.settings, cliPath);
+        const version = await detectOpencodeNativeVersion(cliPath, environment);
+        signal.throwIfAborted();
+        if (version !== 2) return new DefaultOpencodeMetadataProbe(plugin);
+        return new OpencodeV2MetadataProbe(await this.serverService.acquire(cliPath, resolveVaultPath(plugin), environment, signal));
+      });
     this.probes = new OwnedProbeRegistry({
       abortMessage: 'OpenCode metadata probe aborted',
       dispose: probe => probe.dispose(),
@@ -70,16 +84,16 @@ export class OpencodeMetadataService {
           this.beginTransition();
           return this.invalidate();
         },
-        afterTransition: () => this.completeTransition(),
+        afterTransition: () => this.#completeTransition(),
       });
   }
 
   async loadCatalog(signal?: AbortSignal): Promise<boolean> {
-    const result = await this.runProbe(
+    const result = await this.#runProbe(
       async (probe, ownedSignal) => {
         const catalog = await probe.loadCatalog(ownedSignal);
         ownedSignal.throwIfAborted();
-        await projectOpencodeMetadata(this.plugin, catalog);
+        await projectOpencodeMetadata(this.plugin, catalog, ownedSignal);
         ownedSignal.throwIfAborted();
         if (catalog.commands !== null) {
           this.options.commandCatalog?.setCommandSnapshot(
@@ -101,11 +115,9 @@ export class OpencodeMetadataService {
   async discoverCommands(
     signal?: AbortSignal,
   ): Promise<{ commands: SlashCommand[]; loaded: boolean }> {
-    const result = await this.runProbe(
+    const result = await this.#runProbe(
       async (probe, ownedSignal) => {
         const catalog = await probe.loadCatalog(ownedSignal);
-        ownedSignal.throwIfAborted();
-        await projectOpencodeMetadata(this.plugin, catalog);
         ownedSignal.throwIfAborted();
         if (catalog.commands === null) {
           return { commands: [], loaded: false };
@@ -126,14 +138,14 @@ export class OpencodeMetadataService {
   ): Promise<boolean> {
     const rawModelId = decodeOpencodeModelId(model);
     if (!rawModelId) return false;
-    const result = await this.runProbe(
+    const result = await this.#runProbe(
       async (probe, ownedSignal) => {
         const metadata = await probe.warmModel(rawModelId, ownedSignal);
         ownedSignal.throwIfAborted();
         await projectOpencodeMetadata(this.plugin, {
           ...metadata,
           selectedRawModelId: metadata.rawModelId,
-        });
+        }, ownedSignal);
         ownedSignal.throwIfAborted();
         return true;
       },
@@ -143,8 +155,13 @@ export class OpencodeMetadataService {
   }
 
   async invalidate(): Promise<void> {
-    this.options.commandCatalog?.setCommandSnapshot([]);
-    await this.probes.quiesce();
+    this.transitionFence.beginTransition();
+    try {
+      this.options.commandCatalog?.setCommandSnapshot([]);
+      await Promise.all([this.probes.quiesce(), this.options.serverService ? undefined : this.serverService.invalidate()]);
+    } finally {
+      this.transitionFence.endTransition();
+    }
   }
 
   dispose(): Promise<void> {
@@ -155,11 +172,12 @@ export class OpencodeMetadataService {
     this.disposeFlight = (async () => {
       await this.invalidate();
       await this.probes.dispose();
+      if (!this.options.serverService) await this.serverService.dispose();
     })();
     return this.disposeFlight;
   }
 
-  private async runProbe<T>(
+  async #runProbe<T>(
     operation: (probe: OpencodeMetadataProbe, signal: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T | null> {
@@ -170,7 +188,7 @@ export class OpencodeMetadataService {
         if (!available) return null;
       }
       return await this.probes.run({
-        create: () => this.createProbe(),
+        create: signal => this.createProbe(signal),
         query: operation,
       }, signal);
     } catch {
@@ -182,7 +200,7 @@ export class OpencodeMetadataService {
     this.transitionFence.beginTransition();
   }
 
-  private async completeTransition(): Promise<void> {
+  async #completeTransition(): Promise<void> {
     try {
       await this.invalidate();
     } finally {
@@ -201,7 +219,7 @@ class DefaultOpencodeMetadataProbe implements OpencodeMetadataProbe {
   constructor(private readonly plugin: ProviderHost) {}
 
   async loadCatalog(signal?: AbortSignal): Promise<OpencodeMetadataCatalogResult> {
-    const native = await this.ensureOpen(signal);
+    const native = await this.#ensureOpen(signal);
     if (!this.commands) {
       await waitForCommands(
         () => this.commands !== null,
@@ -226,9 +244,9 @@ class DefaultOpencodeMetadataProbe implements OpencodeMetadataProbe {
     rawModelId: string,
     signal?: AbortSignal,
   ): Promise<OpencodeMetadataWarmResult> {
-    const native = await this.ensureOpen(signal);
+    const native = await this.#ensureOpen(signal);
     signal?.throwIfAborted();
-    const response = await this.requireKernel().setConfigOption({
+    const response = await this.#requireKernel().setConfigOption({
       configId: 'model',
       sessionId: native.sessionId,
       type: 'select',
@@ -252,13 +270,12 @@ class DefaultOpencodeMetadataProbe implements OpencodeMetadataProbe {
     await kernel?.dispose();
   }
 
-  private async ensureOpen(
+  async #ensureOpen(
     signal?: AbortSignal,
   ): Promise<OpencodeNativeSessionInfo> {
     signal?.throwIfAborted();
     if (this.native) return this.native;
     const kernel = new DefaultOpencodeAcpSessionKernel({
-      artifactsSubdir: 'opencode/metadata',
       config: {
         interactionPort: DENY_INTERACTION_PORT,
         lifecycle: 'ephemeral',
@@ -293,7 +310,7 @@ class DefaultOpencodeMetadataProbe implements OpencodeMetadataProbe {
     return this.native;
   }
 
-  private requireKernel(): OpencodeAcpSessionKernel {
+  #requireKernel(): OpencodeAcpSessionKernel {
     if (!this.kernel) throw new Error('OpenCode metadata probe is not connected');
     return this.kernel;
   }

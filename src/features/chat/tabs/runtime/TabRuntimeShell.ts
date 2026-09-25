@@ -2,7 +2,7 @@ import { Notice } from 'obsidian';
 
 import type { ProviderInteractionPort } from '../../../../core/execution';
 import { resolveNewConversationModel } from '../../../../core/providers/conversationModel';
-import { getEnabledProviderForModel } from '../../../../core/providers/modelRouting';
+import { getProviderForModel } from '../../../../core/providers/modelRouting';
 import { ProviderRegistry } from '../../../../core/providers/ProviderRegistry';
 import { DEFAULT_CHAT_PROVIDER_ID } from '../../../../core/providers/types';
 import { getVaultPath } from '../../../../utils/path';
@@ -11,6 +11,7 @@ import { ChatExecutionCoordinator } from '../../execution/ChatExecutionCoordinat
 import { cleanupThinkingBlock } from '../../rendering/ThinkingBlockRenderer';
 import { createWelcomeElement } from '../../rendering/WelcomeRenderer';
 import { ChatState } from '../../state/ChatState';
+import { refreshTabContextUsage } from '../TabProviderState';
 import { TabSession } from '../TabSession';
 import {
   createTabMessageId,
@@ -49,7 +50,7 @@ export function buildTabRuntimeShell(
     onConversationChanged: conversationId => {
       options.onConversationIdChanged?.(runtimeRef.requirePublished(), conversationId);
     },
-    onUsageChanged: usage => runtimeRef.requirePublished().ui.contextUsageMeter.update(usage),
+    onUsageChanged: () => refreshTabContextUsage(runtimeRef.requirePublished(), plugin),
     onAutoScrollChanged: () => runtimeRef.requirePublished().ui.navigationSidebar.updateVisibility(),
   });
   state.queueIndicatorEl = dom.queueIndicatorEl;
@@ -69,10 +70,14 @@ export function buildTabRuntimeShell(
   const draftModel = isBound
     ? null
     : (restoredDraftModel || newConversationModel?.model || null);
+  const restoredProviderId = options.providerId === undefined
+    ? (restoredDraftModel ? getProviderForModel(restoredDraftModel, plugin.settings) : null)
+    : options.providerId;
   const initialProviderId = conversation?.providerId
     ?? newConversationModel?.providerId
     ?? (draftModel
-      ? getEnabledProviderForModel(draftModel, plugin.settings)
+      ? restoredProviderId && ProviderRegistry.getRegisteredProviderIds().includes(restoredProviderId)
+        ? restoredProviderId : null
       : DEFAULT_CHAT_PROVIDER_ID);
   const sessionState = {
     id,
@@ -269,12 +274,14 @@ function createTabExecutionCoordinator(
     onRequestedEvent: event => (
       runtimeRef.requirePublished().controllers.inputController.handleExecutionEvent(event)
     ),
-    onSessionEvent: (event, context) => enqueueTabSessionEvent(
-      runtimeRef.requirePublished(),
-      plugin,
-      event,
-      context,
-    ),
+    onSessionEvent: (event, context) => {
+      const tab = runtimeRef.requirePublished();
+      if (event.type === 'commands_changed') {
+        options.onCommandContextChanged?.(tab);
+        return;
+      }
+      return enqueueTabSessionEvent(tab, plugin, event, context);
+    },
     onBackgroundWorkChanged: () => {
       options.onWorkChanged?.(runtimeRef.requirePublished());
     },
@@ -298,6 +305,7 @@ function createTabExecutionCoordinator(
         const tab = runtimeRef.requirePublished();
         if (tab.lifecycleState === 'closing') return;
         tab.lifecycleState = isWarm ? 'warm' : 'cold';
+        if (!isWarm) options.onCommandContextChanged?.(tab);
       },
     },
   });

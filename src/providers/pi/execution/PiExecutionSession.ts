@@ -22,11 +22,13 @@ import {
   buildSystemPrompt,
   type SystemPromptSettings,
 } from '../../../core/prompt/mainAgent';
+import { ProviderModelUnavailableError } from '../../../core/providers/models/ProviderModelUnavailableError';
 import { getRuntimeEnvironmentText } from '../../../core/providers/providerEnvironment';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import type {
   ChatMessage,
   StreamChunk,
+  TurnStats,
 } from '../../../core/types';
 import { appendBrowserContext } from '../../../utils/browser';
 import { appendCanvasContext } from '../../../utils/canvas';
@@ -38,6 +40,7 @@ import { parseEnvironmentVariables } from '../../../utils/env';
 import {
   buildContextFromHistory,
   buildPromptWithHistoryContext,
+  getHistoryImages,
 } from '../../../utils/session';
 import type { PiWorkspaceServices } from '../app/PiWorkspaceServices';
 import {
@@ -48,6 +51,7 @@ import {
   type CreatedPiForkSessionFile,
   type createPiForkSessionFile,
   findPiSessionFile,
+  getPiTurnStats,
   parsePiSessionEntries,
   resolvePiActivePath,
   type rollbackCreatedPiForkSessionFile,
@@ -70,6 +74,7 @@ import {
   buildPiLaunchSpec,
   type PiLaunchSpec,
 } from '../runtime/PiLaunchSpec';
+import { assertPiModelAvailable } from '../runtime/PiModelAvailability';
 import { buildPiSetModelPayload } from '../runtime/PiRpcPayloads';
 import type { PiRpcRecord } from '../runtime/PiRpcTransport';
 import {
@@ -121,6 +126,7 @@ interface ActiveRun {
   assistantStarted: boolean;
   nativeRequestDispatched: boolean;
   nativeAssistantId?: string;
+  turnStats?: TurnStats;
   nativeUserMessageId?: string;
   pendingTerminalError: Error | null;
   sequence: number;
@@ -205,7 +211,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       && !state.forkSource
       && Boolean(state.sessionFile || providerSessionId);
     if (nativePersistenceDisabled) {
-      this.removeNativeProviderState();
+      this.#removeNativeProviderState();
     }
   }
 
@@ -220,11 +226,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       throw new Error('Pi execution session already has an active run');
     }
 
-    const active = this.createActiveRun(request);
+    const active = this.#createActiveRun(request);
     this.activeRun = active;
     this.normalizationState = createPiEventNormalizationState();
-    this.setStatus('executing');
-    this.emitRequestedState(active);
+    this.#setStatus('executing');
+    this.#emitRequestedState(active);
     if (request.signal.aborted) {
       this.cancel();
     } else {
@@ -248,21 +254,23 @@ implements ProviderExecutionSession, SteerableExecutionSession {
   cancel(): void {
     const active = this.activeRun;
     if (!active || active.terminal) return;
-    this.setStatus('cancelling');
-    this.emitRequestedState(active);
+    this.#setStatus('cancelling');
+    this.#emitRequestedState(active);
     active.abortController.abort();
     active.terminalSignal.reject(new Error('Pi turn cancelled'));
     this.kernel?.send({ type: 'abort' });
-    this.setStatus('idle');
-    this.emitRequestedState(active);
-    this.finishRequested(active, {
+    this.#setStatus('idle');
+    this.#emitRequestedState(active);
+    this.#finishRequested(active, {
       reason: 'Cancelled',
       type: 'cancelled',
     });
-    void this.shutdownKernel();
+    void this.#shutdownKernel();
   }
 
   async steer(request: ProviderExecutionRequest): Promise<boolean> {
+    try { assertPiModelAvailable(this.host.settings, request.configuration.model); }
+    catch (error) { if (error instanceof ProviderModelUnavailableError) return false; throw error; }
     const active = this.activeRun;
     const kernel = this.kernel;
     if (
@@ -280,7 +288,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       message: prompt.text,
     }, undefined, request.signal);
     if (this.activeRun === active && !this.disposed && this.kernel === kernel) {
-      this.emitRequested(active, {
+      this.#emitRequested(active, {
         content: getInputText(request),
         type: 'user_message_started',
       });
@@ -337,12 +345,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       const runResults = await Promise.allSettled([...this.runFlights]);
       lifecycleError ??= getFirstRejectedError(runResults);
       try {
-        await this.shutdownKernel();
+        await this.#shutdownKernel();
       } catch (error) {
         lifecycleError ??= toError(error);
       }
-      this.setStatus('disposed');
-      this.emitSession({
+      this.#setStatus('disposed');
+      this.#emitSession({
         snapshot: this.getSnapshot(),
         type: 'session_state_changed',
       });
@@ -352,7 +360,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     return this.disposalPromise;
   }
 
-  private createActiveRun(request: ProviderExecutionRequest): ActiveRun {
+  #createActiveRun(request: ProviderExecutionRequest): ActiveRun {
     const abortController = new AbortController();
     const onRequestAbort = (): void => this.cancel();
     const events = new AsyncEventQueue<ProviderExecutionEvent>(() => {
@@ -382,15 +390,17 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     request: ProviderExecutionRequest,
   ): Promise<void> {
     try {
-      const encoded = await this.encodeRequest(active, request);
+      assertPiModelAvailable(this.host.settings, request.configuration.model);
+      const encoded = await this.#encodeRequest(active, request);
       if (!this.isActive(active)) return;
-      await this.ensureKernel(encoded.launchSpec, active);
+      await this.#ensureKernel(encoded.launchSpec, active);
       if (!this.isActive(active) || !this.kernel) return;
 
-      await this.validateKernelResume(active.abortController.signal);
+      await this.#validateKernelResume(active.abortController.signal);
       if (!this.isActive(active) || !this.kernel) return;
-      await this.applyModelConfiguration(encoded, active.abortController.signal);
+      await this.#applyModelConfiguration(encoded, active.abortController.signal);
       if (!this.isActive(active)) return;
+      assertPiModelAvailable(this.host.settings, request.configuration.model);
       const previousLeafId = getPiState(this.providerState).leafEntryId ?? null;
       const compactInstructions = getCompactInstructions(encoded.prompt);
       if (compactInstructions !== null) {
@@ -401,8 +411,8 @@ implements ProviderExecutionSession, SteerableExecutionSession {
           undefined,
           active.abortController.signal,
         );
-        this.ensureAccepted(active);
-        this.emitRequested(active, { type: 'context_compacted' });
+        this.#ensureAccepted(active);
+        this.#emitRequested(active, { type: 'context_compacted' });
       } else {
         active.nativeRequestDispatched = true;
         const promptRequest = this.kernel.request(
@@ -415,29 +425,30 @@ implements ProviderExecutionSession, SteerableExecutionSession {
           active.abortController.signal,
         );
         await promptRequest;
-        this.ensureAccepted(active);
+        this.#ensureAccepted(active);
         await active.terminalSignal.promise;
       }
       if (!this.isActive(active)) return;
 
-      await this.refreshState(active.abortController.signal);
+      await this.#refreshState(active.abortController.signal);
       if (!this.isActive(active)) return;
-      await this.refreshNativeMessageIds(active, previousLeafId);
-      const usage = await this.fetchUsage(
+      await this.#refreshNativeMessageIds(active, previousLeafId);
+      const usage = await this.#fetchUsage(
         encoded.model,
         active.abortController.signal,
       ).catch(() => null);
       if (usage) {
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           type: 'usage_updated',
           usage,
         });
       }
-      this.setStatus('idle');
-      this.emitRequestedState(active);
-      this.finishRequested(active, {
+      this.#setStatus('idle');
+      this.#emitRequestedState(active);
+      this.#finishRequested(active, {
         nativeAssistantId: active.nativeAssistantId,
         nativeCheckpointId: getPiState(this.providerState).leafEntryId,
+        ...(active.turnStats ? { turnStats: active.turnStats } : {}),
         reason: 'completed',
         type: 'turn_completed',
       });
@@ -445,22 +456,22 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       if (error instanceof PiForkRollbackError) {
         this.lifecycleError ??= error;
         if (!active.terminal) {
-          this.invalidateForForkRollback(error);
-          this.emitRequestedState(active);
-          this.finishRequested(active, {
+          this.#invalidateForForkRollback(error);
+          this.#emitRequestedState(active);
+          this.#finishRequested(active, {
             category: 'provider',
             message: error.message,
             recoverable: false,
             type: 'execution_error',
           });
         } else if (!this.disposed) {
-          if (this.invalidateForForkRollback(error)) {
-            this.emitSession({
+          if (this.#invalidateForForkRollback(error)) {
+            this.#emitSession({
               snapshot: this.getSnapshot(),
               type: 'session_state_changed',
             });
           }
-          this.emitSession({
+          this.#emitSession({
             category: 'provider',
             message: error.message,
             recoverable: false,
@@ -470,12 +481,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         throw error;
       }
       if (!active.terminal) {
-        this.finishError(active, error);
+        this.#finishError(active, error);
       }
     }
   }
 
-  private async encodeRequest(
+  async #encodeRequest(
     active: ActiveRun,
     request: ProviderExecutionRequest,
   ): Promise<EncodedPiRequest> {
@@ -490,20 +501,20 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       model,
       this.host.settings,
     );
-    await this.materializePendingFork(active);
+    await this.#materializePendingFork(active);
     const envText = getRuntimeEnvironmentText(this.host.settings, 'pi');
     const env = {
       ...process.env,
       ...parseEnvironmentVariables(envText),
     };
-    this.validateResumeSeed(env);
+    this.#validateResumeSeed(env);
     const toolProfile = resolveToolProfile(request.toolPolicy, settings);
     const launchSpec = buildPiLaunchSpec({
       command: await this.host.getResolvedProviderCliPath('pi') ?? 'pi',
       cwd: this.config.vaultWorkingDirectory,
       env,
       envText,
-      noSession: this.shouldDisableNativePersistence(),
+      noSession: this.#shouldDisableNativePersistence(),
       noTools: toolProfile.noTools,
       tools: toolProfile.tools,
       providerState: getPiState(this.providerState),
@@ -522,11 +533,15 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     const hasAcceptedCompatibleLiveContext = Boolean(
       this.nativeConversationContextEstablished
       && !hasNativeSession
-      && this.canReuseKernel(launchSpec),
+      && this.#canReuseKernel(launchSpec),
     );
+    if (this.#shouldDisableNativePersistence() && this.nativeConversationContextEstablished && !hasAcceptedCompatibleLiveContext) {
+      throw new PiConfigurationError('This non-persistent Pi session cannot be restored after its configuration or process changes. Start a new side chat.');
+    }
     const prompt = encodePrompt(
       request,
       !hasNativeSession && !hasAcceptedCompatibleLiveContext,
+      this.#shouldDisableNativePersistence(),
     );
     return {
       images: prompt.images,
@@ -537,7 +552,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     };
   }
 
-  private validateResumeSeed(environment: NodeJS.ProcessEnv): void {
+  #validateResumeSeed(environment: NodeJS.ProcessEnv): void {
     if (!this.resumeSeedNeedsValidation) return;
     this.resumeSeedNeedsValidation = false;
     const state = getPiState(this.providerState);
@@ -553,17 +568,17 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     if (resolvedSessionFile) {
       let changed = false;
       if (resolvedSessionFile !== state.sessionFile) {
-        this.setProviderStateValue('sessionFile', resolvedSessionFile);
+        this.#setProviderStateValue('sessionFile', resolvedSessionFile);
         changed = true;
       }
       if (isPiSessionPathReference(state.sessionId)) {
-        this.deleteProviderStateValue('sessionId');
+        this.#deleteProviderStateValue('sessionId');
         if (this.providerSessionId === state.sessionId) {
           this.providerSessionId = null;
         }
         changed = true;
       }
-      if (changed) this.bumpRevision();
+      if (changed) this.#bumpRevision();
       return;
     }
 
@@ -576,12 +591,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         : null;
       if (fallbackSessionId) {
         if (state.sessionFile === pathTarget) {
-          this.deleteProviderStateValue('sessionFile');
+          this.#deleteProviderStateValue('sessionFile');
         }
         if (this.providerSessionId === pathTarget) {
           this.providerSessionId = fallbackSessionId;
         }
-        this.bumpRevision();
+        this.#bumpRevision();
         return;
       }
       this.nativeConversationContextEstablished = false;
@@ -589,7 +604,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private async ensureKernel(
+  async #ensureKernel(
     launchSpec: PiLaunchSpec,
     active: ActiveRun,
   ): Promise<void> {
@@ -598,11 +613,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       return;
     }
     if (
-      this.canReuseKernel(launchSpec)
+      this.#canReuseKernel(launchSpec)
     ) {
       return;
     }
-    await this.shutdownKernel();
+    await this.#shutdownKernel();
     if (!this.isActive(active) || active.abortController.signal.aborted) {
       return;
     }
@@ -610,18 +625,18 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     const kernel = this.options.createKernel(
       launchSpec,
       {
-        onClose: error => this.handleKernelClose(kernel, generation, error),
-        onEvent: event => this.handleRpcEvent(kernel, generation, event),
+        onClose: error => this.#handleKernelClose(kernel, generation, error),
+        onEvent: event => this.#handleRpcEvent(kernel, generation, event),
         onExtensionChunk: chunk =>
           this.handleStreamChunk(kernel, generation, chunk),
         onExtensionRequest: () => {
           const currentActive = this.activeRun;
           if (
-            !this.isCurrentKernel(kernel, generation)
+            !this.#isCurrentKernel(kernel, generation)
             || !currentActive
             || this.kernelResumeValidationTarget !== null
           ) return false;
-          this.ensureAccepted(currentActive);
+          this.#ensureAccepted(currentActive);
           return true;
         },
       },
@@ -636,33 +651,33 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     this.kernel = kernel;
     this.processKey = launchSpec.processKey;
     this.kernelResumeValidationTarget = launchSpec.sessionTarget;
-    this.replaceKernelSessionTargets(launchSpec.sessionTarget);
+    this.#replaceKernelSessionTargets(launchSpec.sessionTarget);
     if (
       !this.isActive(active)
       || active.abortController.signal.aborted
-      || !this.isCurrentKernel(kernel, generation)
+      || !this.#isCurrentKernel(kernel, generation)
     ) {
-      await this.shutdownAcquiredKernel(kernel, generation);
+      await this.#shutdownAcquiredKernel(kernel, generation);
       return;
     }
     try {
       kernel.start();
     } catch (error) {
-      await this.shutdownAcquiredKernel(kernel, generation);
+      await this.#shutdownAcquiredKernel(kernel, generation);
       throw error;
     }
     if (
       !this.isActive(active)
       || active.abortController.signal.aborted
-      || !this.isCurrentKernel(kernel, generation)
+      || !this.#isCurrentKernel(kernel, generation)
     ) {
-      await this.shutdownAcquiredKernel(kernel, generation);
+      await this.#shutdownAcquiredKernel(kernel, generation);
       return;
     }
-    void this.publishCommands(kernel, generation);
+    void this.#publishCommands(kernel, generation);
   }
 
-  private async validateKernelResume(signal: AbortSignal): Promise<void> {
+  async #validateKernelResume(signal: AbortSignal): Promise<void> {
     const expectedTarget = this.kernelResumeValidationTarget;
     const kernel = this.kernel;
     if (!expectedTarget || !kernel) return;
@@ -691,11 +706,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       expectedTarget,
       reportedIdentity.sessionFile ?? reportedIdentity.sessionId,
     );
-    await this.shutdownKernel().catch(() => undefined);
+    await this.#shutdownKernel().catch(() => undefined);
     throw error;
   }
 
-  private async applyModelConfiguration(
+  async #applyModelConfiguration(
     encoded: EncodedPiRequest,
     signal: AbortSignal,
   ): Promise<void> {
@@ -714,12 +729,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private handleRpcEvent(
+  #handleRpcEvent(
     kernel: PiExecutionKernel,
     generation: number,
     event: PiRpcRecord,
   ): void {
-    if (!this.isCurrentKernel(kernel, generation)) return;
+    if (!this.#isCurrentKernel(kernel, generation)) return;
     const active = this.activeRun;
     if (!active || active.terminal) return;
     if (event.type === 'extension_ui_request') {
@@ -734,11 +749,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       return;
     }
     if (event.type === 'agent_start') {
-      this.ensureAccepted(active);
+      this.#ensureAccepted(active);
       return;
     }
     if (event.type === 'agent_end') {
-      this.ensureAccepted(active);
+      this.#ensureAccepted(active);
       if (event.willRetry === true) {
         active.pendingTerminalError = null;
         return;
@@ -761,13 +776,13 @@ implements ProviderExecutionSession, SteerableExecutionSession {
 
     const terminalError = getPiTerminalErrorMessage(event);
     if (terminalError) {
-      this.ensureAccepted(active);
+      this.#ensureAccepted(active);
       active.pendingTerminalError = new Error(terminalError);
       return;
     }
 
     const chunks = normalizePiRpcEvent(event, this.normalizationState);
-    if (chunks.length > 0) this.ensureAccepted(active);
+    if (chunks.length > 0) this.#ensureAccepted(active);
     for (const chunk of chunks) {
       this.handleStreamChunk(kernel, generation, chunk);
     }
@@ -778,7 +793,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     generation: number,
     chunk: StreamChunk,
   ): void {
-    if (!this.isCurrentKernel(kernel, generation)) return;
+    if (!this.#isCurrentKernel(kernel, generation)) return;
     const active = this.activeRun;
     if (!active || active.terminal) return;
     if (chunk.type === 'done') return;
@@ -786,14 +801,14 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       active.terminalSignal.reject(new Error(chunk.content));
       return;
     }
-    this.ensureAccepted(active);
+    this.#ensureAccepted(active);
     if (isAssistantChunk(chunk) && !active.assistantStarted) {
       active.assistantStarted = true;
-      this.emitRequested(active, { type: 'assistant_message_started' });
+      this.#emitRequested(active, { type: 'assistant_message_started' });
     }
     switch (chunk.type) {
       case 'user_message_start':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           content: chunk.content,
           nativeUserMessageId: chunk.itemId,
           type: 'user_message_started',
@@ -802,29 +817,29 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       case 'assistant_message_start':
         active.assistantStarted = true;
         active.nativeAssistantId = chunk.itemId;
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           nativeAssistantId: chunk.itemId,
           type: 'assistant_message_started',
         });
         break;
       case 'text':
-        this.emitRequested(active, { text: chunk.content, type: 'text_delta' });
+        this.#emitRequested(active, { text: chunk.content, type: 'text_delta' });
         break;
       case 'thinking':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           text: chunk.content,
           type: 'thinking_delta',
         });
         break;
       case 'citations':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           citations: chunk.citations,
           type: 'citations',
         });
         break;
       case 'tool_use':
       case 'subagent_tool_use':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           input: chunk.input,
           name: chunk.name,
           toolCallId: chunk.id,
@@ -833,7 +848,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         });
         break;
       case 'tool_output':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           content: chunk.content,
           toolCallId: chunk.id,
           toolScope: { kind: 'main' },
@@ -842,7 +857,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         break;
       case 'tool_result':
       case 'subagent_tool_result':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           content: chunk.content,
           isError: chunk.isError,
           isBlocked: chunk.isBlocked,
@@ -853,16 +868,16 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         });
         break;
       case 'usage':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           type: 'usage_updated',
           usage: chunk.usage,
         });
         break;
       case 'context_compacted':
-        this.emitRequested(active, { type: 'context_compacted' });
+        this.#emitRequested(active, { type: 'context_compacted' });
         break;
       case 'notice':
-        this.emitRequested(active, {
+        this.#emitRequested(active, {
           level: chunk.level,
           message: chunk.content,
           type: 'notice',
@@ -871,12 +886,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private handleKernelClose(
+  #handleKernelClose(
     kernel: PiExecutionKernel,
     generation: number,
     error?: Error,
   ): void {
-    if (!this.isCurrentKernel(kernel, generation) || this.disposed) return;
+    if (!this.#isCurrentKernel(kernel, generation) || this.disposed) return;
     const missingProviderSessionId = getPiMissingSessionTarget(
       kernel.launchSpec,
       kernel.getStderrSnapshot(),
@@ -885,7 +900,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     this.processKey = null;
     this.kernelResumeValidationTarget = null;
     this.kernelSessionTargets.clear();
-    if (!this.hasNativeSessionState()) {
+    if (!this.#hasNativeSessionState() && !this.#shouldDisableNativePersistence()) {
       this.nativeConversationContextEstablished = false;
     }
     const active = this.activeRun;
@@ -895,7 +910,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         ?? new Error('Pi subprocess exited.');
       active.pendingTerminalError = null;
       active.terminalSignal.reject(runError);
-      this.finishError(
+      this.#finishError(
         active,
         runError,
         missingProviderSessionId
@@ -904,16 +919,16 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         missingProviderSessionId ?? undefined,
       );
     } else {
-      this.setInvalidated({
+      this.#setInvalidated({
         message: error?.message ?? 'Pi subprocess exited.',
         reason: 'process-exited',
         recoverable: true,
       });
-      this.emitSession({
+      this.#emitSession({
         snapshot: this.getSnapshot(),
         type: 'session_state_changed',
       });
-      this.emitSession({
+      this.#emitSession({
         category: 'process-exited',
         message: error?.message ?? 'Pi subprocess exited.',
         recoverable: true,
@@ -930,24 +945,24 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     this.shutdownPromise = shutdown;
   }
 
-  private ensureAccepted(active: ActiveRun): void {
+  #ensureAccepted(active: ActiveRun): void {
     if (!this.isActive(active) || !active.nativeRequestDispatched) return;
     this.nativeConversationContextEstablished = true;
     if (active.accepted) return;
     active.accepted = true;
-    this.emitRequested(active, {
+    this.#emitRequested(active, {
       accepted: true,
       nativeUserMessageId: active.nativeUserMessageId,
       type: 'turn_started',
     });
-    this.emitRequested(active, {
+    this.#emitRequested(active, {
       content: active.inputText,
       nativeUserMessageId: active.nativeUserMessageId,
       type: 'user_message_started',
     });
   }
 
-  private async refreshState(signal: AbortSignal): Promise<void> {
+  async #refreshState(signal: AbortSignal): Promise<void> {
     if (!this.kernel) throw new Error('Pi execution kernel is unavailable.');
     const response = await this.kernel.request<unknown>(
       'get_state',
@@ -955,11 +970,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       10_000,
       signal,
     );
-    if (this.shouldDisableNativePersistence()) {
+    if (this.#shouldDisableNativePersistence()) {
       this.providerSessionId = null;
-      this.removeNativeProviderState();
+      this.#removeNativeProviderState();
       this.kernelSessionTargets.clear();
-      this.bumpRevision();
+      this.#bumpRevision();
       return;
     }
     const state = extractStateRecord(response);
@@ -980,28 +995,30 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       ?? getString(state.parent_session)
       ?? getPiState(this.providerState).parentSession;
     this.providerSessionId = sessionId ?? null;
-    this.setOptionalProviderStateValue('sessionId', sessionId);
-    this.setOptionalProviderStateValue('sessionFile', sessionFile);
-    this.setOptionalProviderStateValue('leafEntryId', leafEntryId);
-    this.setOptionalProviderStateValue('parentSession', parentSession);
-    this.replaceKernelSessionTargets(sessionFile, sessionId);
-    this.deleteProviderStateValue('forkSource');
-    this.deleteProviderStateValue('forkSourceSessionFile');
-    this.bumpRevision();
+    this.#setOptionalProviderStateValue('sessionId', sessionId);
+    this.#setOptionalProviderStateValue('sessionFile', sessionFile);
+    this.#setOptionalProviderStateValue('leafEntryId', leafEntryId);
+    this.#setOptionalProviderStateValue('parentSession', parentSession);
+    this.#replaceKernelSessionTargets(sessionFile, sessionId);
+    this.#deleteProviderStateValue('forkSource');
+    this.#deleteProviderStateValue('forkSourceSessionFile');
+    this.#bumpRevision();
   }
 
-  private async refreshNativeMessageIds(
+  async #refreshNativeMessageIds(
     active: ActiveRun,
     previousLeafId: string | null,
   ): Promise<void> {
     const sessionFile = getPiState(this.providerState).sessionFile;
     if (!sessionFile) return;
     try {
-      const parsed = parsePiSessionEntries(await fsp.readFile(sessionFile, 'utf8'));
-      const path = resolvePiActivePath(
-        parsed.entries,
-        getPiState(this.providerState).leafEntryId,
-      );
+      const content = await fsp.readFile(sessionFile, 'utf8');
+      const parsed = parsePiSessionEntries(content);
+      if (!this.isActive(active)) return;
+      // Live completion follows the appended native branch, not the saved resume leaf.
+      const path = resolvePiActivePath(parsed.entries);
+      const leafEntryId = [...path].reverse().find(entry => entry.id)?.id;
+      if (leafEntryId) this.#setOptionalProviderStateValue('leafEntryId', leafEntryId);
       const previousIndex = previousLeafId
         ? path.findIndex(entry => entry.id === previousLeafId)
         : -1;
@@ -1010,12 +1027,13 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       active.nativeAssistantId =
         findLastRoleId(entries, 'assistant')
         ?? getPiState(this.providerState).leafEntryId;
+      active.turnStats = getPiTurnStats(entries, active.nativeAssistantId);
     } catch {
       active.nativeAssistantId = getPiState(this.providerState).leafEntryId;
     }
   }
 
-  private async fetchUsage(model: string, signal: AbortSignal) {
+  async #fetchUsage(model: string, signal: AbortSignal) {
     if (!this.kernel) return null;
     const settings = getPiProviderSettings(this.host.settings);
     const contextWindow = findPiModel(settings, model)?.contextWindow;
@@ -1028,13 +1046,13 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     return buildPiUsageInfo(response, model, contextWindow);
   }
 
-  private async publishCommands(
+  async #publishCommands(
     kernel: PiExecutionKernel,
     generation: number,
   ): Promise<void> {
     try {
       const response = await kernel.request<unknown>('get_commands', {}, 10_000);
-      if (!this.isCurrentKernel(kernel, generation) || this.disposed) return;
+      if (!this.#isCurrentKernel(kernel, generation) || this.disposed) return;
       this.services.commandCatalog.setCommandSnapshot(
         normalizePiRuntimeCommands(response),
       );
@@ -1043,7 +1061,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private async materializePendingFork(active: ActiveRun): Promise<void> {
+  async #materializePendingFork(active: ActiveRun): Promise<void> {
     while (this.forkMaterializationFlight) {
       const priorFlight = this.forkMaterializationFlight;
       try {
@@ -1058,7 +1076,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         throw new PiExecutionCancelledError();
       }
     }
-    const flight = this.materializePendingForkForRun(active);
+    const flight = this.#materializePendingForkForRun(active);
     this.forkMaterializationFlight = flight;
     try {
       await flight;
@@ -1072,8 +1090,8 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private async materializePendingForkForRun(active: ActiveRun): Promise<void> {
-    if (this.shouldDisableNativePersistence()) return;
+  async #materializePendingForkForRun(active: ActiveRun): Promise<void> {
+    if (this.#shouldDisableNativePersistence()) return;
     const state = getPiState(this.providerState);
     const forkSource = state.forkSource;
     if (!forkSource) return;
@@ -1097,20 +1115,20 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       throw new Error('Pi fork materialization returned the source session as its target.');
     }
     if (!this.isActive(active) || active.abortController.signal.aborted) {
-      await this.rollbackCreatedFork(fork);
+      await this.#rollbackCreatedFork(fork);
       return;
     }
-    this.setProviderStateValue('leafEntryId', fork.leafEntryId);
-    this.setProviderStateValue('parentSession', fork.parentSession);
-    this.setProviderStateValue('sessionFile', fork.sessionFile);
-    this.setProviderStateValue('sessionId', fork.sessionId);
-    this.deleteProviderStateValue('forkSource');
-    this.deleteProviderStateValue('forkSourceSessionFile');
+    this.#setProviderStateValue('leafEntryId', fork.leafEntryId);
+    this.#setProviderStateValue('parentSession', fork.parentSession);
+    this.#setProviderStateValue('sessionFile', fork.sessionFile);
+    this.#setProviderStateValue('sessionId', fork.sessionId);
+    this.#deleteProviderStateValue('forkSource');
+    this.#deleteProviderStateValue('forkSourceSessionFile');
     this.providerSessionId = fork.sessionId;
-    this.bumpRevision();
+    this.#bumpRevision();
   }
 
-  private async rollbackCreatedFork(
+  async #rollbackCreatedFork(
     fork: CreatedPiForkSessionFile,
   ): Promise<void> {
     try {
@@ -1120,7 +1138,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private invalidateForForkRollback(error: PiForkRollbackError): boolean {
+  #invalidateForForkRollback(error: PiForkRollbackError): boolean {
     if (
       this.disposed
       || (
@@ -1129,7 +1147,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         && this.snapshotInvalidation.recoverable === false
       )
     ) return false;
-    this.setInvalidated({
+    this.#setInvalidated({
       message: error.message,
       reason: 'provider-error',
       recoverable: false,
@@ -1137,12 +1155,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     return true;
   }
 
-  private shouldDisableNativePersistence(): boolean {
+  #shouldDisableNativePersistence(): boolean {
     return this.config.lifecycle === 'ephemeral'
       || this.config.nativePersistence === 'disabled-if-supported';
   }
 
-  private finishError(
+  #finishError(
     active: ActiveRun,
     error: unknown,
     category?: ProviderExecutionErrorCategory,
@@ -1164,9 +1182,9 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       this.kernel?.getStderrSnapshot(),
     );
     if (details.category === 'configuration') {
-      this.setStatus('idle');
+      this.#setStatus('idle');
     } else {
-      this.setInvalidated({
+      this.#setInvalidated({
         message: details.message,
         reason: details.category === 'process-exited'
           ? 'process-exited'
@@ -1178,8 +1196,8 @@ implements ProviderExecutionSession, SteerableExecutionSession {
         recoverable: details.recoverable,
       });
     }
-    this.emitRequestedState(active);
-    this.finishRequested(active, {
+    this.#emitRequestedState(active);
+    this.#finishRequested(active, {
       ...details,
       ...(confirmedMissingProviderSessionId
         ? { missingProviderSessionId: confirmedMissingProviderSessionId }
@@ -1188,12 +1206,12 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     });
   }
 
-  private finishRequested(
+  #finishRequested(
     active: ActiveRun,
     event: WithoutScope<ProviderExecutionEvent>,
   ): void {
     if (active.terminal) return;
-    this.emitRequested(active, event);
+    this.#emitRequested(active, event);
     active.terminal = true;
     active.requestSignal.removeEventListener(
       'abort',
@@ -1203,28 +1221,28 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     if (this.activeRun === active) this.activeRun = null;
   }
 
-  private emitRequested(
+  #emitRequested(
     active: ActiveRun,
     event: WithoutScope<ProviderExecutionEvent>,
   ): void {
     if (active.terminal) return;
     active.events.push({
       ...event,
-      scope: this.nextRequestedScope(active),
+      scope: this.#nextRequestedScope(active),
     });
   }
 
-  private emitRequestedState(active: ActiveRun): void {
-    this.emitRequested(active, {
+  #emitRequestedState(active: ActiveRun): void {
+    this.#emitRequested(active, {
       snapshot: this.getSnapshot(),
       type: 'session_state_changed',
     });
   }
 
-  private emitSession(event: WithoutScope<ProviderSessionEvent>): void {
+  #emitSession(event: WithoutScope<ProviderSessionEvent>): void {
     const scoped = {
       ...event,
-      scope: this.nextSessionScope(),
+      scope: this.#nextSessionScope(),
     } as ProviderSessionEvent;
     for (const listener of this.sessionListeners) {
       try {
@@ -1235,7 +1253,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private nextRequestedScope(active: ActiveRun): ProviderRequestedEventScope {
+  #nextRequestedScope(active: ActiveRun): ProviderRequestedEventScope {
     return Object.freeze({
       executionId: active.executionId,
       kind: 'requested',
@@ -1245,7 +1263,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     });
   }
 
-  private nextSessionScope(): ProviderSessionEventScope {
+  #nextSessionScope(): ProviderSessionEventScope {
     return Object.freeze({
       kind: 'session',
       sequence: ++this.sessionSequence,
@@ -1259,7 +1277,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       && !active.terminal;
   }
 
-  private isCurrentKernel(
+  #isCurrentKernel(
     kernel: PiExecutionKernel,
     generation: number,
   ): boolean {
@@ -1268,14 +1286,14 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       && !this.disposed;
   }
 
-  private canReuseKernel(launchSpec: PiLaunchSpec): boolean {
+  #canReuseKernel(launchSpec: PiLaunchSpec): boolean {
     if (!this.kernel || this.processKey !== launchSpec.processKey) return false;
     return launchSpec.sessionTarget
       ? this.kernelSessionTargets.has(launchSpec.sessionTarget)
       : this.kernelSessionTargets.size === 0;
   }
 
-  private replaceKernelSessionTargets(
+  #replaceKernelSessionTargets(
     ...targets: Array<string | null | undefined>
   ): void {
     this.kernelSessionTargets.clear();
@@ -1284,7 +1302,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     }
   }
 
-  private shutdownKernel(): Promise<void> {
+  #shutdownKernel(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     const kernel = this.kernel;
     this.kernel = null;
@@ -1292,7 +1310,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     this.kernelResumeValidationTarget = null;
     this.kernelSessionTargets.clear();
     this.kernelGeneration += 1;
-    if (!this.hasNativeSessionState()) {
+    if (!this.#hasNativeSessionState() && !this.#shouldDisableNativePersistence()) {
       this.nativeConversationContextEstablished = false;
     }
     if (!kernel) return Promise.resolve();
@@ -1305,17 +1323,17 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     return shutdown;
   }
 
-  private hasNativeSessionState(): boolean {
+  #hasNativeSessionState(): boolean {
     const state = getPiState(this.providerState);
     return Boolean(state.sessionId || state.sessionFile);
   }
 
-  private async shutdownAcquiredKernel(
+  async #shutdownAcquiredKernel(
     kernel: PiExecutionKernel,
     generation: number,
   ): Promise<void> {
     if (this.kernel === kernel && this.kernelGeneration === generation) {
-      await this.shutdownKernel().catch(() => undefined);
+      await this.#shutdownKernel().catch(() => undefined);
       return;
     }
     if (this.shutdownPromise) {
@@ -1325,19 +1343,19 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     await kernel.shutdown().catch(() => undefined);
   }
 
-  private setStatus(status: Exclude<ProviderSessionStatus, 'invalidated'>): void {
+  #setStatus(status: Exclude<ProviderSessionStatus, 'invalidated'>): void {
     this.status = status;
     this.snapshotInvalidation = null;
-    this.bumpRevision();
+    this.#bumpRevision();
   }
 
-  private setInvalidated(invalidation: ProviderSessionInvalidation): void {
+  #setInvalidated(invalidation: ProviderSessionInvalidation): void {
     this.status = 'invalidated';
     this.snapshotInvalidation = invalidation;
-    this.bumpRevision();
+    this.#bumpRevision();
   }
 
-  private setProviderStateValue(
+  #setProviderStateValue(
     key: keyof PiProviderState,
     value: unknown,
   ): void {
@@ -1345,26 +1363,26 @@ implements ProviderExecutionSession, SteerableExecutionSession {
     this.providerStateDeletes.delete(key);
   }
 
-  private setOptionalProviderStateValue(
+  #setOptionalProviderStateValue(
     key: keyof PiProviderState,
     value: string | undefined,
   ): void {
-    if (value) this.setProviderStateValue(key, value);
+    if (value) this.#setProviderStateValue(key, value);
   }
 
-  private deleteProviderStateValue(key: keyof PiProviderState): void {
+  #deleteProviderStateValue(key: keyof PiProviderState): void {
     const hadValue = Object.prototype.hasOwnProperty.call(this.providerState, key);
     delete this.providerState[key];
     if (hadValue) this.providerStateDeletes.add(key);
   }
 
-  private removeNativeProviderState(): void {
+  #removeNativeProviderState(): void {
     for (const key of PI_NATIVE_PROVIDER_STATE_KEYS) {
-      this.deleteProviderStateValue(key);
+      this.#deleteProviderStateValue(key);
     }
   }
 
-  private bumpRevision(): void {
+  #bumpRevision(): void {
     this.revision += 1;
   }
 }
@@ -1552,6 +1570,7 @@ function resolveSystemPrompt(
 function encodePrompt(
   request: ProviderExecutionRequest,
   replayConversationHistory: boolean,
+  preserveCapturedContext = false,
 ): {
   images: PiPromptImage[];
   text: string;
@@ -1572,7 +1591,7 @@ function encodePrompt(
   }
   if (replayConversationHistory && request.conversationHistory?.length) {
     const history = [...request.conversationHistory] as ChatMessage[];
-    const historyContext = buildContextFromHistory(history);
+    const historyContext = buildContextFromHistory(history, { preserveCapturedContext });
     const recoveredPrompt = buildPromptWithHistoryContext(
       historyContext,
       text,
@@ -1584,15 +1603,19 @@ function encodePrompt(
       recoveredPrompt === historyContext ? null : text,
     );
   }
+  const historyImages: PiPromptImage[] = replayConversationHistory && preserveCapturedContext
+    ? getHistoryImages(request.conversationHistory ?? []).map(image => ({
+        data: image.data, mimeType: image.mediaType, type: 'image',
+      })) : [];
   return {
-    images: request.input.flatMap((block): PiPromptImage[] => {
+    images: [...historyImages, ...request.input.flatMap((block): PiPromptImage[] => {
       if (block.type !== 'image' || !block.image.data) return [];
       return [{
         data: block.image.data,
         mimeType: block.image.mediaType,
         type: 'image',
       }];
-    }),
+    })],
     text,
   };
 }
@@ -1655,7 +1678,7 @@ function classifyError(
     ? `${baseMessage}\n\n${stderr.trim()}`
     : baseMessage;
   const resolvedCategory = category
-    ?? (error instanceof PiConfigurationError
+    ?? ((error instanceof PiConfigurationError || error instanceof ProviderModelUnavailableError)
       ? 'configuration'
       : /closed|transport/i.test(baseMessage)
         ? 'transport'

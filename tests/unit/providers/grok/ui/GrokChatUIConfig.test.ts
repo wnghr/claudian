@@ -57,10 +57,10 @@ jest.mock('@/utils/env', () => ({
 }));
 
 describe('GrokChatUIConfig', () => {
-  it('owns only enabled provider-qualified Grok models and resolves the enabled default', () => {
+  it('owns unavailable provider-qualified Grok models and resolves the enabled default', () => {
     expect(grokChatUIConfig.ownsModel('grok', {})).toBe(false);
     expect(grokChatUIConfig.ownsModel('grok/grok-4', makeSettings())).toBe(true);
-    expect(grokChatUIConfig.ownsModel('grok/kimi-coding', makeSettings())).toBe(false);
+    expect(grokChatUIConfig.ownsModel('grok/kimi-coding', makeSettings())).toBe(true);
     expect(grokChatUIConfig.ownsModel('grok/', {})).toBe(false);
     expect(grokChatUIConfig.ownsModel('grok-4', {})).toBe(false);
     expect(grokChatUIConfig.getDefaultModel?.({})).toBeNull();
@@ -322,22 +322,6 @@ describe('GrokChatUIConfig', () => {
     expect(getGrokProviderSettings(settings).preferredReasoningByModel).toEqual({
       'grok-4': 'xhigh',
     });
-  });
-
-  it('resolves model context before custom limits and the provider fallback', () => {
-    const settings = makeSettings();
-
-    expect(grokChatUIConfig.getContextWindowSize(
-      'grok/grok-4',
-      { 'grok/grok-4': 100_000 },
-      settings,
-    )).toBe(256_000);
-    expect(grokChatUIConfig.getContextWindowSize(
-      'grok/unknown',
-      { 'grok/unknown': 123_000 },
-      settings,
-    )).toBe(123_000);
-    expect(grokChatUIConfig.getContextWindowSize('grok/unknown', undefined, settings)).toBe(200_000);
   });
 
   it('normalizes explicit ids without replacing hidden current selections', () => {

@@ -12,9 +12,9 @@ import type {
 } from '../../../core/execution';
 import type { ProviderInteractionPort } from '../../../core/execution';
 import { buildSystemPrompt } from '../../../core/prompt/mainAgent';
+import { ProviderModelUnavailableError } from '../../../core/providers/models/ProviderModelUnavailableError';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
-import type { AppPluginManager } from '../../../core/providers/types';
 import type { PluginToolConfirmationRequest } from '../../../core/tools/PluginToolContext';
 import { PLUGIN_TOOL_INSTRUCTIONS } from '../../../core/tools/pluginToolSpecs';
 import {
@@ -35,13 +35,18 @@ import {
 import { appendEditorContext } from '../../../utils/editor';
 import {
   getEnhancedPath,
-  getMissingNodeError,
   parseEnvironmentVariables,
 } from '../../../utils/env';
 import {
   buildContextFromHistory,
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
+import { getMissingNodeError } from '../cli/claudeLaunchValidation';
+import {
+  findClaudeModelOption,
+  getClaudeModelCatalog,
+  getClaudeModelOptions,
+} from '../modelOptions';
 import { toClaudeRuntimeModelId } from '../modelSelection';
 import { createClaudePluginToolServers } from '../runtime/ClaudePluginTools';
 import { createCustomSpawnFunction } from '../runtime/customSpawn';
@@ -51,21 +56,16 @@ import {
   UNSUPPORTED_SDK_TOOLS,
 } from '../runtime/types';
 import {
+  type ClaudeResponseStyle,
   getClaudeProviderSettings,
   resolveClaudeSettingSources,
 } from '../settings';
 import {
   type EffortLevel,
-  resolveEffortLevel,
+  isEffortLevel,
+  resolveSupportedEffortLevel,
 } from '../types/models';
 
-const EFFORT_LEVELS = new Set<EffortLevel>([
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-]);
 const PERMISSION_MODES = new Set<PermissionMode>([
   'normal',
   'yolo',
@@ -86,7 +86,9 @@ export interface ClaudeEncodedExecutionRequest {
   readonly images: ImageAttachment[];
   readonly options: Options;
   readonly model: string;
-  readonly effort: EffortLevel;
+  /** Explicit effort, or null when Claude Code reported no capabilities for the model. */
+  readonly effort: EffortLevel | null;
+  readonly responseStyle: ClaudeResponseStyle;
   readonly sdkPermissionMode: SDKPermissionMode;
   readonly restartKey: string;
   readonly allowedTools: ReadonlySet<string> | null;
@@ -94,7 +96,6 @@ export interface ClaudeEncodedExecutionRequest {
 
 export interface ClaudeExecutionRequestEncoderDeps {
   readonly host: ProviderHost;
-  readonly pluginManager: AppPluginManager;
   readonly getLinkedPaperPath: () => string | null;
   readonly interactionPort: ProviderInteractionPort;
   readonly sessionInstanceId: string;
@@ -126,19 +127,26 @@ export class ClaudeExecutionRequestEncoder {
       throw new Error(missingNodeError);
     }
 
-    const settings = this.resolveSettings(request);
+    const settings = this.#resolveSettings(request);
     const claudeSettings = getClaudeProviderSettings(settings);
-    const model = toClaudeRuntimeModelId(settings.model);
-    const effort = resolveEffortLevel(
-      model,
-      isEffortLevel(request.configuration.reasoning)
-        ? request.configuration.reasoning
-        : settings.effortLevel,
-    );
+    const selected = findClaudeModelOption(getClaudeModelCatalog(this.deps.host.settings), settings.model);
+    if (!getClaudeProviderSettings(this.deps.host.settings).enabled || !selected
+      || !getClaudeModelOptions(this.deps.host.settings).some(option => option.value === selected.value)) {
+      throw new ProviderModelUnavailableError('Claude');
+    }
+    const model = toClaudeRuntimeModelId(selected.value);
+    const effort = request.configuration.reasoning === null
+      ? null
+      : resolveSupportedEffortLevel(
+        selected.supportedEffortLevels ?? [],
+        isEffortLevel(request.configuration.reasoning)
+          ? request.configuration.reasoning
+          : settings.effortLevel,
+      );
     const sdkPermissionMode = settings.permissionMode === 'yolo'
       ? 'bypassPermissions'
       : claudeSettings.safeMode;
-    const prompt = this.encodePrompt(request, replayConversationHistory);
+    const prompt = this.#encodePrompt(request, replayConversationHistory);
     const policy = resolveToolPolicy(request);
     const baseSystemPrompt = request.configuration.systemInstructions.kind === 'explicit'
       ? [
@@ -169,7 +177,8 @@ export class ClaudeExecutionRequestEncoder {
         snapshot: false,
       },
       model,
-      effort,
+      ...(effort ? { effort } : {}),
+      settings: { outputStyle: claudeSettings.responseStyle },
       thinking: { type: 'adaptive' },
       abortController,
       pathToClaudeCodeExecutable: cliPath,
@@ -184,6 +193,11 @@ export class ClaudeExecutionRequestEncoder {
         claudeSettings.loadUserSettings,
       ),
       spawnClaudeCodeProcess: createCustomSpawnFunction(enhancedPath),
+      // Auto mode stays available so safe-mode switches remain live setters.
+      extraArgs: {
+        'enable-auto-mode': null,
+        ...(claudeSettings.enableChrome ? { chrome: null } : {}),
+      },
       includePartialMessages: true,
       enableFileCheckpointing: true,
       canUseTool,
@@ -191,7 +205,7 @@ export class ClaudeExecutionRequestEncoder {
         ? {}
         : {
             mcpServers: createClaudePluginToolServers({
-              confirmToolAction: request => this.confirmPluginTool(request, abortController.signal),
+              confirmToolAction: request => this.#confirmPluginTool(request, abortController.signal),
               fields: this.deps.host,
               getLinkedPaperPath: this.deps.getLinkedPaperPath,
               reader: this.deps.host,
@@ -211,26 +225,13 @@ export class ClaudeExecutionRequestEncoder {
       ...(resume.fork ? { forkSession: true } : {}),
     };
 
-    if (claudeSettings.safeMode === 'auto') {
-      options.extraArgs = {
-        ...options.extraArgs,
-        'enable-auto-mode': null,
-      };
-    }
-    if (claudeSettings.enableChrome) {
-      options.extraArgs = {
-        ...options.extraArgs,
-        chrome: null,
-      };
-    }
     if (sessionConfig.nativePersistence === 'disabled-if-supported') {
       options.persistSession = false;
-      if (request.toolPolicy.kind === 'passive') {
-        delete options.thinking;
-        delete options.effort;
-      }
     } else if (sessionConfig.nativePersistence === 'enabled') {
       options.persistSession = true;
+    }
+    if (request.configuration.reasoning === null) {
+      delete options.thinking;
     }
 
     return {
@@ -242,22 +243,21 @@ export class ClaudeExecutionRequestEncoder {
       model,
       effort,
       sdkPermissionMode,
+      responseStyle: claudeSettings.responseStyle,
       restartKey: JSON.stringify({
         systemPrompt,
         tools: policy.tools,
-        disallowedTools: options.disallowedTools,
         hooks: Boolean(policy.hooks),
         cliPath,
         settingSources: options.settingSources,
         enableChrome: claudeSettings.enableChrome,
-        enableAutoMode: claudeSettings.safeMode === 'auto',
         persistSession: options.persistSession,
       }),
       allowedTools: policy.allowedTools,
     };
   }
 
-  private async confirmPluginTool(
+  async #confirmPluginTool(
     request: PluginToolConfirmationRequest,
     signal: AbortSignal,
   ): Promise<boolean> {
@@ -285,7 +285,7 @@ export class ClaudeExecutionRequestEncoder {
     }
   }
 
-  private resolveSettings(request: ProviderExecutionRequest): ClaudianSettings {
+  #resolveSettings(request: ProviderExecutionRequest): ClaudianSettings {
     const settings = ProviderSettingsCoordinator.getProviderSettingsSnapshot(
       this.deps.host.settings,
       'claude',
@@ -303,7 +303,7 @@ export class ClaudeExecutionRequestEncoder {
     return settings;
   }
 
-  private encodePrompt(
+  #encodePrompt(
     request: ProviderExecutionRequest,
     replayConversationHistory: boolean,
   ): string {
@@ -409,11 +409,6 @@ function createReadOnlyHook(): HookCallbackMatcher {
 function isPermissionMode(value: unknown): value is PermissionMode {
   return typeof value === 'string'
     && PERMISSION_MODES.has(value as PermissionMode);
-}
-
-function isEffortLevel(value: unknown): value is EffortLevel {
-  return typeof value === 'string'
-    && EFFORT_LEVELS.has(value as EffortLevel);
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

@@ -97,7 +97,15 @@ export type ContentBlock =
   | { type: 'thinking'; content: string; durationSeconds?: number }
   | { type: 'subagent'; subagentId: string; mode?: SubagentMode }
   | { type: 'citations'; citations: CitationGroup }
+  | { type: 'task_notification'; content: string }
   | { type: 'context_compacted' };
+
+/** Authoritative main-agent output across a completed turn, including reasoning. */
+export interface TurnStats {
+  outputTokens: number;
+  /** Total elapsed turn time, including tools and waits. */
+  durationMs: number;
+}
 
 /** Chat message with content, tool calls, and attachments. */
 export interface ChatMessage {
@@ -109,6 +117,8 @@ export interface ChatMessage {
   timestamp: number;
   /** Assistant completion time; absent until the response finishes. */
   completedAt?: number;
+  /** Provider-triggered response without a new user request. */
+  isAutomaticResponse?: boolean;
   toolCalls?: ToolCallInfo[];
   contentBlocks?: ContentBlock[];
   linkedContentPath?: string;
@@ -123,6 +133,7 @@ export interface ChatMessage {
   isRebuiltContext?: boolean;
   /** Duration in seconds from user send to response completion. */
   durationSeconds?: number;
+  turnStats?: TurnStats;
   /** Flavor word used for duration display (e.g., "Baked", "Cooked"). */
   durationFlavorWord?: string;
   /** Provider-native user message identifier used for rewind. */
@@ -270,6 +281,7 @@ export type StreamChunk =
   | { type: 'done' }
   | { type: 'usage'; usage: UsageInfo; sessionId?: string | null }
   | { type: 'context_compacted' }
+  | { type: 'task_notification'; content: string }
   | { type: 'subagent_tool_use'; subagentId: string; id: string; name: string; input: Record<string, unknown> }
   | {
       type: 'subagent_tool_result';
@@ -300,9 +312,8 @@ export interface UsageInfo {
   cacheCreationInputTokens?: number;
   /** Prompt caching: tokens read from cache. Claude-specific; 0 if omitted. */
   cacheReadInputTokens?: number;
+  /** Provider-reported window size, or 0 when the provider has not reported one. */
   contextWindow: number;
-  /** True when `contextWindow` came from provider runtime data instead of a local heuristic. */
-  contextWindowIsAuthoritative?: boolean;
   contextTokens: number;
   percentage: number;
 }

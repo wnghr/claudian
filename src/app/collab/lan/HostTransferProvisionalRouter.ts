@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { type CollabOperationId, type CollabProjectId, isCollabMemberId, isCollabOpaqueId, isCollabProjectId } from '@claudian-collab/protocol';
+import { type CollabOperationId, type CollabProjectId, decodeCollabLanHostActivationProof, isCollabMemberId, isCollabOpaqueId, isCollabProjectId } from '@claudian-collab/protocol';
 
+import { COLLAB_AUTHORITY_SCHEMA_VERSION } from '@/app/collab/CollabSchemaVersions';
 import {
   HOST_TRANSFER_MAX_AUTHORITY_SNAPSHOT_BYTES,
   HOST_TRANSFER_MAX_GIT_BUNDLE_BYTES,
@@ -213,12 +214,15 @@ export class HostTransferProvisionalRouter {
       requireCredential(request, receiver.credentialHash);
       if (request.method !== 'POST') throw routeError('host-transfer-method-invalid');
       if (action === 'probe') {
-        writeJson(response, 200, { projectId: receiver.projectId, transferId });
+        writeJson(response, 200, {
+          authoritySchemaVersions: [12, COLLAB_AUTHORITY_SCHEMA_VERSION],
+          projectId: receiver.projectId, transferId,
+        });
         return true;
       }
       if (action === 'cancel') {
         const result = await receiver.coordinator.cancel(receiver.projectId, transferId);
-        this.writeTerminalResponse(
+        this.#writeTerminalResponse(
           response,
           receiver,
           result,
@@ -229,7 +233,7 @@ export class HostTransferProvisionalRouter {
       }
       if (action === 'complete') {
         const result = await receiver.coordinator.complete(receiver.projectId, transferId);
-        this.writeTerminalResponse(
+        this.#writeTerminalResponse(
           response,
           receiver,
           result,
@@ -240,7 +244,7 @@ export class HostTransferProvisionalRouter {
       }
       if (action === 'confirm') {
         const result = await receiver.coordinator.confirm(receiver.projectId, transferId);
-        this.writeTerminalResponse(
+        this.#writeTerminalResponse(
           response,
           receiver,
           result,
@@ -257,7 +261,19 @@ export class HostTransferProvisionalRouter {
         } catch {
           throw routeError('host-transfer-activation-invalid');
         }
-        const certificate = activationCertificate(decoded);
+        const legacyCertificate = activationCertificate(decoded);
+        const encodedProof = request.headers['x-claudian-host-activation-proof'];
+        let certificate = legacyCertificate;
+        if (encodedProof !== undefined) {
+          if (typeof encodedProof !== 'string' || encodedProof.length > MAX_ACTIVATION_BYTES
+            || !/^[A-Za-z0-9_-]+$/.test(encodedProof)) throw routeError('host-transfer-activation-invalid');
+          try {
+            const bytes = Buffer.from(encodedProof, 'base64url');
+            if (bytes.toString('base64url') !== encodedProof) throw new Error('Invalid encoding');
+            certificate = { ...legacyCertificate,
+              authorityProof: decodeCollabLanHostActivationProof(JSON.parse(bytes.toString('utf8'))) };
+          } catch { throw routeError('host-transfer-activation-invalid'); }
+        }
         if (certificate.projectId !== receiver.projectId || certificate.transferId !== transferId) {
           throw routeError('host-transfer-activation-binding-mismatch');
         }
@@ -337,7 +353,7 @@ export class HostTransferProvisionalRouter {
     return this.receivers.delete(transferId);
   }
 
-  private writeTerminalResponse(
+  #writeTerminalResponse(
     response: ServerResponse,
     receiver: RegisteredReceiver,
     result: IncomingHostTransferTerminalResult,

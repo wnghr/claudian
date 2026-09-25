@@ -84,6 +84,7 @@ export interface GitInfo {
 
 export interface Turn {
   id: string;
+  durationMs?: number | null;
   items: ThreadItem[];
   status: 'inProgress' | 'completed' | 'failed' | 'interrupted';
   error: TurnError | null;
@@ -382,6 +383,7 @@ export interface ThreadStartParams {
   serviceTier?: string | null;
   baseInstructions?: string;
   experimentalRawEvents?: boolean;
+  ephemeral?: boolean;
   persistExtendedHistory?: boolean;
   sandboxPolicy?: SandboxPolicy;
   dynamicTools?: LegacyDynamicToolSpec[];
@@ -786,6 +788,22 @@ export interface PermissionsApprovalRequest {
 export interface PermissionsApprovalResponse {
   permissions: GrantedPermissionProfile;
   scope?: PermissionGrantScope;
+}
+
+// -- MCP elicitation (mcpServer/elicitation/request) -------------------------
+
+export interface McpElicitationRequest {
+  threadId: string;
+  turnId: string | null;
+  serverName: string;
+  mode: 'form' | 'openai/form' | 'url';
+  message: string;
+  requestedSchema?: unknown;
+}
+
+export interface McpElicitationResponse {
+  action: 'accept' | 'decline' | 'cancel';
+  content: Record<string, unknown> | null;
 }
 
 // -- Tool request user input (item/tool/requestUserInput) --------------------

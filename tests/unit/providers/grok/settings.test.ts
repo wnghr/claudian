@@ -7,13 +7,12 @@ jest.mock('../../../../src/utils/env', () => ({
 
 import {
   clearCurrentGrokCatalog,
-  DEFAULT_GROK_PROVIDER_SETTINGS,
   getCurrentGrokCatalog,
   getGrokProviderSettings,
   normalizeGrokCatalogSnapshot,
   updateCurrentGrokCatalog,
   updateGrokProviderSettings,
-  updateGrokVisibleModels,
+  updateGrokVisibleModels
 } from '@/providers/grok/settings';
 import {
   buildGrokProviderState,
@@ -48,20 +47,6 @@ describe('Grok settings', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetHostnameKey.mockReturnValue('device:current');
-  });
-
-  it('defaults to disabled with empty environment and host state', () => {
-    expect(DEFAULT_GROK_PROVIDER_SETTINGS).toEqual({
-      catalogsByHost: {},
-      cliPath: '',
-      cliPathsByHost: {},
-      enabled: false,
-      environmentHash: '',
-      environmentVariables: '',
-      modelAliases: {},
-      preferredReasoningByModel: {},
-      visibleModels: null,
-    });
   });
 
   it('preserves hostname-scoped state without assigning it to the current device', () => {
@@ -229,10 +214,10 @@ describe('Grok settings', () => {
       },
     });
 
-    expect(settings.visibleModels).toEqual(['kimi-coding', 'legacy-model']);
+    expect(settings.visibleModels).toEqual(['kimi-coding', 'legacy-model', 'unknown']);
     expect(settings.modelAliases).toEqual({
       'kimi-coding': 'Kimi',
-      'legacy-model': 'Legacy',
+      'legacy-model': 'Legacy', unknown: 'Drop me',
     });
     expect(settings.preferredReasoningByModel).toEqual({
       'kimi-coding': 'medium',

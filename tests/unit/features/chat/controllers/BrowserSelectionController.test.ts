@@ -147,9 +147,6 @@ describe('BrowserSelectionController', () => {
     };
     app.workspace.getMostRecentLeaf.mockReturnValue({ view });
 
-    expect((controller as any).frameDocuments(containerEl)).toHaveLength(2);
-    expect((controller as any).extractSelectionFromIframes(containerEl)).toBe('nested PDF text');
-
     controller.start();
     jest.advanceTimersByTime(250);
     await flushMicrotasks();
