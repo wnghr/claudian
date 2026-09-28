@@ -3,8 +3,8 @@ import type { Component } from 'obsidian';
 import type { ProviderId } from '@/core/providers/types';
 import type { Conversation } from '@/core/types';
 import type { TabAttention, TabReviewOutcome } from '@/features/chat/state/types';
-import type { FeatureHost } from '@/features/FeatureHost';
 
+import type { ChatFeatureHost } from '../ChatFeatureHost';
 import type {
   PublishedTabRuntimeRef,
   TabRuntimeCleanup,
@@ -23,6 +23,7 @@ import {
   applyProviderUIGating,
   refreshTabProviderUI,
 } from './TabProviderState';
+import type { TabSessionState } from './TabSession';
 import type {
   AssembledTabRuntime,
   ProviderCatalogInfo,
@@ -36,11 +37,12 @@ import type {
 } from './types';
 
 export interface TabRuntimeFactoryOptions {
-  plugin: FeatureHost;
+  plugin: ChatFeatureHost;
   containerEl: HTMLElement;
   component: Component;
   conversation?: Conversation;
   tabId?: TabId;
+  initialState?: Readonly<TabSessionState>;
   draftModel?: string | null;
   providerId?: ProviderId | null;
   lifecycleState?: Extract<
@@ -169,9 +171,6 @@ function composeTabRuntime(
     get lifecycleState() {
       return shell.lifecycleState;
     },
-    set lifecycleState(value) {
-      shell.lifecycleState = value;
-    },
     get hydrationState() {
       return shell.hydrationState;
     },
@@ -181,20 +180,11 @@ function composeTabRuntime(
     get draftModel() {
       return shell.draftModel;
     },
-    set draftModel(value) {
-      shell.draftModel = value;
-    },
     get providerId() {
       return shell.providerId;
     },
-    set providerId(value) {
-      shell.providerId = value;
-    },
     get conversationId() {
       return shell.conversationId;
-    },
-    set conversationId(value) {
-      shell.conversationId = value;
     },
     executionCoordinator: shell.executionCoordinator,
     providerCatalogResolver: shell.providerCatalogResolver,

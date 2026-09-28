@@ -4,12 +4,12 @@ import { ProviderTransitionFence } from '@/core/providers/metadata/ProviderTrans
 
 import { prepareOpencodeLaunchArtifacts } from '../runtime/OpencodeLaunchArtifacts';
 import { resolveOpencodeDatabasePath } from '../runtime/OpencodePaths';
-import { isRecord, OpencodeHttpClient, type OpencodeHttpEvent, pollOpencodeUntil } from './OpencodeHttpClient';
+import { isRecord, OpencodeHTTPClient, type OpencodeHTTPEvent, pollOpencodeUntil } from './OpencodeHTTPClient';
 import { createOpencodeServerConfig, type OpencodeServerConfig } from './OpencodeServerConfig';
 
-type Subscriber = { event: (event: OpencodeHttpEvent) => void; error: (error: Error) => void; interactive: () => boolean };
+type Subscriber = { event: (event: OpencodeHTTPEvent) => void; error: (error: Error) => void; interactive: () => boolean };
 interface Server {
-  client: OpencodeHttpClient;
+  client: OpencodeHTTPClient;
   config: OpencodeServerConfig;
   databasePath: string | null;
   subscribers: Set<Subscriber>;
@@ -18,9 +18,16 @@ interface Server {
   close?: Promise<void>;
 }
 
+interface ServerEntry {
+  readonly promise: Promise<Server>;
+  readonly ephemeral: boolean;
+  consumers: number;
+}
+
 /** Provider-owned native processes. Persistent consumers share by environment and database. */
 export class OpencodeServerService {
-  private readonly servers = new Map<string, Promise<Server>>();
+  private readonly servers = new Map<string, ServerEntry>();
+  private readonly closing = new Set<Promise<void>>();
   private readonly fence = new ProviderTransitionFence();
   private generation = new AbortController();
   private disposal: Promise<void> | null = null;
@@ -38,33 +45,66 @@ export class OpencodeServerService {
     for (;;) {
       generation.throwIfAborted();
       signal?.throwIfAborted();
-      let pending = this.servers.get(key);
-      if (!pending) {
-        pending = this.create(cliPath, cwd, normalized, generation);
-        this.servers.set(key, pending);
-        void pending.catch(() => { if (this.servers.get(key) === pending) this.servers.delete(key); });
+      let entry = this.servers.get(key);
+      if (!entry) {
+        entry = {
+          promise: this.create(cliPath, cwd, normalized, generation),
+          ephemeral,
+          consumers: 0,
+        };
+        this.servers.set(key, entry);
+        // Observe failure immediately, including while older idle servers retire.
+        const pendingEntry = entry;
+        void entry.promise.catch(() => {
+          if (this.servers.get(key) === pendingEntry) this.servers.delete(key);
+        });
       }
-      const server = await pending;
-      if (generation.aborted || signal?.aborted) {
-        if (ephemeral) {
-          if (this.servers.get(key) === pending) this.servers.delete(key);
-          await this.close(server);
-        }
+      // Pending acquisitions own a reservation too; cancellation cannot close a peer's server.
+      entry.consumers += 1;
+      let handedOff = false;
+      try {
+        await Promise.all([...this.servers].flatMap(([idleKey, idle]) => (
+          idle.consumers === 0 ? [this.retire(idleKey, idle)] : []
+        )));
+        const server = await entry.promise;
         generation.throwIfAborted();
         signal?.throwIfAborted();
-      }
-      if (!server.client.isReusable() || server.close) {
-        if (this.servers.get(key) === pending) this.servers.delete(key);
-        await this.close(server, new Error('OpenCode server is no longer available.'));
-        continue;
-      }
-      return new OpencodeServerLease(server, async () => {
-        if (ephemeral) {
-          if (this.servers.get(key) === pending) this.servers.delete(key);
-          await this.close(server);
+        if (!server.client.isReusable() || server.close) {
+          await this.retire(key, entry, new Error('OpenCode server is no longer available.'));
+          continue;
         }
-      }, error => this.close(server, error));
+        const ownedEntry = entry;
+        const lease = new OpencodeServerLease(
+          server,
+          () => this.release(key, ownedEntry),
+          error => this.retire(key, ownedEntry, error),
+        );
+        handedOff = true;
+        return lease;
+      } finally {
+        if (!handedOff) await this.release(key, entry);
+      }
     }
+  }
+
+  private async release(key: string, entry: ServerEntry): Promise<void> {
+    entry.consumers -= 1;
+    if (entry.consumers !== 0) return;
+    // Retain only a lone idle persistent server for repeated catalog/history calls.
+    if (entry.ephemeral || this.servers.size > 1 || this.servers.get(key) !== entry) {
+      await this.retire(key, entry);
+    }
+  }
+
+  private retire(key: string, entry: ServerEntry, error?: Error): Promise<void> {
+    if (this.servers.get(key) === entry) this.servers.delete(key);
+    const closing = entry.promise.then(server => this.close(server, error), () => undefined);
+    this.closing.add(closing);
+    void closing.then(
+      () => this.closing.delete(closing),
+      () => this.closing.delete(closing),
+    );
+    return closing;
   }
 
   beginTransition(): Promise<void> {
@@ -76,15 +116,14 @@ export class OpencodeServerService {
 
   async invalidate(): Promise<void> {
     this.fence.beginTransition();
-    const previous = [...this.servers.values()];
-    this.servers.clear();
+    const previous = [...this.servers];
     this.generation.abort();
     this.generation = new AbortController();
     try {
-      await Promise.all(previous.map(async pending => {
-        const server = await pending.catch(() => null);
-        if (server) await this.close(server, new Error('OpenCode server configuration changed.'));
-      }));
+      await Promise.all([
+        ...previous.map(([key, entry]) => this.retire(key, entry, new Error('OpenCode server configuration changed.'))),
+        ...this.closing,
+      ]);
     } finally { this.fence.endTransition(); }
   }
 
@@ -98,7 +137,7 @@ export class OpencodeServerService {
     const artifacts = await prepareOpencodeLaunchArtifacts({ workspaceRoot: cwd, runtimeEnv: environment, nativeVersion: 2, preserveExistingPrompts: true });
     signal.throwIfAborted();
     const config = await createOpencodeServerConfig(cwd, environment);
-    const client = new OpencodeHttpClient(cliPath, cwd, { ...environment, OPENCODE_CONFIG: config.file, OPENCODE_CONFIG_CONTENT: artifacts.configContent });
+    const client = new OpencodeHTTPClient(cliPath, cwd, { ...environment, OPENCODE_CONFIG: config.file, OPENCODE_CONFIG_CONTENT: artifacts.configContent });
     const server: Server = { client, config, databasePath: artifacts.databasePath, subscribers: new Set(), forms: new Map() };
     try {
       await config.initialize(error => { void this.close(server, error); });
@@ -132,8 +171,19 @@ export class OpencodeServerLease {
   get databasePath(): string | null { return this.server.databasePath; }
   signal(signal?: AbortSignal): AbortSignal { return this.server.client.signal(AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])])); }
   isReusable(): boolean { return !this.controller.signal.aborted && this.server.client.isReusable(); }
-  request<T = unknown>(route: string, options: Parameters<OpencodeHttpClient['request']>[1] = {}): Promise<T> {
+  request<T = unknown>(route: string, options: Parameters<OpencodeHTTPClient['request']>[1] = {}): Promise<T> {
     return this.server.client.request<T>(route, { ...options, signal: this.signal(options?.signal) });
+  }
+
+  /** Newer V2 integration reads wait for plugin/account activation before returning. */
+  async waitForActivation(signal?: AbortSignal): Promise<void> {
+    const ownedSignal = this.signal(signal);
+    try {
+      await this.request('/api/integration', { signal: ownedSignal, timeoutMs: 8_000 });
+    } catch {
+      // Readiness is best-effort: retain catalog polling for older versions or stalled plugins.
+      ownedSignal.throwIfAborted();
+    }
   }
 
   async subscribe(event: Subscriber['event'], error: Subscriber['error'], interactive: Subscriber['interactive']): Promise<void> {
@@ -197,7 +247,7 @@ async function subscribeToServer(server: Server, failServer: (error: Error) => P
   catch (error) { await failServer(error instanceof Error ? error : new Error(String(error))); throw error; }
 }
 
-function dispatchServerEvent(server: Server, event: OpencodeHttpEvent): void {
+function dispatchServerEvent(server: Server, event: OpencodeHTTPEvent): void {
   const form = isRecord(event.data.form) ? event.data.form : undefined;
   const sessionId = form?.sessionID ?? event.data.sessionID;
   if (sessionId === 'global') {

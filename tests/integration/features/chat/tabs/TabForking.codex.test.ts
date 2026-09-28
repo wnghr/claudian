@@ -2,12 +2,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 jest.mock('cross-spawn', () => jest.fn());
+import { createForkTestEnvironment, type ForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
+import { createNativeRPCProcess } from '@test/helpers/providers/NativeRPCTestProcess';
 import spawn from 'cross-spawn';
 
 import { CodexExecutionBackend } from '@/providers/codex/execution/CodexExecutionBackend';
-
-import { createNativeRpcProcess } from './NativeRpcTestProcess';
-import { createForkTestEnvironment, type ForkTestEnvironment } from './ProviderForkTestHarness';
 
 function createNativeCodex(env: ForkTestEnvironment) {
   const threads = new Map<string, string[]>([['codex-source', []]]);
@@ -18,7 +17,7 @@ function createNativeCodex(env: ForkTestEnvironment) {
   const result = (id: string) => ({
     thread: { id, path: sourceFile, turns: (threads.get(id) ?? []).map(turnId => ({ id: turnId, items: [], status: 'completed' })) },
   });
-  jest.mocked(spawn).mockImplementation(() => createNativeRpcProcess(async (method, params, notify) => {
+  jest.mocked(spawn).mockImplementation(() => createNativeRPCProcess(async (method, params, notify) => {
     operations.push({ method, params });
     if (method === 'initialize') return { userAgent: 'test', codexHome: env.root, platformFamily: process.platform === 'win32' ? 'windows' : 'unix', platformOs: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux' };
     if (method === 'thread/start') return result('codex-source');
@@ -82,7 +81,7 @@ describe('Codex fork integration', () => {
     expect(native.operations).toContainEqual({ method: 'thread/rollback', params: { threadId: 'codex-child', numTurns: 1 } });
     expect(native.threads.get('codex-source')).toEqual(['codex-turn-1', 'codex-turn-2']);
     expect(await fs.readFile(native.sourceFile, 'utf8')).toBe(original);
-    expect(child!.sessionId).toBe('codex-child');
+    expect(env.repository.getSync(child!.id)!.sessionId).toBe('codex-child');
     await env.send(source, 'Keep original going');
     expect(native.prompts.at(-1)).toEqual({ threadId: 'codex-source', context: ['codex-turn-1', 'codex-turn-2'] });
   });

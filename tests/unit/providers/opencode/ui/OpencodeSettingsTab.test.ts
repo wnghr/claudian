@@ -8,7 +8,7 @@ import { createOpencodeSettingsTabRenderer } from '@/providers/opencode/ui/Openc
 const mockGetHostnameKey = jest.fn(() => 'host-a');
 const mockRenderEnvironmentSettingsSection = jest.fn();
 const mockSaveSettings = jest.fn().mockResolvedValue(undefined);
-const mockCliResolverReset = jest.fn();
+const mockCLIResolverReset = jest.fn();
 const mockMetadataLoadCatalog = jest.fn().mockResolvedValue(false);
 const mockMetadataWarmModel = jest.fn().mockResolvedValue(false);
 
@@ -78,7 +78,7 @@ jest.mock('@/shared/settings/EnvironmentSettingsSection', () => ({
 function createSettingsRenderer() {
   return createOpencodeSettingsTabRenderer({
     cliResolver: {
-      reset: mockCliResolverReset,
+      reset: mockCLIResolverReset,
     },
     modelCatalog: { markStale: jest.fn() } as any,
     metadataService: {
@@ -87,11 +87,6 @@ function createSettingsRenderer() {
     },
   });
 }
-
-jest.mock('@/utils/env', () => ({
-  ...jest.requireActual('@/utils/env'),
-  getHostnameKey: () => mockGetHostnameKey(),
-}));
 
 interface MockTextComponent {
   value: string;
@@ -125,7 +120,6 @@ type MockSettingRecord = {
 };
 
 const createdSettings: MockSettingRecord[] = [];
-const createdDomElements: any[] = [];
 
 function createTextComponent(): MockTextComponent {
   const component = {} as MockTextComponent;
@@ -173,7 +167,6 @@ function createToggleComponent(): MockToggleComponent {
 
 function createElement(): any {
   const classes = new Set<string>();
-  const eventListeners = new Map<string, Array<(...args: unknown[]) => void>>();
   const element: any = {
     ...createMockEl('div'),
     value: '',
@@ -223,16 +216,6 @@ function createElement(): any {
     }),
     empty: jest.fn(),
     setAttribute: jest.fn(),
-    addEventListener: jest.fn((type: string, callback: (...args: unknown[]) => void) => {
-      const listeners = eventListeners.get(type) ?? [];
-      listeners.push(callback);
-      eventListeners.set(type, listeners);
-    }),
-    dispatchMockEvent: async (type: string, event?: unknown) => {
-      for (const listener of eventListeners.get(type) ?? []) {
-        await listener(event);
-      }
-    },
     blur: jest.fn(),
     createEl: jest.fn((_tag?: string, attrs?: Record<string, unknown>) => {
       const child = createElement();
@@ -249,7 +232,6 @@ function createElement(): any {
       if (attrs && typeof attrs.type === 'string') {
         child.type = attrs.type;
       }
-      createdDomElements.push(child);
       return child;
     }),
     createDiv: jest.fn((attrs?: Record<string, unknown>) => {
@@ -258,7 +240,6 @@ function createElement(): any {
       if (attrs && typeof attrs.cls === 'string') {
         child.cls = attrs.cls;
       }
-      createdDomElements.push(child);
       return child;
     }),
     createSpan: jest.fn((_attrs?: Record<string, unknown>) => createElement()),
@@ -275,7 +256,6 @@ function createContainer(): any {
       if (attrs && typeof attrs.cls === 'string') {
         child.cls = attrs.cls;
       }
-      createdDomElements.push(child);
       return child;
     }),
     createEl: jest.fn((tag?: string, attrs?: Record<string, unknown>) => {
@@ -287,7 +267,6 @@ function createContainer(): any {
       if (attrs && typeof attrs.text === 'string') {
         child.text = attrs.text;
       }
-      createdDomElements.push(child);
       return child;
     }),
   };
@@ -295,6 +274,7 @@ function createContainer(): any {
 
 function createPlugin(overrides: Record<string, unknown> = {}): any {
   const plugin: any = {
+    storage: { installationKey: mockGetHostnameKey() },
     settings: {
       providerConfigs: {
         opencode: {
@@ -379,13 +359,17 @@ function findSetting(name: string): MockSettingRecord {
   return setting;
 }
 
+jest.mock('@/core/device/InstallationKey', () => ({
+  ...jest.requireActual('@/core/device/InstallationKey'),
+  getInstallationKey: () => mockGetHostnameKey(),
+}));
+
 describe('OpencodeSettingsTab', () => {
   const mockedExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>;
   const mockedStatSync = fs.statSync as jest.MockedFunction<typeof fs.statSync>;
 
   beforeEach(() => {
     createdSettings.length = 0;
-    createdDomElements.length = 0;
     jest.clearAllMocks();
     mockMetadataLoadCatalog.mockResolvedValue(false);
     mockMetadataWarmModel.mockResolvedValue(false);
@@ -542,7 +526,7 @@ describe('OpencodeSettingsTab', () => {
       await mutation(plugin.settings);
       await plugin.saveSettings();
     });
-    mockCliResolverReset.mockImplementation(() => {
+    mockCLIResolverReset.mockImplementation(() => {
       expect(transitionActive).toBe(true);
     });
 
@@ -555,7 +539,7 @@ describe('OpencodeSettingsTab', () => {
       'host-a': '/custom/opencode',
     });
     expect(mockSaveSettings).toHaveBeenCalledTimes(1);
-    expect(mockCliResolverReset).toHaveBeenCalledTimes(1);
+    expect(mockCLIResolverReset).toHaveBeenCalledTimes(1);
     expect(plugin.runProviderExecutionTransition).toHaveBeenCalledWith(
       ['opencode'],
       expect.any(Function),
@@ -567,7 +551,7 @@ describe('OpencodeSettingsTab', () => {
     );
   });
 
-  it('renders the shared skill manager and keeps hidden runtime commands separate', () => {
+  it('renders shared skills, hidden commands, and environment guidance', () => {
     const plugin = createPlugin();
     const context = createContext(plugin);
 
@@ -586,13 +570,6 @@ describe('OpencodeSettingsTab', () => {
         desc: 'Hide specific OpenCode commands and skills from the dropdown. Enter names without the leading slash, one per line.',
       }),
     );
-  });
-
-  it('passes OpenCode environment guidance into the environment section', () => {
-    const plugin = createPlugin();
-
-    createSettingsRenderer().render(createContainer(), createContext(plugin));
-
     expect(mockRenderEnvironmentSettingsSection).toHaveBeenCalledWith(expect.objectContaining({
       desc: 'Extra environment variables passed to OpenCode.',
       placeholder: 'OPENCODE_DB=/path/to/opencode.db',

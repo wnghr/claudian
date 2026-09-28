@@ -2,12 +2,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 jest.mock('cross-spawn', () => jest.fn());
+import { createForkTestEnvironment, type ForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
 import spawn from 'cross-spawn';
 
 import { PiCommandCatalog } from '@/providers/pi/commands/PiCommandCatalog';
 import { PiExecutionBackend } from '@/providers/pi/execution/PiExecutionBackend';
-
-import { createForkTestEnvironment, type ForkTestEnvironment } from './ProviderForkTestHarness';
 
 async function readRecords(file: string) {
   return (await fs.readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -53,7 +52,7 @@ describe('Pi fork integration', () => {
       ['pi-user-1', 'pi-assistant-1', 'pi-user-2', 'pi-assistant-2'].slice(0, checkpoint * 2),
     );
     expect((await native.contexts()).at(-1)?.file).not.toBe(native.sourceFile);
-    expect(child!.sessionId).not.toBe(source.conversation.sessionId);
+    expect(env.repository.getSync(child!.id)!.sessionId).not.toBe(source.conversation.sessionId);
     expect(await fs.readFile(native.sourceFile, 'utf8')).toBe(sourceBefore);
     await env.send(source, 'Keep original going');
     expect((await native.contexts()).at(-1)).toEqual({ file: native.sourceFile, ids: ['pi-user-1', 'pi-assistant-1', 'pi-user-2', 'pi-assistant-2'] });

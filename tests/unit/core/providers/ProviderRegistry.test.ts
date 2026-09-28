@@ -32,19 +32,6 @@ describe('ProviderRegistry', () => {
     expect(caps).toHaveProperty('supportsFork');
   });
 
-  it('creates transcript-backed subagent history only for providers that own it', () => {
-    const host = {} as any;
-
-    expect(ProviderRegistry.createSubagentHistoryService(host, 'claude')).toMatchObject({
-      loadFinalResult: expect.any(Function),
-      loadToolCalls: expect.any(Function),
-    });
-    expect(ProviderRegistry.createSubagentHistoryService(host, 'codex')).toBeNull();
-    expect(ProviderRegistry.createSubagentHistoryService(host, 'grok')).toBeNull();
-    expect(ProviderRegistry.createSubagentHistoryService(host, 'opencode')).toBeNull();
-    expect(ProviderRegistry.createSubagentHistoryService(host, 'pi')).toBeNull();
-  });
-
   it('throws when an unknown provider is requested', () => {
     expect(() => ProviderRegistry.getCapabilities(
       'nonexistent' as any,
@@ -66,6 +53,14 @@ describe('ProviderRegistry', () => {
     expect(caps.supportsFork).toBe(true);
   });
 
+  it.each([undefined, 1, 2] as const)('resolves OpenCode fork mode for native version %s without changing other providers', nativeVersion => {
+    const state = nativeVersion ? { nativeVersion } : undefined;
+    expect(ProviderRegistry.getCapabilities('opencode', state).forkMode).toBe(nativeVersion === 2 ? 'checkpoint' : 'full-session');
+    expect(ProviderRegistry.getCapabilities('opencode', state).supportsEphemeralFork).toBe(nativeVersion === 2);
+    expect(ProviderRegistry.getCapabilities('claude', state)).toEqual(ProviderRegistry.getCapabilities('claude'));
+    expect(ProviderRegistry.getCapabilities('opencode').forkMode).toBe('full-session');
+  });
+
   it('registers provider-owned subagent protocols outside the capability matrix', () => {
     const claudeAdapter = ProviderRegistry.getSubagentAdapter('claude');
     expect(claudeAdapter).toMatchObject({
@@ -84,7 +79,7 @@ describe('ProviderRegistry', () => {
     expect(ProviderRegistry.getSubagentAdapter('pi')).toBeNull();
 
     expect(claudeAdapter?.isSpawnTool('Agent')).toBe(true);
-    expect(claudeAdapter?.isSpawnTool('Task')).toBe(true);
+    expect(claudeAdapter?.isSpawnTool('Task')).toBe(false);
     expect(opencodeAdapter?.isSpawnTool('Agent')).toBe(true);
     expect(opencodeAdapter?.isSpawnTool('Task')).toBe(false);
 

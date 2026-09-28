@@ -5,7 +5,6 @@ import type {
   ProviderCitationsEvent,
   ProviderContextCompactedEvent,
   ProviderNoticeEvent,
-  ProviderTaskNotificationEvent,
   ProviderTextDeltaEvent,
   ProviderThinkingDeltaEvent,
   ProviderToolCompletedEvent,
@@ -23,9 +22,11 @@ import {
   isContextWindowEvent,
   isSessionInitEvent,
   isStreamChunk,
+  isSubagentProgress,
 } from '../sdk/typeGuards';
 import type {
   ClaudeAsyncSubagentCompletionEvent,
+  ClaudeSubagentProgressEvent,
   SessionInitEvent,
 } from '../sdk/types';
 import {
@@ -40,7 +41,6 @@ type WithoutScope<T> = T extends unknown ? Omit<T, 'scope'> : never;
 export type ClaudeNormalizedOutputEvent = WithoutScope<
   | ProviderUserMessageStartedEvent
   | ProviderAssistantMessageStartedEvent
-  | ProviderTaskNotificationEvent
   | ProviderTextDeltaEvent
   | ProviderThinkingDeltaEvent
   | ProviderCitationsEvent
@@ -60,6 +60,10 @@ export type ClaudeNormalizedExecutionEvent =
   | {
     readonly type: 'async_subagent_completion';
     readonly event: ClaudeAsyncSubagentCompletionEvent;
+  }
+  | {
+    readonly type: 'subagent_progress';
+    readonly event: ClaudeSubagentProgressEvent;
   }
   | {
     readonly type: 'output';
@@ -140,13 +144,10 @@ export class ClaudeExecutionEventNormalizer {
           type: 'async_subagent_completion',
           event,
         });
-        if (message.type === 'system' && message.subtype === 'task_notification'
-          && !message.skip_transcript && event.result) {
-          normalized.push({
-            type: 'output',
-            event: { type: 'task_notification', content: event.result },
-          });
-        }
+        continue;
+      }
+      if (isSubagentProgress(event)) {
+        normalized.push({ type: 'subagent_progress', event });
         continue;
       }
       if (isContextWindowEvent(event)) {
@@ -225,6 +226,11 @@ export class ClaudeExecutionEventNormalizer {
     channel: ClaudeExecutionEventChannel,
   ): void {
     this.states[channel].blockedToolIds.add(toolUseId);
+  }
+
+  /** A steer entering the run opens a new assistant response boundary. */
+  beginUserBoundary(channel: ClaudeExecutionEventChannel): void {
+    this.states[channel].assistantStarted = false;
   }
 
   reset(channel: ClaudeExecutionEventChannel): void {
@@ -393,6 +399,8 @@ function toOutputEvent(
     case 'tool_result':
     case 'subagent_tool_result':
       return normalizeToolCompleted(chunk, state);
+    case 'subagent_tool_output':
+      return { type: 'tool_output', toolCallId: chunk.id, toolScope: { kind: 'subagent', subagentId: chunk.subagentId }, content: chunk.content };
     case 'tool_output': {
       const identity = state.toolScopes.get(chunk.id)
         ?? { toolScope: { kind: 'main' as const } };
@@ -414,7 +422,7 @@ function toOutputEvent(
         type: 'context_compacted',
       };
     case 'task_notification':
-      return { type: 'task_notification', content: chunk.content };
+      return null;
     case 'notice':
       return {
         type: 'notice',
@@ -492,6 +500,7 @@ function normalizeToolCompleted(
     isError: chunk.isError,
     isBlocked: state.blockedToolIds.has(chunk.id),
     toolUseResult: chunk.toolUseResult,
+    ...(chunk.providerPayload ? { providerPayload: chunk.providerPayload } : {}),
   };
 }
 

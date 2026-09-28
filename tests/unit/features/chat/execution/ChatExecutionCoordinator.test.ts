@@ -1,355 +1,105 @@
-import {
-  type ProviderExecutionBackend,
-  type ProviderExecutionEvent,
-  ProviderExecutionLifecycleRegistry,
-  type ProviderExecutionRequest,
-  type ProviderExecutionRun,
-  type ProviderExecutionSession,
-  type ProviderInteractionPort,
-  type ProviderSessionConfig,
-  type ProviderSessionEvent,
-  type ProviderSessionSnapshot,
-  type ProviderSessionStatus,
-  type RewindableExecutionSession,
-  type SteerableExecutionSession,
-} from '@/core/execution';
-import type { ChatMessage, ProviderId, SlashCommand } from '@/core/types';
-import {
-  ChatExecutionCoordinator,
-  type ChatExecutionCoordinatorDeps,
-  type ChatExecutionEventContext,
-  ChatExecutionInteractionStaleError,
-  type ChatExecutionPersistence,
-  ChatExecutionPreHandoffError,
-  type ChatTurnSubmission,
-  type MissingProviderSessionResolution,
-} from '@/features/chat/execution/ChatExecutionCoordinator';
-import {
-  WarmExecutionCapacityError,
-  type WarmExecutionOwner,
-  WarmExecutionPool,
-} from '@/features/chat/execution/WarmExecutionPool';
+import type { FakeRun } from '@test/helpers/ChatExecutionHarness';
+import { beginExecution, createHarness, createSubmission, deferred, FakeSession, requestedScope, reserveProtectedWarmSlots } from '@test/helpers/ChatExecutionHarness';
+import { testDate } from '@test/helpers/testClock';
 
-class EventQueue<T> implements AsyncIterable<T> {
-  private readonly values: T[] = [];
-  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
-  private ended = false;
-
-  push(value: T): void {
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter({ done: false, value });
-      return;
-    }
-    this.values.push(value);
-  }
-
-  end(): void {
-    this.ended = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: async () => {
-        const value = this.values.shift();
-        if (value) return { done: false, value };
-        if (this.ended) return { done: true, value: undefined };
-        return new Promise<IteratorResult<T>>((resolve) => {
-          this.waiters.push(resolve);
-        });
-      },
-      return: async () => {
-        this.end();
-        return { done: true, value: undefined };
-      },
-    };
-  }
-}
-
-class FakeRun implements ProviderExecutionRun {
-  readonly events = new EventQueue<ProviderExecutionEvent>();
-  cancelCalls = 0;
-
-  constructor(
-    readonly executionId: string,
-    readonly turnId: string,
-  ) {}
-
-  cancel(): void {
-    this.cancelCalls += 1;
-    this.events.end();
-  }
-}
-
-class FakeSession implements ProviderExecutionSession,
-  SteerableExecutionSession,
-  RewindableExecutionSession {
-  readonly requests: ProviderExecutionRequest[] = [];
-  readonly runs: FakeRun[] = [];
-  readonly steerRequests: ProviderExecutionRequest[] = [];
-  readonly listeners = new Set<(event: ProviderSessionEvent) => void>();
-  commands: SlashCommand[] | undefined;
-  getCommandSnapshot() { return this.commands; }
-  cancelCalls = 0;
-  disposeCalls = 0;
-  status: ProviderSessionStatus = 'idle';
-  snapshot: ProviderSessionSnapshot;
-  steerResult = true;
-  rewindResult = {
-    canRewind: true,
-    sessionStrategy: 'preserve-provider-session' as const,
-  };
-
-  constructor(
-    readonly providerId: ProviderId,
-    readonly sessionInstanceId: string,
-  ) {
-    this.snapshot = {
-      providerId,
-      revision: 0,
-      status: 'idle',
-    };
-  }
-
-  execute(request: ProviderExecutionRequest): ProviderExecutionRun {
-    this.requests.push(request);
-    const run = new FakeRun(
-      `execution-${this.runs.length + 1}`,
-      `turn-${this.runs.length + 1}`,
-    );
-    this.runs.push(run);
-    return run;
-  }
-
-  async steer(request: ProviderExecutionRequest): Promise<boolean> {
-    this.steerRequests.push(request);
-    return this.steerResult;
-  }
-
-  async previewRewind(): Promise<{ canRewind: boolean }> {
-    return { canRewind: true };
-  }
-
-  async rewind(): Promise<typeof this.rewindResult> {
-    return this.rewindResult;
-  }
-
-  cancel(): void {
-    this.cancelCalls += 1;
-  }
-
-  getSnapshot(): ProviderSessionSnapshot {
-    return this.snapshot;
-  }
-
-  getStatus(): ProviderSessionStatus {
-    return this.status;
-  }
-
-  onEvent(listener: (event: ProviderSessionEvent) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  emit(event: ProviderSessionEvent): void {
-    for (const listener of this.listeners) listener(event);
-  }
-
-  async dispose(): Promise<void> {
-    this.disposeCalls += 1;
-    this.status = 'disposed';
-  }
-}
-
-class FakeBackend implements ProviderExecutionBackend {
-  readonly configs: ProviderSessionConfig[] = [];
-  readonly sessions: FakeSession[] = [];
-
-  constructor(readonly providerId: ProviderId) {}
-
-  createSession(config: ProviderSessionConfig): ProviderExecutionSession {
-    this.configs.push(config);
-    const session = new FakeSession(
-      this.providerId,
-      `${this.providerId}-session-${this.sessions.length + 1}`,
-    );
-    this.sessions.push(session);
-    return session;
-  }
-}
-
-function requestedScope(
-  session: FakeSession,
-  run: FakeRun,
-  sequence: number,
-): ProviderExecutionEvent['scope'] {
-  return {
-    kind: 'requested',
-    sessionInstanceId: session.sessionInstanceId,
-    executionId: run.executionId,
-    turnId: run.turnId,
-    sequence,
-  };
-}
-
-function createSubmission(overrides: Partial<ChatTurnSubmission> = {}): ChatTurnSubmission {
-  return {
-    submissionId: 'input-1',
-    timestamp: 123,
-    rawDisplayText: 'raw input',
-    canonicalText: 'canonical input',
-    images: [],
-    context: {
-      linkedContent: { path: 'note.md', content: 'note' },
-    },
-    conversationHistory: [],
-    configuration: {
-      systemInstructions: { kind: 'provider-default' },
-      model: 'model-1',
-    },
-    toolPolicy: { kind: 'provider-default' },
-    ...overrides,
-  };
-}
-
-function createHarness(options: {
-  onBackgroundWorkChanged?: (isWorking: boolean) => void;
-  onError?: (error: unknown) => void;
-  onRequestedEvent?: (
-    event: ProviderExecutionEvent,
-  ) => void | Promise<void>;
-  onSessionEvent?: (
-    event: ProviderSessionEvent,
-    context: ChatExecutionEventContext,
-  ) => void | Promise<void>;
-  warmExecution?: ChatExecutionCoordinatorDeps['warmExecution'];
-} = {}) {
-  const registry = new ProviderExecutionLifecycleRegistry();
-  const backends = new Map<ProviderId, FakeBackend>([
-    ['claude', new FakeBackend('claude')],
-    ['codex', new FakeBackend('codex')],
-  ]);
-  const repository = {
-    registerExecutionBinding: jest.fn(),
-    persistExecutionSnapshot: jest.fn(async () => true),
-    releaseExecutionBinding: jest.fn(),
-    recordConversationActivity: jest.fn(async () => undefined),
-    assertConversationExecutionAuthority: jest.fn(async () => undefined),
-  } as unknown as jest.Mocked<ChatExecutionPersistence>;
-  const interactionPort = {
-    requestApproval: jest.fn(async ({ interactionId }) => ({
-      interactionId,
-      decision: 'allow',
-    })),
-    askUserQuestion: jest.fn(async ({ interactionId }) => ({
-      interactionId,
-      answers: null,
-    })),
-    dismissInteraction: jest.fn(),
-  } as unknown as jest.Mocked<ProviderInteractionPort>;
-  const requestedEvents: ProviderExecutionEvent[] = [];
-  const sessionEvents: ProviderSessionEvent[] = [];
-  const sessionEventContexts: ChatExecutionEventContext[] = [];
-  const missingSession = jest.fn<
-    Promise<MissingProviderSessionResolution>,
-    [string, string?]
-  >(async () => 'reset');
-  let nextId = 0;
-  const coordinator = new ChatExecutionCoordinator({
-    lifecycleRegistry: registry,
-    resolveBackend: (providerId) => {
-      const backend = backends.get(providerId);
-      if (!backend) throw new Error(`Missing backend: ${providerId}`);
-      return backend;
-    },
-    persistence: repository,
-    interactionPort,
-    vaultWorkingDirectory: '/vault',
-    createId: () => `local-${++nextId}`,
-    onRequestedEvent: options.onRequestedEvent ?? ((event) => {
-      requestedEvents.push(event);
-    }),
-    onSessionEvent: (event, context) => {
-      sessionEvents.push(event);
-      sessionEventContexts.push(context);
-      return options.onSessionEvent?.(event, context);
-    },
-    onBackgroundWorkChanged: options.onBackgroundWorkChanged,
-    onError: options.onError,
-    resolveMissingProviderSession: missingSession,
-    ...(options.warmExecution ? { warmExecution: options.warmExecution } : {}),
-  });
-
-  return {
-    registry,
-    backends,
-    repository,
-    interactionPort,
-    requestedEvents,
-    sessionEvents,
-    sessionEventContexts,
-    missingSession,
-    coordinator,
-  };
-}
-
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (error: unknown) => void;
-} {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
-}
-
-async function beginExecution(
-  harness: ReturnType<typeof createHarness>,
-  submission = createSubmission(),
-) {
-  await harness.coordinator.bindConversation({
-    conversationId: 'conversation-1',
-    providerId: 'claude',
-    resumeSeed: {
-      providerSessionId: 'native-session',
-      providerState: { leafId: 'leaf-1' },
-    },
-  });
-  const resultPromise = harness.coordinator.execute(submission);
-  let session: FakeSession | undefined;
-  let run: FakeRun | undefined;
-  for (let attempt = 0; attempt < 20 && !run; attempt += 1) {
-    await Promise.resolve();
-    session = harness.backends.get('claude')!.sessions[0];
-    run = session?.runs[0];
-  }
-  if (!session || !run) throw new Error('Execution did not start');
-  return { session, run, resultPromise };
-}
-
-async function reserveProtectedWarmSlots(
-  pool: WarmExecutionPool,
-  count = 4,
-): Promise<WarmExecutionOwner[]> {
-  const owners = Array.from({ length: count }, (_, index) => ({
-    id: `reserved-${index}`,
-    canCool: () => false,
-    cool: jest.fn().mockResolvedValue(undefined),
-  }));
-  for (const owner of owners) {
-    await pool.acquire(owner);
-  }
-  return owners;
-}
+import { type ProviderExecutionEvent, type ProviderSessionSnapshot } from '@/core/execution';
+import type { ChatMessage } from '@/core/types';
+import { ChatExecutionInteractionStaleError, ChatExecutionPreHandoffError } from '@/features/chat/execution/ChatExecutionCoordinator';
+import { WarmExecutionCapacityError, type WarmExecutionOwner, WarmExecutionPool } from '@/features/chat/execution/WarmExecutionPool';
 
 describe('ChatExecutionCoordinator', () => {
+  it.each(['claude', 'codex'] as const)(
+    'validates %s events without serializing resume history after an equivalent rebind',
+    async (providerId) => {
+      const harness = createHarness();
+      const serializeHistory = jest.fn(() => ({ result: 'x'.repeat(1024 * 1024) }));
+      const makeBinding = () => ({
+        conversationId: 'conversation-1',
+        providerId,
+        resumeSeed: {
+          providerSessionId: 'native-session',
+          providerState: { history: { toJSON: serializeHistory } },
+        },
+      });
+      await harness.coordinator.bindConversation(makeBinding());
+      await harness.coordinator.prepare();
+      await harness.coordinator.bindConversation(makeBinding());
+      serializeHistory.mockClear();
+
+      const backend = harness.backends.get(providerId)!;
+      const session = backend.sessions[0];
+      const execute = session.execute.bind(session);
+      jest.spyOn(session, 'execute').mockImplementationOnce((request) => {
+        const run = execute(request) as FakeRun;
+        for (let sequence = 1; sequence <= 20; sequence++) {
+          run.events.push({
+            type: 'text_delta', scope: requestedScope(session, run, sequence), text: `${sequence}`,
+          });
+        }
+        run.events.push({
+          type: 'turn_completed', scope: requestedScope(session, run, 21), reason: 'completed',
+        });
+        run.events.end();
+        return run;
+      });
+      session.emit({
+        type: 'session_error', category: 'provider', message: 'background failure', recoverable: true,
+        scope: { kind: 'session', sessionInstanceId: session.sessionInstanceId, sequence: 1 },
+      });
+      expect(harness.sessionEvents).toHaveLength(1);
+      expect(harness.coordinator.isEventContextCurrent(harness.sessionEventContexts[0])).toBe(true);
+
+      await expect(harness.coordinator.execute(createSubmission())).resolves.toMatchObject({
+        status: 'completed',
+      });
+      expect(harness.requestedEvents.filter(event => event.type === 'text_delta').map(event => event.text))
+        .toEqual(Array.from({ length: 20 }, (_, index) => `${index + 1}`));
+      expect(backend.sessions).toHaveLength(1);
+      expect(serializeHistory).not.toHaveBeenCalled();
+      await harness.coordinator.dispose();
+    },
+  );
+
+  it.each([
+    { providerSessionId: 'replacement-session' },
+    { resumeCheckpoint: 'earlier-message' },
+    { providerState: { leafId: 'replacement-leaf' } },
+  ])('replaces the session when resume configuration changes to %j', async (changedSeed) => {
+    const harness = createHarness();
+    const { session, run, resultPromise } = await beginExecution(harness);
+    const resumeSeed = {
+      providerSessionId: 'native-session',
+      providerState: { leafId: 'leaf-1' },
+      ...changedSeed,
+    };
+    await harness.coordinator.bindConversation({
+      conversationId: 'conversation-1', providerId: 'claude', resumeSeed,
+    });
+    run.events.push({ type: 'text_delta', scope: requestedScope(session, run, 1), text: 'late' });
+    await expect(resultPromise).resolves.toMatchObject({ status: 'invalidated' });
+    expect(harness.requestedEvents).toHaveLength(0);
+    expect(session.disposeCalls).toBe(1);
+    await harness.coordinator.prepare();
+    expect(harness.backends.get('claude')!.configs[1].resumeSeed).toEqual(resumeSeed);
+    await harness.coordinator.dispose();
+  });
+
+  it('protects a native session with running children from cooling after its parent settles', async () => {
+    const harness = createHarness();
+    await harness.coordinator.bindConversation({ conversationId: 'conversation-1', providerId: 'codex' });
+    await harness.coordinator.prepare();
+    const session = harness.backends.get('codex')!.sessions[0];
+    const hasBackgroundWork = jest.fn(() => true);
+    Object.assign(session, { hasBackgroundWork });
+    expect(harness.coordinator.hasBackgroundWork).toBe(true);
+    expect(harness.coordinator.canCool()).toBe(false);
+    hasBackgroundWork.mockReturnValue(false);
+    expect(harness.coordinator.hasBackgroundWork).toBe(false);
+    expect(harness.coordinator.canCool()).toBe(true);
+    await harness.coordinator.dispose();
+    await harness.registry.dispose();
+  });
+
   it('exposes commands only for the current conversation and provider binding', async () => {
     const harness = createHarness();
     await harness.coordinator.bindConversation({ conversationId: 'one', providerId: 'claude' });
@@ -753,7 +503,7 @@ describe('ChatExecutionCoordinator', () => {
     const submission = createSubmission({
       configuration: {
         systemInstructions: {
-          dynamicSections: ['## Collab Mode\nRuntime guidance.'],
+          dynamicSections: ['## Additional context\nRuntime guidance.'],
           kind: 'provider-default',
         },
       },
@@ -797,7 +547,7 @@ describe('ChatExecutionCoordinator', () => {
     expect(assistantMessage.assistantMessageId).toBe('native-assistant');
   });
 
-  it('uses the terminal assistant identity for fork projections', async () => {
+  it('attaches late native user and assistant identities without reloading history', async () => {
     const harness = createHarness();
     const user: ChatMessage = { id: 'user', role: 'user', content: 'Hello', timestamp: 1 };
     const assistant: ChatMessage = { id: 'assistant', role: 'assistant', content: '', timestamp: 2 };
@@ -812,6 +562,7 @@ describe('ChatExecutionCoordinator', () => {
     run.events.push({
       type: 'turn_completed', scope: requestedScope(session, run, 3), reason: 'completed',
       nativeAssistantId: 'turn-checkpoint', nativeCheckpointId: 'turn-checkpoint',
+      nativeUserMessageId: 'late-native-user',
     });
     run.events.end();
 
@@ -819,6 +570,49 @@ describe('ChatExecutionCoordinator', () => {
       status: 'completed', nativeAssistantMessageId: 'turn-checkpoint',
     });
     expect(assistant.assistantMessageId).toBe('turn-checkpoint');
+    expect(user.userMessageId).toBe('late-native-user');
+  });
+
+  it('keeps the submitted pair bound to its own identities across a steer boundary', async () => {
+    const harness = createHarness();
+    const user: ChatMessage = { id: 'user', role: 'user', content: 'Hello', timestamp: 1 };
+    const assistant: ChatMessage = { id: 'assistant', role: 'assistant', content: '', timestamp: 2 };
+    const { session, run, resultPromise } = await beginExecution(
+      harness, createSubmission({ messages: { user, assistant } }),
+    );
+    run.events.push({
+      type: 'turn_started', scope: requestedScope(session, run, 1), accepted: true,
+      nativeUserMessageId: 'native-user',
+    });
+    run.events.push({
+      type: 'user_message_started', scope: requestedScope(session, run, 2),
+      nativeUserMessageId: 'native-user',
+    });
+    run.events.push({
+      type: 'assistant_message_started', scope: requestedScope(session, run, 3),
+      nativeAssistantId: 'native-assistant',
+    });
+    run.events.push({
+      type: 'user_message_started', scope: requestedScope(session, run, 4),
+      content: 'Steer', nativeUserMessageId: 'steer-user',
+    });
+    run.events.push({
+      type: 'assistant_message_started', scope: requestedScope(session, run, 5),
+      nativeAssistantId: 'steer-assistant',
+    });
+    run.events.push({
+      type: 'turn_completed', scope: requestedScope(session, run, 6), reason: 'completed',
+      nativeAssistantId: 'steer-assistant', nativeUserMessageId: 'steer-user',
+    });
+    run.events.end();
+
+    await expect(resultPromise).resolves.toMatchObject({
+      status: 'completed',
+      nativeUserMessageId: 'native-user',
+      nativeAssistantMessageId: 'steer-assistant',
+    });
+    expect(user.userMessageId).toBe('native-user');
+    expect(assistant.assistantMessageId).toBe('native-assistant');
   });
 
   it('revalidates conversation authority immediately before provider handoff', async () => {
@@ -846,7 +640,7 @@ describe('ChatExecutionCoordinator', () => {
       name: 'ChatExecutionPreHandoffError',
       cause,
     });
-    expect(authorityCheck).toHaveBeenCalledWith('conversation-1');
+    expect(authorityCheck).toHaveBeenCalledWith('conversation-1', 'local-1', 0);
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -1159,25 +953,6 @@ describe('ChatExecutionCoordinator', () => {
     await expect(resultPromise).resolves.toMatchObject({ status: 'invalidated' });
   });
 
-  it('surfaces ambiguous steer errors for live-event reconciliation', async () => {
-    const harness = createHarness();
-    const { session, run, resultPromise } = await beginExecution(harness);
-    const steerError = new Error('steer transport closed');
-    jest.spyOn(session, 'steer').mockRejectedValueOnce(steerError);
-
-    await expect(harness.coordinator.steer(createSubmission({
-      submissionId: 'ambiguous-steer',
-    }))).rejects.toBe(steerError);
-
-    run.events.push({
-      type: 'turn_completed',
-      scope: requestedScope(session, run, 1),
-      reason: 'completed',
-    });
-    run.events.end();
-    await resultPromise;
-  });
-
   it('lets an early live provider event authoritatively accept a steer before delayed false', async () => {
     const harness = createHarness();
     const { session, resultPromise } = await beginExecution(harness);
@@ -1233,7 +1008,7 @@ describe('ChatExecutionCoordinator', () => {
     await expect(resultPromise).resolves.toMatchObject({ status: 'invalidated' });
   });
 
-  it('enriches an acknowledged steer with the later exact native user ID once', async () => {
+  it('retains acknowledged steer correlation until the first live event', async () => {
     const harness = createHarness();
     const { session, run, resultPromise } = await beginExecution(harness);
     jest.spyOn(session, 'steer').mockResolvedValueOnce(true);
@@ -1355,9 +1130,15 @@ describe('ChatExecutionCoordinator', () => {
       'event-before-never',
       'native-never-user',
     )).resolves.toBe(true);
+    expect(harness.repository.recordConversationActivity).toHaveBeenCalledTimes(1);
+    expect(harness.repository.recordConversationActivity).toHaveBeenCalledWith(
+      'conversation-1',
+      123,
+    );
     await expect(harness.coordinator.acceptSteerFromProviderEvent(
       'event-before-never',
     )).resolves.toBe(false);
+    expect(harness.repository.recordConversationActivity).toHaveBeenCalledTimes(1);
 
     run.events.push({
       type: 'turn_completed',
@@ -1371,11 +1152,12 @@ describe('ChatExecutionCoordinator', () => {
   it('upgrades an ambiguous native steer result when its exact live event arrives later', async () => {
     const harness = createHarness();
     const { session, run, resultPromise } = await beginExecution(harness);
-    jest.spyOn(session, 'steer').mockRejectedValueOnce(new Error('acknowledgement lost'));
+    const steerError = new Error('acknowledgement lost');
+    jest.spyOn(session, 'steer').mockRejectedValueOnce(steerError);
 
     await expect(harness.coordinator.steer(createSubmission({
       submissionId: 'event-after-error',
-    }))).rejects.toThrow('acknowledgement lost');
+    }))).rejects.toBe(steerError);
 
     await expect(harness.coordinator.acceptSteerFromProviderEvent(
       'event-after-error',
@@ -1942,4 +1724,78 @@ describe('ChatExecutionCoordinator', () => {
       'Chat execution coordinator is disposed',
     );
   });
+});
+
+
+test.each([undefined, 'provider-reported-model'])(
+  'attributes requested and background usage to execution while preserving native model %s',
+  async nativeModel => {
+    const harness = createHarness();
+    const { session, run, resultPromise } = await beginExecution(harness);
+    const usage = { inputTokens: 20, contextTokens: 20, contextWindow: 100, percentage: 20,
+      ...(nativeModel ? { model: nativeModel } : {}) };
+    run.events.push({ type: 'usage_updated', scope: requestedScope(session, run, 1), usage });
+    run.events.push({ type: 'turn_completed', scope: requestedScope(session, run, 2), reason: 'completed' });
+    run.events.end();
+    await resultPromise;
+    const scope = { kind: 'background' as const, sessionInstanceId: session.sessionInstanceId,
+      turnId: 'background-usage', sequence: 1 };
+    session.emit({ type: 'background_turn_started', scope });
+    session.emit({ type: 'usage_updated', scope: { ...scope, sequence: 2 }, usage });
+    session.emit({ type: 'background_turn_completed', scope: { ...scope, sequence: 3 }, reason: 'completed' });
+    for (const events of [harness.requestedEvents, harness.sessionEvents]) {
+      expect(events.find(event => event.type === 'usage_updated')).toMatchObject({
+        usage: { model: nativeModel ?? 'model-1' },
+      });
+    }
+    expect(usage.model).toBe(nativeModel);
+    await harness.coordinator.dispose();
+  },
+);
+
+it('protects branch navigation from cooling and concurrent input and persists the resulting native cursor', async () => {
+  const harness = createHarness();
+  await harness.coordinator.bindConversation({ conversationId: 'conversation-1', providerId: 'claude' });
+  await harness.coordinator.prepare();
+  const session = harness.backends.get('claude')!.sessions[0];
+  const navigation = deferred<{ status: string; messages: ChatMessage[] }>();
+  const navigate = jest.fn(() => navigation.promise);
+  Object.assign(session, { navigateConversationBranch: navigate, getConversationBranches: async () => ({}),
+    reconcileConversationBranch: async () => ({ status: 'committed', messages: [] }) });
+  const request = { userMessageId: 'user', configuration: { systemInstructions: { kind: 'provider-default' as const } } };
+  const pending = harness.coordinator.navigateConversationBranch(request);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(navigate).toHaveBeenCalledWith({ ...request, signal: expect.any(AbortSignal) });
+  expect(harness.coordinator.canCool()).toBe(false);
+  await expect(harness.coordinator.execute(createSubmission())).rejects.toThrow('already active');
+  navigation.resolve({ status: 'committed', messages: [] });
+  await expect(pending).resolves.toEqual({ status: 'committed', messages: [] });
+  await harness.coordinator.dispose();
+});
+
+it('reports recovery after native branching succeeds but snapshot persistence fails', async () => {
+  const harness = createHarness();
+  await harness.coordinator.bindConversation({ conversationId: 'conversation-1', providerId: 'claude' });
+  await harness.coordinator.prepare();
+  const session = harness.backends.get('claude')!.sessions[0];
+  const messages: ChatMessage[] = [{ id: 'selected', role: 'user', content: 'Selected branch', timestamp: testDate().getTime() }];
+  Object.assign(session, {
+    getConversationBranches: async () => ({}),
+    navigateConversationBranch: async () => {
+      session.snapshot = { ...session.snapshot, revision: 1, providerState: { leaf: 'selected' } };
+      return { status: 'committed', messages };
+    },
+    reconcileConversationBranch: async () => ({ status: 'committed', messages }),
+  });
+  harness.repository.persistExecutionSnapshot.mockRejectedValueOnce(new Error('Storage unavailable'));
+  await expect(harness.coordinator.navigateConversationBranch({ userMessageId: 'old', configuration: { systemInstructions: { kind: 'provider-default' } } }))
+    .resolves.toMatchObject({ status: 'recovery-required', messages });
+  expect(harness.coordinator.canCool()).toBe(false);
+  await expect(harness.coordinator.execute(createSubmission())).rejects.toThrow('recovery must finish');
+  await expect(harness.coordinator.reconcileConversationBranch({ configuration: { systemInstructions: { kind: 'provider-default' } } }))
+    .resolves.toEqual({ status: 'committed', messages });
+  expect(harness.repository.persistExecutionSnapshot).toHaveBeenLastCalledWith(
+    'conversation-1', expect.any(String), expect.any(Number), expect.objectContaining({ revision: 1 }),
+  );
+  await harness.coordinator.dispose();
 });

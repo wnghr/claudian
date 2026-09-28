@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
-import { getHostnameKey } from '@/utils/env';
+import { getInstallationKey as getHostnameKey } from '@/core/device/InstallationKey';
 
 jest.mock('cross-spawn', () => jest.fn());
 
@@ -11,7 +11,7 @@ import spawn from 'cross-spawn';
 
 import { isSteerableExecutionSession, type ProviderExecutionEvent, type ProviderExecutionRequest } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
-import { AcpJsonRpcTransport } from '@/providers/acp';
+import { ACPJSONRPCTransport } from '@/providers/acp';
 import { GrokExecutionBackend } from '@/providers/grok/execution/GrokExecutionBackend';
 import { GrokExecutionNativeConnectionImpl } from '@/providers/grok/execution/GrokExecutionNativeConnection';
 
@@ -35,12 +35,12 @@ function createNativeProcess() {
 }
 
 describe('GrokExecutionNativeConnection', () => {
-  let native: AcpJsonRpcTransport;
+  let native: ACPJSONRPCTransport;
   let connection: GrokExecutionNativeConnectionImpl;
 
   beforeEach(() => {
     const proc = createNativeProcess();
-    native = new AcpJsonRpcTransport({ input: proc.stdin, output: proc.stdout });
+    native = new ACPJSONRPCTransport({ input: proc.stdin, output: proc.stdout });
     native.onRequest('initialize', () => fixture.initializeResult);
     native.start();
     connection = new GrokExecutionNativeConnectionImpl({
@@ -166,7 +166,7 @@ describe('GrokExecutionNativeConnection', () => {
 
 it.each([false, true])('terminates on native exit after prompt settled: %s', async settled => {
   const proc = createNativeProcess();
-  const native = new AcpJsonRpcTransport({ input: proc.stdin, output: proc.stdout });
+  const native = new ACPJSONRPCTransport({ input: proc.stdin, output: proc.stdout });
   let resolvePrompt!: (value: { stopReason: string }) => void;
   const prompt = new Promise<{ stopReason: string }>(resolve => { resolvePrompt = resolve; });
   let started = false;
@@ -176,7 +176,7 @@ it.each([false, true])('terminates on native exit after prompt settled: %s', asy
   native.onRequest('session/prompt', () => { started = true; return prompt; });
   native.onRequest('_x.ai/interject', () => ({ result: { status: 'queued' } }));
   native.start();
-  const session = new GrokExecutionBackend({ settings: { model: 'grok/grok-4', providerConfigs: { grok: { enabled: true, visibleModels: ['grok-4'], selectedModelsByHost: { [getHostnameKey()]: { fingerprint: 'test', refreshedAt: 1, defaultModelId: 'grok-4', models: [{ rawId: 'grok-4', displayName: 'Grok 4', supportsReasoning: false, reasoningEfforts: [] }] } } } } } } as unknown as ProviderHost, {
+  const session = new GrokExecutionBackend({ getResolvedProviderCliPath: async () => 'grok', settings: { model: 'grok/grok-4', providerConfigs: { grok: { enabled: true, visibleModels: ['grok-4'], selectedModelsByHost: { [getHostnameKey()]: { fingerprint: 'test', refreshedAt: 1, defaultModelId: 'grok-4', models: [{ rawId: 'grok-4', displayName: 'Grok 4', supportsReasoning: false, reasoningEfforts: [] }] } } } } } } as unknown as ProviderHost, {
     nativeFactory: { create: options => new GrokExecutionNativeConnectionImpl(options) },
   }).createSession({
     vaultWorkingDirectory: '/tmp', lifecycle: 'persistent', nativePersistence: 'enabled',

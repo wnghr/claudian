@@ -1,20 +1,21 @@
 import { randomUUID } from 'node:crypto';
 
-import type {
-  ChatRewindMode,
-  ChatRewindPreview,
-  ChatRewindResult,
-  ProviderExecutionEvent,
-  ProviderExecutionRequest,
-  ProviderExecutionRun,
-  ProviderExecutionSession,
-  ProviderRequestedEventScope,
-  ProviderSessionConfig,
-  ProviderSessionEvent,
-  ProviderSessionSnapshot,
-  ProviderSessionStatus,
-  RewindableExecutionSession,
-  SteerableExecutionSession,
+import {
+  type ChatRewindMode,
+  type ChatRewindPreview,
+  type ChatRewindResult,
+  ExecutionEventQueue,
+  type ProviderExecutionEvent,
+  type ProviderExecutionRequest,
+  type ProviderExecutionRun,
+  type ProviderExecutionSession,
+  type ProviderRequestedEventScope,
+  type ProviderSessionConfig,
+  type ProviderSessionEvent,
+  type ProviderSessionSnapshot,
+  type ProviderSessionStatus,
+  type RewindableExecutionSession,
+  type SteerableExecutionSession,
 } from '../../../core/execution';
 import { ProviderModelUnavailableError } from '../../../core/providers/models/ProviderModelUnavailableError';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
@@ -28,17 +29,17 @@ import {
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
 import {
-  type AcpContentBlock,
-  AcpExecutionEventNormalizer,
-  AcpInteractionController,
-  type AcpPromptResponse,
-  type AcpSessionConfigOption,
-  type AcpSessionModelState,
-  type AcpSessionNotification,
-  AcpToolStreamAdapter,
-  type AcpUsage,
-  type AcpUsageUpdate,
-  buildAcpUsageInfo,
+  type ACPContentBlock,
+  ACPExecutionEventNormalizer,
+  ACPInteractionController,
+  type ACPPromptResponse,
+  type ACPSessionConfigOption,
+  type ACPSessionModelState,
+  type ACPSessionNotification,
+  ACPToolStreamAdapter,
+  type ACPUsage,
+  type ACPUsageUpdate,
+  buildACPUsageInfo,
 } from '../../acp';
 import type { GrokCommandCatalog } from '../commands/GrokCommandCatalog';
 import { computeGrokEnvironmentHash } from '../env/GrokSettingsReconciler';
@@ -46,7 +47,7 @@ import {
   resolveGrokSessionCwd,
   resolveGrokSessionDirectory,
 } from '../history/GrokHistoryPathResolver';
-import { resolveGrokUpdateMessageId } from '../history/GrokHistoryStore';
+import { resolveGrokLiveMessageId } from '../history/GrokHistoryStore';
 import {
   decodeGrokModelId,
   findGrokModel,
@@ -94,48 +95,9 @@ interface GrokExecutionSessionOptions {
   ) => Promise<number | null>;
 }
 
-class ExecutionEventQueue implements AsyncIterable<ProviderExecutionEvent> {
-  private closed = false;
-  private readonly items: ProviderExecutionEvent[] = [];
-  private readonly waiters: Array<(result: IteratorResult<ProviderExecutionEvent>) => void> = [];
-
-  constructor(private readonly onReturn: () => void) {}
-
-  push(event: ProviderExecutionEvent): void {
-    if (this.closed) return;
-    const waiter = this.waiters.shift();
-    if (waiter) waiter({ done: false, value: event });
-    else this.items.push(event);
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    while (this.waiters.length > 0) {
-      this.waiters.shift()?.({ done: true, value: undefined });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<ProviderExecutionEvent> {
-    return {
-      next: async () => {
-        const item = this.items.shift();
-        if (item) return { done: false, value: item };
-        if (this.closed) return { done: true, value: undefined };
-        return new Promise(resolve => this.waiters.push(resolve));
-      },
-      return: async () => {
-        this.onReturn();
-        this.close();
-        return { done: true, value: undefined };
-      },
-    };
-  }
-}
-
 class GrokExecutionRunState implements ProviderExecutionRun {
   readonly events: AsyncIterable<ProviderExecutionEvent>;
-  private readonly queue: ExecutionEventQueue;
+  private readonly queue: ExecutionEventQueue<ProviderExecutionEvent>;
   private terminal = false;
   private settle!: () => void;
   readonly settled = new Promise<void>(resolve => { this.settle = resolve; });
@@ -145,7 +107,7 @@ class GrokExecutionRunState implements ProviderExecutionRun {
     readonly turnId: string,
     private readonly cancelCallback: () => void,
   ) {
-    this.queue = new ExecutionEventQueue(cancelCallback);
+    this.queue = new ExecutionEventQueue<ProviderExecutionEvent>(cancelCallback);
     this.events = this.queue;
   }
 
@@ -181,13 +143,13 @@ interface ActiveExecution {
   readonly abortController: AbortController;
   accepted: boolean;
   readonly cancellationGeneration: number;
-  readonly normalizer: AcpExecutionEventNormalizer;
+  readonly normalizer: ACPExecutionEventNormalizer;
   readonly request: ProviderExecutionRequest;
   readonly run: GrokExecutionRunState;
   sequence: number;
-  contextUsage: AcpUsageUpdate | null;
-  promptUsage: AcpUsage | null;
-  promptResponse?: AcpPromptResponse;
+  contextUsage: ACPUsageUpdate | null;
+  promptUsage: ACPUsage | null;
+  promptResponse?: ACPPromptResponse;
   readonly interjections: Map<string, PendingInterjection>;
   observedTurnCompletions: number;
   requiredTurnCompletions: number;
@@ -225,7 +187,7 @@ RewindableExecutionSession {
   private nativeOwner: GrokNativeOwner | null = null;
   private nativeStartupFlight: Promise<GrokExecutionNativeConnection> | null = null;
   private quarantineGeneration = 0;
-  private readonly interactionController: AcpInteractionController;
+  private readonly interactionController: ACPInteractionController;
   private readonly interactionRouter: GrokExecutionInteractionRouter;
   private readonly listeners = new Set<(event: ProviderSessionEvent) => void>();
   private readonly mirrorDeduplicator = new GrokSessionNotificationMirrorDeduplicator();
@@ -251,7 +213,7 @@ RewindableExecutionSession {
         && providerState.nativeConversationContextEstablished !== false,
       );
     this.snapshot = this.#createSnapshot('idle');
-    this.interactionController = new AcpInteractionController({
+    this.interactionController = new ACPInteractionController({
       getTurnId: () => this.active?.run.turnId ?? null,
       interactionPort: config.interactionPort,
       sessionInstanceId: this.sessionInstanceId,
@@ -282,10 +244,10 @@ RewindableExecutionSession {
       interjections: new Map(),
       observedTurnCompletions: 0,
       requiredTurnCompletions: 0,
-      normalizer: new AcpExecutionEventNormalizer({
+      normalizer: new ACPExecutionEventNormalizer({
         mapUsage: usage => {
           if (active.acceptingLiveOutput) active.contextUsage = usage;
-          return buildAcpUsageInfo({ contextWindow: usage });
+          return buildACPUsageInfo({ contextWindow: usage });
         },
         scope: {
           executionId: run.executionId,
@@ -513,10 +475,7 @@ RewindableExecutionSession {
   ): Promise<GrokExecutionNativeConnection> {
     const previousOwner = this.nativeOwner;
     if (previousOwner) await this.#shutdownNativeOwner(previousOwner);
-    const host = this.plugin as ProviderHost & {
-      getResolvedProviderCliPath?: ProviderHost['getResolvedProviderCliPath'];
-    };
-    const command = await host.getResolvedProviderCliPath?.('grok') ?? 'grok';
+    const command = await this.plugin.getResolvedProviderCliPath('grok') ?? 'grok';
     if (quarantineGeneration !== this.quarantineGeneration || this.disposed) {
       throw new Error('Grok native startup was cancelled.');
     }
@@ -792,19 +751,17 @@ RewindableExecutionSession {
   ): string | null {
     const settings = getGrokProviderSettings(this.plugin.settings);
     const model = findGrokModel(settings.currentCatalog?.models ?? [], rawModelId);
-    if (model?.reasoningMetadataResolved !== true) return null;
     const advertisedValues = getGrokAvailableReasoningEfforts(model)
       .map(effort => effort.value);
     const requested = requestedReasoning?.trim() ?? '';
     if (!requested) return null;
     if (advertisedValues.includes(requested)) return requested;
 
-    const preferred = settings.preferredReasoningByModel[rawModelId]?.trim() ?? '';
-    return advertisedValues.includes(preferred) ? preferred : null;
+    throw new Error(`Grok model "${rawModelId}" does not support reasoning effort "${requested}".`);
   }
 
   private handleNotification(
-    notification: AcpSessionNotification,
+    notification: ACPSessionNotification,
     source: 'extension' | 'standard',
   ): void {
     const active = this.active;
@@ -827,7 +784,7 @@ RewindableExecutionSession {
     let update = notification.update;
     if (update.sessionUpdate === 'agent_message_chunk' || update.sessionUpdate === 'user_message_chunk') {
       const role = update.sessionUpdate === 'agent_message_chunk' ? 'assistant' : 'user';
-      const messageId = resolveGrokUpdateMessageId(update, role, notification._meta);
+      const messageId = resolveGrokLiveMessageId(update, role, notification._meta);
       if (messageId) update = { ...update, messageId };
     }
     const result = active.normalizer.normalize(update);
@@ -852,7 +809,7 @@ RewindableExecutionSession {
     }
   }
 
-  private accept(active: ActiveExecution, response?: AcpPromptResponse): void {
+  private accept(active: ActiveExecution, response?: ACPPromptResponse): void {
     if (active.accepted) return;
     active.accepted = true;
     if (!this.nativeConversationContextEstablished) {
@@ -895,7 +852,7 @@ RewindableExecutionSession {
         getGrokProviderSettings(this.plugin.settings).currentCatalog?.models ?? [], model,
       )?.contextWindow;
       const size = active.contextUsage?.size || advertisedWindow;
-      const usage = buildAcpUsageInfo({
+      const usage = buildACPUsageInfo({
         model: decodeGrokModelId(model) ?? undefined,
         contextWindow: size ? { size, used: active.promptUsage.totalTokens } : null,
         promptUsage: active.promptUsage,
@@ -1190,7 +1147,7 @@ RewindableExecutionSession {
 
   async #publishModelUpdate(
     owner: GrokNativeOwner,
-    state: AcpSessionModelState,
+    state: ACPSessionModelState,
   ): Promise<void> {
     if (!this.#isCurrentNativeOwner(owner)) return;
     const update = normalizeGrokModelUpdateMetadata(state);
@@ -1203,7 +1160,7 @@ RewindableExecutionSession {
   }
 
   async #publishModelsFromConfig(
-    options: readonly AcpSessionConfigOption[],
+    options: readonly ACPSessionConfigOption[],
     owner: GrokNativeOwner,
   ): Promise<void> {
     if (!this.#isCurrentNativeOwner(owner)) return;
@@ -1335,8 +1292,8 @@ class GrokExecutionCancellationError extends Error {
   }
 }
 
-function createGrokToolStreamAdapter(): AcpToolStreamAdapter {
-  return new AcpToolStreamAdapter({
+function createGrokToolStreamAdapter(): ACPToolStreamAdapter {
+  return new ACPToolStreamAdapter({
     normalizeToolInput(rawName, input) {
       return normalizeGrokToolCall({ rawInput: input, title: rawName }).input;
     },
@@ -1360,8 +1317,8 @@ function createGrokToolStreamAdapter(): AcpToolStreamAdapter {
 function buildPromptBlocks(
   request: ProviderExecutionRequest,
   replayConversationHistory = false,
-): AcpContentBlock[] {
-  const blocks: AcpContentBlock[] = [];
+): ACPContentBlock[] {
+  const blocks: ACPContentBlock[] = [];
   let text = request.input
     .filter(block => block.type === 'text')
     .map(block => block.text)

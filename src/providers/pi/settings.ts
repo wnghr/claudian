@@ -1,3 +1,6 @@
+import { getInstallationKey } from '@/core/device/InstallationKey';
+
+import { selectModelMetadata } from '../../core/providers/models/selectedModelMetadata';
 import { getProviderConfig, setProviderConfig } from '../../core/providers/providerConfig';
 import { getProviderEnvironmentVariables } from '../../core/providers/providerEnvironment';
 import { normalizeHostnameStringMap } from '../../core/providers/settings/HostnameStringMap';
@@ -5,8 +8,7 @@ import {
   readStoredBoolean,
   readStoredString,
 } from '../../core/providers/settings/storedSettings';
-import type { HostnameCliPaths } from '../../core/types/settings';
-import { getHostnameKey } from '../../utils/env';
+import type { HostnameCLIPaths } from '../../core/types/settings';
 import {
   clampPiThinkingLevel,
   decodePiModelId,
@@ -21,7 +23,7 @@ export type PiToolMode = 'all' | 'readonly';
 
 export interface PersistedPiProviderSettings {
   cliPath: string;
-  cliPathsByHost: HostnameCliPaths;
+  cliPathsByHost: HostnameCLIPaths;
   discoveredModels: PiDiscoveredModel[];
   enabled: boolean;
   environmentHash: string;
@@ -77,43 +79,6 @@ export function normalizePiVisibleModels(
   return normalized;
 }
 
-export function normalizePiModelAliases(
-  value: unknown,
-  discoveredModels: PiDiscoveredModel[] = [],
-): Record<string, string> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  const normalized: Record<string, string> = {};
-  for (const [encodedId, alias] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof alias !== 'string') {
-      continue;
-    }
-
-    const normalizedEncodedId = normalizePiEncodedId(encodedId, discoveredModels);
-    const normalizedAlias = alias.trim();
-    if (!normalizedEncodedId || !normalizedAlias) {
-      continue;
-    }
-
-    normalized[normalizedEncodedId] = normalizedAlias;
-  }
-
-  return normalized;
-}
-
-export function normalizePiPreferredThinkingByModel(
-  value: unknown,
-  discoveredModels: PiDiscoveredModel[] = [],
-): Record<string, PiThinkingLevel> {
-  return normalizePiPreferredThinkingEntries(
-    value,
-    discoveredModels,
-    encodedId => normalizePiEncodedId(encodedId, discoveredModels),
-  );
-}
-
 export function getPiProviderSettings(settings: Record<string, unknown>): PiProviderSettings {
   const config = getProviderConfig(settings, 'pi');
   const cliPathsByHost = normalizeHostnameStringMap(config.cliPathsByHost);
@@ -155,7 +120,7 @@ export function updatePiProviderSettings(
   updates: Partial<PiProviderSettings>,
 ): PiProviderSettings {
   const current = getPiProviderSettings(settings);
-  const hostnameKey = getHostnameKey();
+  const hostnameKey = getInstallationKey();
   const nextDiscoveredModels = normalizePiDiscoveredModels(
     updates.discoveredModels ?? current.discoveredModels,
   );
@@ -311,36 +276,11 @@ function normalizePiPreferredThinkingEntries(
   return normalized;
 }
 
-export function resolvePiModelAlias(
-  settings: PiProviderSettings,
-  encodedId: string,
-): string | null {
-  return settings.modelAliases[encodedId] ?? null;
-}
-
 function normalizePiToolMode(value: unknown): PiToolMode {
   if (value === undefined) {
     return 'all';
   }
   return value === 'all' || value === 'readonly' ? value : 'readonly';
-}
-
-function normalizePiEncodedId(
-  value: string,
-  discoveredModels: PiDiscoveredModel[],
-): string {
-  const trimmed = value.trim();
-  const decoded = decodePiModelId(trimmed);
-  if (!decoded) {
-    return '';
-  }
-
-  if (discoveredModels.length === 0) {
-    return trimmed;
-  }
-
-  const discoveredModel = findPiModel({ discoveredModels }, trimmed);
-  return discoveredModel ? discoveredModel.encodedId : '';
 }
 
 function normalizePiPersistableEncodedId(
@@ -401,7 +341,13 @@ export function projectPiModelSettings(settings: Record<string, unknown>): Recor
   const current = getPiProviderSettings(settings);
   const visibleModels = current.visibleModels;
   const selected = new Set(visibleModels);
-  const config = { ...getProviderConfig(settings, 'pi'), visibleModels, selectedModels: current.discoveredModels.filter(model => selected.has(model.encodedId)) };
+  const config = {
+    ...getProviderConfig(settings, 'pi'),
+    visibleModels,
+    modelAliases: selectModelMetadata(current.modelAliases, selected),
+    preferredThinkingByModel: selectModelMetadata(current.preferredThinkingByModel, selected),
+    selectedModels: current.discoveredModels.filter(model => selected.has(model.encodedId)),
+  };
   for (const key of ['discoveredModels', 'catalogTimestamp', 'catalogFingerprint', 'availableModes']) delete (config as Record<string, unknown>)[key];
   return config;
 }

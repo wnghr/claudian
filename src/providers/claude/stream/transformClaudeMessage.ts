@@ -12,7 +12,11 @@ import {
   extractToolResultContent,
   extractToolResultImages,
 } from '../sdk/toolResultContent';
-import type { ClaudeAsyncSubagentCompletionEvent, TransformEvent } from '../sdk/types';
+import type {
+  ClaudeAsyncSubagentCompletionEvent,
+  ClaudeSubagentProgressEvent,
+  TransformEvent,
+} from '../sdk/types';
 import { isDefaultClaudeModel } from '../types/models';
 import { createTransformStreamState, type TransformStreamState } from './toolInputStreamState';
 
@@ -87,6 +91,42 @@ function transformTaskNotification(message: SDKMessage): ClaudeAsyncSubagentComp
     status,
     result: normalizeTaskNotificationResult(status, record.summary),
     ...(typeof toolUseId === 'string' && toolUseId.length > 0 ? { toolUseId } : {}),
+  };
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Progress is keyed to the spawning tool call; tasks without one have no card to update. */
+function transformTaskProgress(message: SDKMessage): ClaudeSubagentProgressEvent | null {
+  if (message.type !== 'system' || message.subtype !== 'task_progress') {
+    return null;
+  }
+
+  const toolCallId = nonEmptyString(message.tool_use_id);
+  if (!toolCallId) return null;
+
+  const usage = message.usage as Partial<typeof message.usage> | undefined;
+  const summary = nonEmptyString(message.summary);
+  const lastToolName = nonEmptyString(message.last_tool_name);
+  const toolUses = nonNegativeNumber(usage?.tool_uses);
+  const totalTokens = nonNegativeNumber(usage?.total_tokens);
+  const durationMs = nonNegativeNumber(usage?.duration_ms);
+  return {
+    type: 'subagent_progress',
+    progress: {
+      toolCallId,
+      ...(summary ? { summary } : {}),
+      ...(lastToolName ? { lastToolName } : {}),
+      ...(toolUses !== undefined ? { toolUses } : {}),
+      ...(totalTokens !== undefined ? { totalTokens } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    },
   };
 }
 
@@ -190,12 +230,11 @@ function findUniqueEntry(
 function matchClaudeModelSignature(
   entrySignature: ClaudeModelSignature | null,
   intendedSignature: ClaudeModelSignature,
-  options?: { ignoreIs1M?: boolean },
 ): boolean {
   if (!entrySignature || entrySignature.family !== intendedSignature.family) {
     return false;
   }
-  if (!options?.ignoreIs1M && entrySignature.is1M !== intendedSignature.is1M) {
+  if (entrySignature.is1M !== intendedSignature.is1M) {
     return false;
   }
   if (intendedSignature.major && entrySignature.major !== intendedSignature.major) {
@@ -244,29 +283,14 @@ function selectContextWindowEntry(
     return exactMatch;
   }
 
-  if (!isDefaultClaudeModel(intendedModel)) {
-    return null;
-  }
-
   const intendedSignature = parseClaudeModelSignature(intendedModel);
-  if (!intendedSignature) {
-    return null;
-  }
-
-  const strictSignatureMatch = findUniqueEntry(entries, (entry) =>
-    matchClaudeModelSignature(parseClaudeModelSignature(entry.model), intendedSignature),
-  );
-  if (strictSignatureMatch) {
-    return strictSignatureMatch;
-  }
-
-  const hasVersionedTarget = Boolean(intendedSignature.major || intendedSignature.date);
-  if (!hasVersionedTarget) {
+  // Native tier IDs can include [1m]; explicit model IDs must match the report above.
+  if (!intendedSignature || intendedSignature.major) {
     return null;
   }
 
   return findUniqueEntry(entries, (entry) =>
-    matchClaudeModelSignature(parseClaudeModelSignature(entry.model), intendedSignature, { ignoreIs1M: true }),
+    matchClaudeModelSignature(parseClaudeModelSignature(entry.model), intendedSignature),
   );
 }
 
@@ -429,6 +453,11 @@ export function* transformSDKMessage(
         const notification = transformTaskNotification(message);
         if (notification) {
           yield notification;
+        }
+      } else if (message.subtype === 'task_progress') {
+        const progress = transformTaskProgress(message);
+        if (progress) {
+          yield progress;
         }
       } else if (message.subtype === 'permission_denied') {
         yield emitToolResult(message.agent_id ?? null, {

@@ -4,12 +4,11 @@
 
 import {
   DEFAULT_REASONING_VALUE,
-  resolvePreferredReasoningDefault,
 } from '../../../core/providers/reasoning';
 import { toClaudeRuntimeModelId } from '../modelSelection';
 import {
   CLAUDE_MODEL_TIER_DEFINITIONS,
-  resolveClaudeModelTierAlias,
+  isClaudeModelTier,
 } from '../modelTiers';
 
 /** Model identifier (string to support custom models via environment variables). */
@@ -36,18 +35,13 @@ function normalizeModelId(model: string): string {
   return toClaudeRuntimeModelId(model).trim().toLowerCase();
 }
 
-export function normalizeLegacyClaudeModelAlias(model: string): string {
-  return resolveClaudeModelTierAlias(normalizeModelId(model)) ?? model;
-}
-
 export function isDefaultClaudeModel(model: string): boolean {
-  return resolveClaudeModelTierAlias(normalizeModelId(model)) !== null;
+  return isClaudeModelTier(normalizeModelId(model));
 }
 
 /**
  * Resolves an effort choice within the levels Claude Code reported for the
- * model. Keeps a supported choice; otherwise prefers `high`, then the first
- * reported level. Without reported levels there is no explicit effort.
+ * model. Keeps a supported choice; otherwise defaults to `high`. Without reported levels there is no explicit effort.
  */
 export function resolveSupportedEffortLevel(
   supportedLevels: readonly EffortLevel[],
@@ -59,5 +53,5 @@ export function resolveSupportedEffortLevel(
   if (isEffortLevel(effortLevel) && supportedLevels.includes(effortLevel)) {
     return effortLevel;
   }
-  return resolvePreferredReasoningDefault(supportedLevels, DEFAULT_REASONING_VALUE) as EffortLevel;
+  return DEFAULT_REASONING_VALUE;
 }

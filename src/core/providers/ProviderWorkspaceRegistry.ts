@@ -3,11 +3,10 @@ import type { ProviderCommandCatalog } from './commands/ProviderCommandCatalog';
 import type { ProviderHost } from './ProviderHost';
 import { ProviderInitializationBoundary } from './ProviderInitializationBoundary';
 import type {
-  ProviderCliResolver,
+  ProviderCLIResolver,
   ProviderCommandLoader,
   ProviderId,
   ProviderSettingsTabRenderer,
-  ProviderTabWarmupPolicy,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from './types';
@@ -34,14 +33,8 @@ export class ProviderWorkspaceRegistry {
     this.boundary.register(providerId, registration);
   }
 
-  static async initializeAll(plugin: ProviderHost): Promise<void> {
-    for (const providerId of this.boundary.getRegisteredProviderIds()) {
-      try {
-        await this.ensureInitialized(plugin, providerId, 'startup');
-      } catch {
-        // Compatibility path only: one provider must not block the remaining providers.
-      }
-    }
+  static getAgentSkillProviderIds(): ProviderId[] {
+    return this.boundary.getAgentSkillProviderIds();
   }
 
   static async ensureInitialized(
@@ -101,16 +94,12 @@ export class ProviderWorkspaceRegistry {
     return this.getServices(providerId)?.commandCatalog ?? null;
   }
 
-  static getCliResolver(providerId: ProviderId): ProviderCliResolver | null {
+  static getCliResolver(providerId: ProviderId): ProviderCLIResolver | null {
     return this.getServices(providerId)?.cliResolver ?? null;
   }
 
   static getCommandLoader(providerId: ProviderId): ProviderCommandLoader | null {
     return this.getServices(providerId)?.commandLoader ?? null;
-  }
-
-  static getTabWarmupPolicy(providerId: ProviderId): ProviderTabWarmupPolicy | null {
-    return this.getServices(providerId)?.tabWarmupPolicy ?? null;
   }
 
   static getSettingsTabRenderer(providerId: ProviderId): ProviderSettingsTabRenderer | null {

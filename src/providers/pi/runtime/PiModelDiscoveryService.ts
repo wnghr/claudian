@@ -8,7 +8,7 @@ import {
 } from '../models';
 import { getPiProviderSettings } from '../settings';
 import { buildPiLaunchSpec } from './PiLaunchSpec';
-import { PiRpcTransport } from './PiRpcTransport';
+import { PiRPCTransport } from './PiRPCTransport';
 import { PiSubprocess } from './PiSubprocess';
 
 export type PiModelDiscoveryResult =
@@ -47,7 +47,7 @@ export class PiModelDiscoveryService {
       settings,
     });
     const subprocess = new PiSubprocess(launchSpec);
-    let transport: PiRpcTransport | null = null;
+    let transport: PiRPCTransport | null = null;
     let removeEventListener: (() => void) | null = null;
 
     const abort = () => { transport?.dispose(); void subprocess.shutdown().catch(() => {}); };
@@ -55,7 +55,7 @@ export class PiModelDiscoveryService {
     try {
       signal?.throwIfAborted();
       subprocess.start();
-      transport = new PiRpcTransport({
+      transport = new PiRPCTransport({
         input: subprocess.stdout,
         onClose: (listener) => subprocess.onClose(listener),
         output: subprocess.stdin,
@@ -76,7 +76,11 @@ export class PiModelDiscoveryService {
         }
       });
       const response = await transport.request('get_available_models', {}, 20_000);
-      const models = normalizePiDiscoveredModels(extractModels(response));
+      const models = normalizePiDiscoveredModels(extractModels(response)).map(model => {
+        // This complete native response is authoritative, including non-reasoning models.
+        delete model.reasoningMetadataResolved;
+        return model;
+      });
       return { kind: 'completed', models };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Pi model discovery failed';

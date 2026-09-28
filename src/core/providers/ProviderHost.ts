@@ -12,7 +12,7 @@ import type { PaperReadPort } from '../paper/PaperRead';
 import type { PaperSearchPort } from '../search/PaperSearch';
 import type { ClaudianSettings } from '../types';
 import type { EnvironmentScope } from '../types/settings';
-import type { ProviderCliResolutionContext, ProviderId } from './types';
+import type { ProviderCLIResolutionContext, ProviderId } from './types';
 
 /**
  * Application capabilities available to provider adapters.
@@ -24,7 +24,7 @@ import type { ProviderCliResolutionContext, ProviderId } from './types';
 export interface ProviderHost extends TodoPort, PaperReadPort, PaperSearchPort, PaperNoteWritePort, PaperFieldEditPort {
   readonly app: App;
   readonly executionLifecycleRegistry: ProviderExecutionLifecycleRegistry;
-  readonly settings: ClaudianSettings;
+  readonly settings: Readonly<ClaudianSettings>;
   readonly storage: SharedAppStorage;
   readonly manifest?: { version?: string };
 
@@ -52,7 +52,7 @@ export interface ProviderHost extends TodoPort, PaperReadPort, PaperSearchPort, 
   ): Promise<void>;
   getResolvedProviderCliPath(
     providerId: ProviderId,
-    context?: ProviderCliResolutionContext,
+    context?: ProviderCLIResolutionContext,
   ): Promise<string | null>;
   runProviderExecutionTransition<T>(
     providerIds: ProviderId[],

@@ -1,6 +1,6 @@
 import { SettingsCoordinator } from '@/app/settings/SettingsCoordinator';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
-import type { AcpSessionConfigOption } from '@/providers/acp';
+import type { ACPSessionConfigOption } from '@/providers/acp';
 import { projectOpencodeMetadata } from '@/providers/opencode/metadata/OpencodeMetadataProjection';
 import { getOpencodeProviderSettings } from '@/providers/opencode/settings';
 
@@ -15,7 +15,7 @@ function createHost(): ProviderHost {
   } as unknown as ProviderHost;
 }
 
-function effort(values: string[]): AcpSessionConfigOption[] {
+function effort(values: string[]): ACPSessionConfigOption[] {
   return [{
     id: 'effort', category: 'thought_level', name: 'Effort', type: 'select',
     currentValue: values[0] ?? '', options: values.map(value => ({ name: value, value })),
@@ -59,7 +59,7 @@ it('clears catalogs supplied as empty ACP selectors while preserving omitted cat
     visibleModels: ['provider/alpha', 'provider/beta'],
   });
   await projectOpencodeMetadata(host, {
-    configOptions: [{ id: 'mode', name: 'Mode', type: 'select', currentValue: '', options: [] }],
+    configOptions: [{ id: 'mode', category: 'mode', name: 'Mode', type: 'select', currentValue: '', options: [] }],
   });
   expect(getOpencodeProviderSettings(host.settings).availableModes).toEqual([]);
 });
@@ -82,5 +82,5 @@ it('clears explicitly empty reasoning options while retaining metadata absent fr
     discoveredModels: [{ rawId: 'provider/alpha', label: 'Alpha' }],
     thinkingOptionsByModel: { 'provider/beta': [{ label: 'low', value: 'low' }] },
   });
-  expect(getOpencodeProviderSettings(host.settings).thinkingOptionsByModel['provider/alpha']).toBeUndefined();
+  expect(getOpencodeProviderSettings(host.settings).thinkingOptionsByModel['provider/alpha']).toEqual([]);
 });

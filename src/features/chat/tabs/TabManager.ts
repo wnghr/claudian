@@ -20,9 +20,10 @@ import { throwIfAborted, toAbortError } from '../../../utils/abort';
 import { scheduleAnimationFrame } from '../../../utils/animationFrame';
 import { revealWorkspaceLeaf } from '../../../utils/obsidianCompat';
 import { getVaultPath } from '../../../utils/path';
-import type { FeatureHost } from '../../FeatureHost';
+import type { ChatFeatureHost } from '../ChatFeatureHost';
 import { getTabProviderId } from './providerResolution';
 import type { ForkContext } from './TabForking';
+import { createTabSessionState } from './TabIdentity';
 import {
   activateTab,
   commitProvisionalTab,
@@ -33,9 +34,11 @@ import {
 } from './TabLifecycle';
 import {
   onProviderAvailabilityChanged,
+  reconcileBlankTabIdentity,
   refreshTabWorkspaceServices,
 } from './TabProviderState';
 import { createTabRuntime } from './TabRuntimeFactory';
+import type { TabSessionState } from './TabSession';
 import {
   type AssembledTabRuntime,
   generateTabId,
@@ -46,12 +49,6 @@ import {
   type TabManagerViewHost,
   type TabProviderCatalogContext,
 } from './types';
-
-function isTabManagerViewHost(value: unknown): value is TabManagerViewHost {
-  return !!value
-    && typeof value === 'object'
-    && 'getTabManager' in (value as Record<string, unknown>);
-}
 
 type CreateTabOptions = {
   activate?: boolean;
@@ -86,34 +83,29 @@ type ProviderRuntimeCommandCacheEntry = {
   key: string;
 };
 
-type ProviderWarmupContext = {
+type ProviderCommandLookup = {
   commandContextRevision: number;
-  coordinatorState: 'absent' | 'idle' | 'active' | 'stale';
   conversation: Conversation | null;
-  hasResumableNativeSeed: boolean;
-  plugin: FeatureHost['providerHost'];
   tab: {
     conversationId: string | null;
-    draftModel: string | null;
-    lifecycleState: AssembledTabRuntime['lifecycleState'];
     providerId: ProviderId;
   };
-  warmupMode: 'none' | 'commands' | 'execution';
 };
 
-type ProviderCommandContext = ProviderWarmupContext & {
+type ProviderCommandContext = ProviderCommandLookup & {
+  allowIsolatedMetadataCreation: boolean;
   cacheKey: string;
   providerGeneration: number;
   resourceGeneration: number;
 };
 
-type ProviderCommandWarmupEntry = {
+type ProviderCommandLoadEntry = {
   abortController: AbortController;
   key: string;
   promise: Promise<ProviderCommandDiscoveryResult<SlashCommand>>;
 };
 
-type SdkCommandDiscovery = {
+type SDKCommandDiscovery = {
   result: ProviderCommandDiscoveryResult<SlashCommand>;
   commandSnapshot?: readonly SlashCommand[];
 };
@@ -134,16 +126,16 @@ function throwCollectedErrors(errors: readonly unknown[], message: string): void
  * TabManager coordinates multiple chat tabs.
  */
 export class TabManager implements TabManagerInterface {
-  private plugin: FeatureHost;
+  private plugin: ChatFeatureHost;
   private containerEl: HTMLElement;
   private view: TabManagerViewHost;
 
-  private tabs: Map<TabId, AssembledTabRuntime> = new Map();
+  private readonly tabs = new Map<TabId, TabSessionState | AssembledTabRuntime>();
   private activeTabId: TabId | null = null;
   private readonly committedTabIds = new Set<TabId>();
   private committedActiveTabId: TabId | null = null;
   private callbacks: TabManagerCallbacks;
-  private providerRuntimeCommandWarmups = new Map<TabId, ProviderCommandWarmupEntry>();
+  private providerRuntimeCommandLoads = new Map<TabId, ProviderCommandLoadEntry>();
   private providerRuntimeCommandCache = new Map<TabId, ProviderRuntimeCommandCacheEntry>();
   private providerCommandDiscoveryStores = new Map<
     TabId,
@@ -173,37 +165,15 @@ export class TabManager implements TabManagerInterface {
   private shutdownSnapshotOpen = false;
 
   constructor(
-    plugin: FeatureHost,
+    plugin: ChatFeatureHost,
     containerEl: HTMLElement,
     view: TabManagerViewHost,
-    callbacks?: TabManagerCallbacks,
-  );
-  constructor(
-    plugin: FeatureHost,
-    legacyArg: unknown,
-    containerEl: HTMLElement,
-    view: TabManagerViewHost,
-    callbacks?: TabManagerCallbacks,
-  );
-  constructor(
-    plugin: FeatureHost,
-    arg2: unknown,
-    arg3: HTMLElement | TabManagerViewHost,
-    arg4?: TabManagerViewHost | TabManagerCallbacks,
-    arg5: TabManagerCallbacks = {},
+    callbacks: TabManagerCallbacks = {},
   ) {
     this.plugin = plugin;
-
-    if (isTabManagerViewHost(arg3)) {
-      this.containerEl = arg2 as HTMLElement;
-      this.view = arg3;
-      this.callbacks = (arg4 as TabManagerCallbacks | undefined) ?? {};
-      return;
-    }
-
-    this.containerEl = arg3;
-    this.view = arg4 as TabManagerViewHost;
-    this.callbacks = arg5;
+    this.containerEl = containerEl;
+    this.view = view;
+    this.callbacks = callbacks;
   }
 
   // ============================================
@@ -250,6 +220,7 @@ export class TabManager implements TabManagerInterface {
     runtimeTabId: TabId,
     options: CreateTabOptions,
     activationRequestRevision: number | null,
+    restoredIdentity?: TabSessionState,
   ): Promise<AssembledTabRuntime | null> {
     if (this.destroyed) return null;
 
@@ -272,6 +243,7 @@ export class TabManager implements TabManagerInterface {
         component: this.view,
         conversation: conversation ?? undefined,
         tabId: runtimeTabId,
+        initialState: restoredIdentity,
         ...(typeof draftModel === 'string' ? { draftModel } : {}),
         ...(providerId !== undefined ? { providerId } : {}),
         lifecycleState,
@@ -324,7 +296,6 @@ export class TabManager implements TabManagerInterface {
         onConversationIdChanged: (runtime, nextConversationId) => {
           if (!this.#isTabOwned(runtime)) return;
           if (this.destroyed && !this.shutdownSnapshotOpen) return;
-          runtime.conversationId = nextConversationId;
           if (!this.destroyed) {
             this.#bumpTabCommandContextRevision(runtime.id);
           }
@@ -355,7 +326,12 @@ export class TabManager implements TabManagerInterface {
         );
       }
 
-      if (this.destroyed) {
+      if (this.destroyed || (restoredIdentity && (
+        !this.#isTabAlive(restoredIdentity)
+        || restoredIdentity.conversationId !== tab.conversationId
+        || restoredIdentity.draftModel !== tab.draftModel
+        || restoredIdentity.providerId !== tab.providerId
+      ))) {
         const abandonedTab = tab;
         tab = null;
         const rollbackErrors: unknown[] = [];
@@ -438,12 +414,12 @@ export class TabManager implements TabManagerInterface {
     previousActiveTabId: TabId | null,
   ): Promise<unknown[]> {
     const rollbackErrors: unknown[] = [];
-    if (this.tabs.get(tab.id) !== tab) {
+    if (this.getTab(tab.id) !== tab) {
       rollbackErrors.push(...this.#releaseTabRuntimeMetadata(tab.id));
       return rollbackErrors;
     }
 
-    tab.lifecycleState = 'closing';
+    tab.session.beginClose();
     rollbackErrors.push(...this.#releaseTabRuntimeMetadata(tab.id));
 
     if (this.activeTabId === tab.id) {
@@ -455,7 +431,7 @@ export class TabManager implements TabManagerInterface {
       this.activeTabId = null;
 
       const previousTab = previousActiveTabId
-        ? this.tabs.get(previousActiveTabId) ?? null
+        ? this.getTab(previousActiveTabId) ?? null
         : null;
       if (!this.destroyed && previousTab && previousTab.lifecycleState !== 'closing') {
         try {
@@ -489,8 +465,8 @@ export class TabManager implements TabManagerInterface {
    * @param tabId The tab to switch to.
    */
   async switchToTab(tabId: TabId): Promise<void> {
-    const tab = this.tabs.get(tabId);
-    if (!tab || !this.#isTabAlive(tab)) return;
+    const identity = this.tabs.get(tabId);
+    if (!identity || !this.#isTabAlive(identity)) return;
     const previousTabId = this.activeTabId;
     await this.#requestTabSwitch(tabId, false, this.#reserveTabSwitchIntent(tabId));
     if (this.activeTabId !== tabId || previousTabId === tabId) return;
@@ -514,8 +490,8 @@ export class TabManager implements TabManagerInterface {
     requestRevision: number,
     onActivationStarted?: (previousTabId: TabId | null) => void,
   ): Promise<void> {
-    const tab = this.tabs.get(tabId);
-    if (!tab || !this.#isTabAlive(tab)) {
+    const identity = this.tabs.get(tabId);
+    if (!identity || !this.#isTabAlive(identity)) {
       return;
     }
 
@@ -535,10 +511,22 @@ export class TabManager implements TabManagerInterface {
     let switchRolledBack = false;
     onActivationStarted?.(previousTabId);
 
+    let tab = this.getTab(tabId) ?? null;
     try {
+      if (!tab) {
+        this.assemblingTabIds.add(tabId);
+        try {
+          tab = await this.#createReservedTab(identity.conversationId, tabId, {
+            activate: false, draftModel: identity.draftModel ?? undefined, providerId: identity.providerId,
+          }, null, identity);
+        } finally {
+          this.assemblingTabIds.delete(tabId);
+        }
+        if (!tab || !this.#isTabAlive(tab)) return;
+      }
       // Deactivate current tab
       if (previousTabId && previousTabId !== tabId) {
-        const currentTab = this.tabs.get(previousTabId);
+        const currentTab = this.getTab(previousTabId);
         if (currentTab) {
           deactivateTab(currentTab);
         }
@@ -606,11 +594,11 @@ export class TabManager implements TabManagerInterface {
       }
     } catch (error) {
       switchRolledBack = true;
-      const rollbackErrors = this.#restorePreviousTabAfterFailedSwitch(
+      const rollbackErrors = tab ? this.#restorePreviousTabAfterFailedSwitch(
         tab,
         previousTabId,
         activeTabChangePublicationStarted,
-      );
+      ) : [];
       if (rollbackErrors.length > 0) {
         throw new AggregateError(
           [error, ...rollbackErrors],
@@ -624,6 +612,7 @@ export class TabManager implements TabManagerInterface {
         !switchRolledBack
         && this.activeTabId === tabId
         && this.committedTabIds.has(tabId)
+        && tab
         && this.#isTabAlive(tab)
       ) {
         this.committedActiveTabId = tabId;
@@ -705,7 +694,7 @@ export class TabManager implements TabManagerInterface {
     }
 
     const previousTab = previousTabId
-      ? this.tabs.get(previousTabId) ?? null
+      ? this.getTab(previousTabId) ?? null
       : null;
     if (
       !this.destroyed
@@ -856,6 +845,7 @@ export class TabManager implements TabManagerInterface {
     preserveLastBlank: boolean,
   ): Promise<boolean> {
     const tab = this.tabs.get(tabId);
+    const runtime = this.getTab(tabId);
     if (!tab) {
       return false;
     }
@@ -864,12 +854,12 @@ export class TabManager implements TabManagerInterface {
     }
 
     // Rewind is a provider/local-state transaction and cannot be interrupted by teardown.
-    if (tab.state.isRewinding) {
+    if (runtime?.state.isRewinding) {
       return false;
     }
 
     // Don't close if streaming unless forced
-    if (tab.state.isStreaming && !force) {
+    if (runtime?.state.isStreaming && !force) {
       return false;
     }
 
@@ -879,14 +869,14 @@ export class TabManager implements TabManagerInterface {
       preserveLastBlank
       && this.tabs.size === 1
       && !tab.conversationId
-      && tab.state.messages.length === 0
+      && (!runtime || runtime.state.messages.length === 0)
     ) {
       return false;
     }
 
     // Reserve the close before fallible replacement assembly without fencing state callbacks.
     this.closingTabIds.add(tabId);
-    tab.session.pauseIntentAdmission();
+    runtime?.session.pauseIntentAdmission();
     try {
       const tabIdsBefore = Array.from(this.tabs.keys());
       const closingIndex = tabIdsBefore.indexOf(tabId);
@@ -912,7 +902,8 @@ export class TabManager implements TabManagerInterface {
       }
 
       // Replacement admission is complete; teardown is now irreversible.
-      tab.lifecycleState = 'closing';
+      if ('session' in tab) tab.session.beginClose();
+      else tab.lifecycleState = 'closing';
       this.committedTabIds.delete(tabId);
       if (this.committedActiveTabId === tabId) {
         this.committedActiveTabId = null;
@@ -925,14 +916,14 @@ export class TabManager implements TabManagerInterface {
 
       // Save conversation before closing. Cleanup remains mandatory if save fails.
       try {
-        await tab.controllers.conversationController.save();
+        await runtime?.controllers.conversationController.save();
       } catch (error) {
         closeErrors.push(error);
       }
 
       // Destroy tab resources, then release manager ownership even if teardown fails.
       try {
-        await destroyTab(tab);
+        if (runtime) await destroyTab(runtime);
       } catch (error) {
         closeErrors.push(error);
       }
@@ -963,9 +954,9 @@ export class TabManager implements TabManagerInterface {
       return true;
     } finally {
       this.closingTabIds.delete(tabId);
-      tab.session.resumeIntentAdmission();
-      if (this.#isTabStateMutable(tab) && tab.session.acceptsIntents) {
-        tab.controllers.inputController.resumeQueuedTurnAfterIntentAdmission();
+      runtime?.session.resumeIntentAdmission();
+      if (runtime && this.#isTabStateMutable(runtime) && runtime.session.acceptsIntents) {
+        runtime.controllers.inputController.resumeQueuedTurnAfterIntentAdmission();
       }
     }
   }
@@ -989,7 +980,7 @@ export class TabManager implements TabManagerInterface {
   async #resolveLiveTabAfterClose(
     tabIdsBefore: readonly TabId[],
     closingIndex: number,
-  ): Promise<AssembledTabRuntime | null> {
+  ): Promise<TabSessionState | null> {
     if (this.destroyed) return null;
 
     let replacement = this.#findLiveTabAfterClose(tabIdsBefore, closingIndex);
@@ -1009,7 +1000,7 @@ export class TabManager implements TabManagerInterface {
   #findLiveTabAfterClose(
     tabIdsBefore: readonly TabId[],
     closingIndex: number,
-  ): AssembledTabRuntime | null {
+  ): TabSessionState | null {
     if (this.destroyed) return null;
 
     const before = tabIdsBefore.slice(0, Math.max(0, closingIndex)).reverse();
@@ -1023,12 +1014,12 @@ export class TabManager implements TabManagerInterface {
     ]);
     return Array.from(candidateIds)
       .map(id => this.tabs.get(id) ?? null)
-      .find((candidate): candidate is AssembledTabRuntime => (
+      .find((candidate): candidate is TabSessionState => (
         !!candidate && this.#isTabAvailableAfterCloseClaims(candidate)
       )) ?? null;
   }
 
-  async #ensureLiveTabReplacement(): Promise<AssembledTabRuntime | null> {
+  async #ensureLiveTabReplacement(): Promise<TabSessionState | null> {
     if (this.destroyed) return null;
 
     const existing = Array.from(this.tabs.values())
@@ -1047,25 +1038,25 @@ export class TabManager implements TabManagerInterface {
     }
   }
 
-  #isTabAlive(tab: AssembledTabRuntime): boolean {
+  #isTabAlive(tab: TabSessionState): boolean {
     return !this.destroyed
       && !this.closingTabIds.has(tab.id)
       && this.#isTabOwned(tab);
   }
 
-  #isTabStateMutable(tab: AssembledTabRuntime): boolean {
+  #isTabStateMutable(tab: TabSessionState): boolean {
     return !this.destroyed && this.#isTabOwned(tab);
   }
 
-  #isTabAvailableAfterCloseClaims(tab: AssembledTabRuntime): boolean {
+  #isTabAvailableAfterCloseClaims(tab: TabSessionState): boolean {
     return !this.destroyed && this.#isTabAvailableToAdmittedClose(tab);
   }
 
-  #isTabAvailableToAdmittedClose(tab: AssembledTabRuntime): boolean {
+  #isTabAvailableToAdmittedClose(tab: TabSessionState): boolean {
     return !this.closingTabIds.has(tab.id) && this.#isTabOwned(tab);
   }
 
-  #isTabOwned(tab: AssembledTabRuntime): boolean {
+  #isTabOwned(tab: TabSessionState): boolean {
     return tab.lifecycleState !== 'closing'
       && this.tabs.get(tab.id) === tab;
   }
@@ -1109,7 +1100,7 @@ export class TabManager implements TabManagerInterface {
 
   /** Gets the currently active tab. */
   getActiveTab(): AssembledTabRuntime | null {
-    return this.activeTabId ? this.tabs.get(this.activeTabId) ?? null : null;
+    return this.activeTabId ? this.getTab(this.activeTabId) ?? null : null;
   }
 
   /** Gets the active tab ID. */
@@ -1119,20 +1110,26 @@ export class TabManager implements TabManagerInterface {
 
   /** Gets a tab by ID. */
   getTab(tabId: TabId): AssembledTabRuntime | null {
-    return this.tabs.get(tabId) ?? null;
+    const tab = this.tabs.get(tabId);
+    return tab && 'state' in tab ? tab : null;
   }
 
-  /** Gets all tabs. */
+  /** Gets assembled runtimes; inactive restored identities are available separately. */
   getAllTabs(): AssembledTabRuntime[] {
-    return Array.from(this.tabs.values());
+    return [...this.tabs.values()].filter((tab): tab is AssembledTabRuntime => 'state' in tab);
+  }
+
+  /** Ordered membership for navigation and persistence, including unassembled restored tabs. */
+  getTabIdentities(): readonly Readonly<TabSessionState>[] {
+    return [...this.tabs.values()];
   }
 
   /** True while the tab has any user-visible foreground or background work in progress. */
   isTabWorking(tabId: TabId): boolean {
-    const tab = this.tabs.get(tabId);
+    const tab = this.getTab(tabId);
     if (!tab) return false;
     return tab.state.isStreaming
-      || tab.session.activeTurn !== null
+      || tab.session.turns.isResponseActive
       || tab.executionCoordinator.hasBackgroundWork
       || tab.services.subagentManager.hasActiveAsyncSubagents()
       // Collapsed side work stays discoverable from the tab bar.
@@ -1143,11 +1140,33 @@ export class TabManager implements TabManagerInterface {
   reconcileProviderAvailability(): void {
     for (const tab of this.tabs.values()) {
       if (tab.lifecycleState === 'closing') continue;
-      if (onProviderAvailabilityChanged(tab, this.plugin)) {
+      const runtime = this.getTab(tab.id);
+      const changed = runtime ? onProviderAvailabilityChanged(runtime, this.plugin) : reconcileBlankTabIdentity(tab, this.plugin);
+      if (changed) {
         this.callbacks.onTabDraftChanged?.(tab.id, tab.draftModel);
         this.callbacks.onTabProviderChanged?.(tab.id, tab.providerId);
       }
     }
+  }
+
+  async resetConversationTabs(conversationId: string): Promise<void> {
+    const errors: unknown[] = [];
+    for (const identity of this.tabs.values()) {
+      if (identity.conversationId !== conversationId || !this.#isTabStateMutable(identity)) continue;
+      const runtime = this.getTab(identity.id);
+      try {
+        if (runtime) {
+          runtime.controllers.inputController.cancelStreaming();
+          await runtime.controllers.conversationController.createNew({ force: true });
+        } else {
+          const blank = createTabSessionState(this.plugin.settings, null, { tabId: identity.id });
+          this.tabs.set(identity.id, blank);
+          this.callbacks.onTabConversationChanged?.(blank.id, null);
+          this.callbacks.onTabDraftChanged?.(blank.id, blank.draftModel);
+        }
+      } catch (error) { errors.push(error); }
+    }
+    if (errors.length > 0) throw errors[0];
   }
 
   /** Gets the number of tabs. */
@@ -1189,26 +1208,29 @@ export class TabManager implements TabManagerInterface {
       ) {
         continue;
       }
-      try {
-        await this.createTab(tabState.conversationId, tabState.tabId, {
-          activate: false,
-          lifecycleState: 'cold',
-          ...(typeof tabState.draftModel === 'string'
-            ? { draftModel: tabState.draftModel }
-            : {}),
-          ...(tabState.providerId !== undefined ? { providerId: tabState.providerId } : {}),
-        });
-      } catch {
-        // A malformed or unavailable shell must not prevent the remaining restore.
-      }
+      if (this.destroyed) return;
+      if (this.tabs.has(tabState.tabId) || this.assemblingTabIds.has(tabState.tabId)) continue;
+      const identity = createTabSessionState(this.plugin.settings,
+        tabState.conversationId ? this.plugin.getCachedConversation(tabState.conversationId) : null,
+        { ...tabState, lifecycleState: 'cold' });
+      this.tabs.set(identity.id, identity);
+      this.committedTabIds.add(identity.id);
     }
 
-    const targetTabId = state.activeTabId && this.tabs.has(state.activeTabId)
-      ? state.activeTabId
-      : this.tabs.keys().next().value ?? null;
-    if (targetTabId) {
-      await this.switchToTab(targetTabId);
-      return;
+    const targetIds = new Set([
+      ...(state.activeTabId && this.tabs.has(state.activeTabId) ? [state.activeTabId] : []),
+      ...this.tabs.keys(),
+    ]);
+    for (const targetId of targetIds) {
+      if (this.destroyed) return;
+      try {
+        await this.switchToTab(targetId);
+        if (this.getActiveTab()) return;
+      } catch (error) {
+        // Keep failed shells retryable and continue restoring a usable workspace.
+        // Once assembly succeeded, preserve the normal activation rollback/error contract.
+        if (this.getTab(targetId)) throw error;
+      }
     }
 
     await this.createTab();
@@ -1250,7 +1272,7 @@ export class TabManager implements TabManagerInterface {
       }
     }
 
-    const provisionalTabIds = Array.from(this.tabs.values())
+    const provisionalTabIds = this.getAllTabs()
       .filter(tab => tab.lifecycleState === 'provisional')
       .map(tab => tab.id);
     for (const tabId of provisionalTabIds) {
@@ -1268,14 +1290,15 @@ export class TabManager implements TabManagerInterface {
     let index = 1;
 
     for (const tab of this.tabs.values()) {
+      const runtime = this.getTab(tab.id);
       items.push({
         id: tab.id,
         index: index++,
         title: getTabTitle(tab, this.plugin),
         isActive: tab.id === this.activeTabId,
         isWorking: this.isTabWorking(tab.id),
-        attention: tab.state.attention,
-        canClose: !tab.state.isRewinding && (this.tabs.size > 1 || !tab.state.isStreaming),
+        attention: runtime?.state.attention ?? null,
+        canClose: !runtime?.state.isRewinding && (this.tabs.size > 1 || !runtime?.state.isStreaming),
       });
     }
 
@@ -1289,21 +1312,13 @@ export class TabManager implements TabManagerInterface {
   /**
    * Opens a conversation in a new tab or existing tab.
    * @param conversationId The conversation to open.
-   * @param options Controls tab creation behavior (backward-compatible with boolean).
+   * @param options Controls tab creation behavior.
    */
   async openConversation(
     conversationId: string,
-    options: boolean | OpenConversationOptions = false,
+    options: OpenConversationOptions = {},
   ): Promise<void> {
-    const preferNewTab = typeof options === 'boolean'
-      ? options
-      : options.preferNewTab ?? false;
-    const activate = typeof options === 'boolean'
-      ? true
-      : options.activate ?? true;
-    const provisional = typeof options === 'boolean'
-      ? false
-      : options.provisional ?? false;
+    const { preferNewTab = false, activate = true, provisional = false } = options;
 
     await this.#enqueueConversationNavigation(
       conversationId,
@@ -1394,7 +1409,7 @@ export class TabManager implements TabManagerInterface {
     if (localTarget) {
       await this.switchToTab(localTarget.id);
       if (!this.#isConversationNavigationCurrent(requestRevision, sourceTab)) return;
-      if (this.#isTabAlive(localTarget) && localTarget.conversationId === conversationId) {
+      if (this.tabs.get(localTarget.id)?.conversationId === conversationId && !this.closingTabIds.has(localTarget.id)) {
         return;
       }
     }
@@ -1409,7 +1424,7 @@ export class TabManager implements TabManagerInterface {
       if (!this.#isConversationNavigationCurrent(requestRevision, sourceTab)) return;
       const refreshedTarget = this.plugin.findConversationAcrossViews(conversationId);
       const targetManager = refreshedTarget?.view.getTabManager() ?? null;
-      const targetTab = targetManager?.getTab(refreshedTarget?.tabId ?? '') ?? null;
+      const targetTab = targetManager?.getTabIdentities().find(tab => tab.id === refreshedTarget?.tabId) ?? null;
       if (
         refreshedTarget?.view === crossViewResult.view
         && refreshedTarget.tabId === crossViewResult.tabId
@@ -1421,7 +1436,7 @@ export class TabManager implements TabManagerInterface {
         if (!this.#isConversationNavigationCurrent(requestRevision, sourceTab)) return;
         const completedTarget = targetManager.getTab(refreshedTarget.tabId);
         if (
-          completedTarget === targetTab
+          completedTarget?.id === targetTab.id
           && targetManager.canCreateTab()
           && completedTarget.lifecycleState !== 'closing'
           && completedTarget.conversationId === conversationId
@@ -1434,7 +1449,7 @@ export class TabManager implements TabManagerInterface {
     // Open in current tab or new tab
     if (preferNewTab) {
       if (provisional) {
-        const previewTab = Array.from(this.tabs.values())
+        const previewTab = this.getAllTabs()
           .find(tab => this.#isTabAlive(tab) && tab.lifecycleState === 'provisional');
         if (previewTab) {
           await previewTab.controllers.conversationController.switchTo(conversationId);
@@ -1463,7 +1478,7 @@ export class TabManager implements TabManagerInterface {
       if (!this.#isConversationNavigationCurrent(requestRevision, sourceTab)) {
         if (
           createdTab
-          && this.tabs.get(createdTab.id) === createdTab
+          && this.getTab(createdTab.id) === createdTab
           && createdTab.conversationId === conversationId
           && createdTab.session.userOwnershipRevision === 0
         ) {
@@ -1488,7 +1503,7 @@ export class TabManager implements TabManagerInterface {
     const preferredTab = sourceTab ?? this.getActiveTab();
     const activeTab = preferredTab && this.#isTabAlive(preferredTab)
       ? preferredTab
-      : Array.from(this.tabs.values()).find(tab => this.#isTabAlive(tab)) ?? null;
+      : this.getAllTabs().find(tab => this.#isTabAlive(tab)) ?? null;
     if (activeTab) {
       await activeTab.controllers.conversationController.switchTo(conversationId);
       if (
@@ -1511,8 +1526,6 @@ export class TabManager implements TabManagerInterface {
     const activeTab = this.getActiveTab();
     if (activeTab) {
       await activeTab.controllers.conversationController.createNew();
-      // Sync tab.conversationId with the newly created conversation
-      activeTab.conversationId = activeTab.state.currentConversationId;
     }
   }
 
@@ -1536,16 +1549,10 @@ export class TabManager implements TabManagerInterface {
     }
 
     const filter = new Set(ids);
-    for (const tab of this.tabs.values()) {
+    for (const tab of this.getAllTabs()) {
       const providerId = getTabProviderId(tab, this.plugin);
       if (!providerId || !filter.has(providerId)) continue;
       this.#bumpTabCommandContextRevision(tab.id);
-    }
-  }
-
-  primeProviderExecution(providerIds?: ProviderId | ProviderId[]): void {
-    for (const tab of this.#filterTabsByProvider(providerIds, tab => tab.providerId)) {
-      this.#maybePrimeProviderExecution(tab);
     }
   }
 
@@ -1557,7 +1564,7 @@ export class TabManager implements TabManagerInterface {
       ? new Set(Array.isArray(providerIds) ? providerIds : [providerIds])
       : null;
 
-    for (const tab of this.tabs.values()) {
+    for (const tab of this.getAllTabs()) {
       if (!this.#isTabAlive(tab)) {
         continue;
       }
@@ -1633,13 +1640,13 @@ export class TabManager implements TabManagerInterface {
       }
       if (!this.#isForkSourceCurrent(sourceLease)) {
         if (
-          this.tabs.get(tab.id) === tab
+          this.getTab(tab.id) === tab
           && tab.session.userOwnershipRevision !== 0
         ) {
           return tab;
         }
         const removed = await this.discardTab(tab.id);
-        if (!removed || this.tabs.get(tab.id) === tab) {
+        if (!removed || this.getTab(tab.id) === tab) {
           return tab;
         }
         await this.plugin.deleteConversation(conversationId).catch(() => {});
@@ -1647,7 +1654,7 @@ export class TabManager implements TabManagerInterface {
       }
       return tab;
     } catch (error) {
-      if (!tab || this.tabs.get(tab.id) !== tab) {
+      if (!tab || this.getTab(tab.id) !== tab) {
         await this.plugin.deleteConversation(conversationId).catch(() => {});
       }
       throw error;
@@ -1803,7 +1810,7 @@ export class TabManager implements TabManagerInterface {
     signal?: AbortSignal,
   ): Promise<ProviderCommandDiscoveryResult<ProviderCommandEntry>> {
     throwIfAborted(signal, 'Provider command discovery aborted');
-    const targetTab = (tabId ? this.tabs.get(tabId) : this.getActiveTab()) ?? null;
+    const targetTab = (tabId ? this.getTab(tabId) : this.getActiveTab()) ?? null;
     if (!targetTab || !this.#isTabAlive(targetTab)) return { status: 'empty' };
 
     const providerId = getTabProviderId(targetTab, this.plugin);
@@ -1839,23 +1846,21 @@ export class TabManager implements TabManagerInterface {
   async #getSdkCommandDiscovery(
     tabId?: TabId,
     signal?: AbortSignal,
-  ): Promise<SdkCommandDiscovery> {
+  ): Promise<SDKCommandDiscovery> {
     throwIfAborted(signal, 'Provider command discovery aborted');
-    const targetTab = (tabId ? this.tabs.get(tabId) : this.getActiveTab()) ?? null;
+    const targetTab = (tabId ? this.getTab(tabId) : this.getActiveTab()) ?? null;
     if (!targetTab || !this.#isTabAlive(targetTab)) {
       return { result: { status: 'empty' } };
     }
 
     const providerId = getTabProviderId(targetTab, this.plugin);
     if (!providerId) return { result: { status: 'empty' } };
-    if (!ProviderWorkspaceRegistry.getIfInitialized(providerId)) {
-      await ProviderWorkspaceRegistry.ensureInitialized(this.plugin.providerHost, providerId, 'command-picker');
-      throwIfAborted(signal, 'Provider command discovery aborted');
-      if (
-        !this.#isTabAlive(targetTab)
-        || getTabProviderId(targetTab, this.plugin) !== providerId
-      ) return { result: { status: 'empty' } };
-    }
+    await ProviderWorkspaceRegistry.ensureInitialized(this.plugin.providerHost, providerId, 'command-picker');
+    throwIfAborted(signal, 'Provider command discovery aborted');
+    if (
+      !this.#isTabAlive(targetTab)
+      || getTabProviderId(targetTab, this.plugin) !== providerId
+    ) return { result: { status: 'empty' } };
 
     const staticCapabilities = ProviderRegistry.getCapabilities(providerId);
     if (!staticCapabilities.supportsProviderCommands) {
@@ -1874,7 +1879,7 @@ export class TabManager implements TabManagerInterface {
 
     const catalog = ProviderWorkspaceRegistry.getCommandCatalog(providerId);
     const commandLoader = ProviderWorkspaceRegistry.getCommandLoader(providerId);
-    const context = await this.#buildProviderWarmupContext(targetTab, providerId);
+    const context = await this.#buildProviderCommandLookup(targetTab, providerId);
     throwIfAborted(signal, 'Provider command discovery aborted');
     const commandContext = this.#buildProviderCommandContext(targetTab, providerId, context);
     if (!this.#isCommandContextCurrent(targetTab, providerId, commandContext)) {
@@ -1922,7 +1927,7 @@ export class TabManager implements TabManagerInterface {
   async #ensureProviderCommandRuntime(
     tab: AssembledTabRuntime,
     providerId: ProviderId,
-    warmupContext?: ProviderWarmupContext,
+    lookup?: ProviderCommandLookup,
     signal?: AbortSignal,
   ): Promise<ProviderCommandDiscoveryResult<SlashCommand>> {
     throwIfAborted(signal, 'Provider command discovery aborted');
@@ -1933,12 +1938,12 @@ export class TabManager implements TabManagerInterface {
       return { status: 'empty' };
     }
 
-    const resolvedWarmupContext = warmupContext
-      ?? await this.#buildProviderWarmupContext(tab, providerId);
+    const resolvedLookup = lookup
+      ?? await this.#buildProviderCommandLookup(tab, providerId);
     const context = this.#buildProviderCommandContext(
       tab,
       providerId,
-      resolvedWarmupContext,
+      resolvedLookup,
     );
     if (!this.#isCommandContextCurrent(tab, providerId, context)) {
       return { status: 'empty' };
@@ -1950,44 +1955,39 @@ export class TabManager implements TabManagerInterface {
         : cached.result;
     }
 
-    const existing = this.providerRuntimeCommandWarmups.get(tab.id);
+    const existing = this.providerRuntimeCommandLoads.get(tab.id);
     if (existing?.key === context.cacheKey) {
-      const result = await this.#awaitProviderCommandWarmup(existing, signal);
+      const result = await this.#awaitProviderCommandLoad(existing, signal);
       return this.#isTabAlive(tab) && getTabProviderId(tab, this.plugin) === providerId
         ? result
         : { status: 'empty' };
     }
-    this.#cancelProviderRuntimeCommandWarmup(tab.id);
+    this.#cancelProviderRuntimeCommandLoad(tab.id);
     if (!this.#isCommandContextCurrent(tab, providerId, context)) {
       return { status: 'empty' };
     }
 
     const abortController = new AbortController();
-    const warmup = this.#warmProviderCommandRuntime(
+    const load = this.#loadProviderCommandRuntime(
       tab,
       providerId,
       context,
       abortController.signal,
     ).finally(() => {
-      if (this.providerRuntimeCommandWarmups.get(tab.id)?.promise === warmup) {
-        this.providerRuntimeCommandWarmups.delete(tab.id);
+      if (this.providerRuntimeCommandLoads.get(tab.id)?.promise === load) {
+        this.providerRuntimeCommandLoads.delete(tab.id);
       }
     });
-    const entry: ProviderCommandWarmupEntry = {
+    const entry: ProviderCommandLoadEntry = {
       abortController,
       key: context.cacheKey,
-      promise: warmup,
+      promise: load,
     };
-    this.providerRuntimeCommandWarmups.set(tab.id, entry);
-    const result = await this.#awaitProviderCommandWarmup(entry, signal);
+    this.providerRuntimeCommandLoads.set(tab.id, entry);
+    const result = await this.#awaitProviderCommandLoad(entry, signal);
     return this.#isTabAlive(tab) && getTabProviderId(tab, this.plugin) === providerId
       ? result
       : { status: 'empty' };
-  }
-
-  #maybePrimeProviderExecution(tab: AssembledTabRuntime): void {
-    if (tab.state.isSwitchingConversation) return;
-    void this.#prewarmProviderTab(tab).catch(() => {});
   }
 
   async #ensureTabWorkspaceServices(
@@ -1995,7 +1995,7 @@ export class TabManager implements TabManagerInterface {
     providerId: ProviderId | null,
     reason: string,
   ): Promise<boolean> {
-    if (providerId && !ProviderWorkspaceRegistry.getIfInitialized(providerId)) {
+    if (providerId) {
       await ProviderWorkspaceRegistry.ensureInitialized(
         this.plugin.providerHost,
         providerId,
@@ -2017,70 +2017,23 @@ export class TabManager implements TabManagerInterface {
     return loader.isAvailable(this.plugin.settings);
   }
 
-  async #prewarmProviderTab(tab: AssembledTabRuntime): Promise<void> {
-    const providerId = tab.providerId;
-    if (!providerId || tab.id !== this.activeTabId) {
-      return;
-    }
-    const context = await this.#buildProviderWarmupContext(tab, providerId);
-
-    switch (context.warmupMode) {
-      case 'commands':
-        await this.getSdkCommands(tab.id);
-        return;
-      case 'execution':
-        return;
-      default:
-        return;
-    }
-  }
-
-  async #buildProviderWarmupContext(
+  async #buildProviderCommandLookup(
     tab: AssembledTabRuntime,
     providerId: ProviderId,
-  ): Promise<ProviderWarmupContext> {
+  ): Promise<ProviderCommandLookup> {
     const commandContextRevision = this.tabCommandContextRevisions.get(tab.id) ?? 0;
     const conversationId = tab.conversationId;
-    const coordinatorState = tab.executionCoordinator.state === 'disposed'
-      ? 'absent'
-      : tab.executionCoordinator.state;
-    const draftModel = tab.draftModel;
-    const lifecycleState = tab.lifecycleState;
     const conversation = conversationId
       ? await this.plugin.getConversationById(conversationId)
       : null;
-    const baseContext: Omit<ProviderWarmupContext, 'warmupMode'> = {
+    return {
       commandContextRevision,
-      coordinatorState,
       conversation,
-      hasResumableNativeSeed: Boolean(
-        conversation?.sessionId
-        || conversation?.resumeAtMessageId
-        || conversation?.providerState,
-      ),
-      plugin: this.plugin.providerHost,
       tab: {
         conversationId,
-        draftModel,
-        lifecycleState,
         providerId,
       },
     };
-    const warmupMode = this.#resolveProviderTabWarmupMode(baseContext);
-
-    return {
-      ...baseContext,
-      warmupMode,
-    };
-  }
-
-  #resolveProviderTabWarmupMode(
-    context: Omit<ProviderWarmupContext, 'warmupMode'>,
-  ): ProviderWarmupContext['warmupMode'] {
-    const policy = ProviderWorkspaceRegistry.getTabWarmupPolicy(
-      context.tab.providerId,
-    );
-    return policy?.resolveMode(context) ?? 'none';
   }
 
   #getProviderResourceGeneration(providerId: ProviderId): number {
@@ -2095,31 +2048,31 @@ export class TabManager implements TabManagerInterface {
   }
 
   #advanceTabCommandContextRevision(tabId: TabId): boolean {
-    const tab = this.tabs.get(tabId);
+    const tab = this.getTab(tabId);
     if (!tab || !this.#isTabStateMutable(tab)) return false;
 
     this.tabCommandContextRevisions.set(
       tabId,
       (this.tabCommandContextRevisions.get(tabId) ?? 0) + 1,
     );
-    this.#cancelProviderRuntimeCommandWarmup(tabId);
+    this.#cancelProviderRuntimeCommandLoad(tabId);
     this.providerRuntimeCommandCache.delete(tabId);
     return true;
   }
 
-  #cancelProviderRuntimeCommandWarmup(tabId: TabId): void {
-    const warmup = this.providerRuntimeCommandWarmups.get(tabId);
-    if (!warmup) {
+  #cancelProviderRuntimeCommandLoad(tabId: TabId): void {
+    const load = this.providerRuntimeCommandLoads.get(tabId);
+    if (!load) {
       return;
     }
-    warmup.abortController.abort();
-    this.providerRuntimeCommandWarmups.delete(tabId);
+    load.abortController.abort();
+    this.providerRuntimeCommandLoads.delete(tabId);
   }
 
   #releaseTabRuntimeMetadata(tabId: TabId): readonly unknown[] {
     const errors: unknown[] = [];
     try {
-      this.#cancelProviderRuntimeCommandWarmup(tabId);
+      this.#cancelProviderRuntimeCommandLoad(tabId);
     } catch (error) {
       errors.push(error);
     }
@@ -2128,7 +2081,7 @@ export class TabManager implements TabManagerInterface {
     } catch (error) {
       errors.push(error);
     } finally {
-      this.providerRuntimeCommandWarmups.delete(tabId);
+      this.providerRuntimeCommandLoads.delete(tabId);
       this.providerRuntimeCommandCache.delete(tabId);
       this.providerCommandDiscoveryStores.delete(tabId);
       this.tabCommandContextRevisions.delete(tabId);
@@ -2137,29 +2090,29 @@ export class TabManager implements TabManagerInterface {
     return errors;
   }
 
-  async #awaitProviderCommandWarmup(
-    warmup: ProviderCommandWarmupEntry,
+  async #awaitProviderCommandLoad(
+    load: ProviderCommandLoadEntry,
     signal?: AbortSignal,
   ): Promise<ProviderCommandDiscoveryResult<SlashCommand>> {
     if (!signal) {
-      return await warmup.promise;
+      return await load.promise;
     }
     if (signal.aborted) {
-      warmup.abortController.abort();
+      load.abortController.abort();
       throwIfAborted(signal, 'Provider command discovery aborted');
     }
 
     let onAbort: (() => void) | null = null;
     const aborted = new Promise<never>((_resolve, reject) => {
       onAbort = () => {
-        warmup.abortController.abort();
+        load.abortController.abort();
         reject(toAbortError(signal, 'Provider command discovery aborted'));
       };
       signal.addEventListener('abort', onAbort, { once: true });
     });
 
     try {
-      return await Promise.race([warmup.promise, aborted]);
+      return await Promise.race([load.promise, aborted]);
     } finally {
       if (onAbort) {
         signal.removeEventListener('abort', onAbort);
@@ -2184,21 +2137,22 @@ export class TabManager implements TabManagerInterface {
   #buildProviderCommandContext(
     tab: AssembledTabRuntime,
     providerId: ProviderId,
-    warmupContext: ProviderWarmupContext,
+    lookup: ProviderCommandLookup,
   ): ProviderCommandContext {
     const loader = ProviderWorkspaceRegistry.getCommandLoader(
       providerId,
     );
     const fingerprint = loader?.getCacheFingerprint(this.plugin.settings) ?? 'catalog';
-    const commandContextRevision = warmupContext.commandContextRevision;
+    const commandContextRevision = lookup.commandContextRevision;
     const providerGeneration = this.plugin.providerHost.executionLifecycleRegistry
       .getProviderGeneration(providerId);
     const resourceGeneration = this.#getProviderResourceGeneration(providerId);
-    const allowIsolatedMetadataCreation = warmupContext.warmupMode === 'commands'
-      && tab.id === this.activeTabId;
+    // Isolated metadata processes start only for the tab whose picker asked.
+    const allowIsolatedMetadataCreation = tab.id === this.activeTabId;
 
     return {
-      ...warmupContext,
+      ...lookup,
+      allowIsolatedMetadataCreation,
       cacheKey: [
         providerId,
         commandContextRevision,
@@ -2213,7 +2167,7 @@ export class TabManager implements TabManagerInterface {
     };
   }
 
-  async #warmProviderCommandRuntime(
+  async #loadProviderCommandRuntime(
     tab: AssembledTabRuntime,
     providerId: ProviderId,
     context: ProviderCommandContext,
@@ -2226,8 +2180,7 @@ export class TabManager implements TabManagerInterface {
       return { status: 'empty' };
     }
     const result = await loader.loadCommands({
-      allowIsolatedMetadataCreation: context.warmupMode === 'commands'
-        && tab.id === this.activeTabId,
+      allowIsolatedMetadataCreation: context.allowIsolatedMetadataCreation,
       conversation: context.conversation,
       plugin: this.plugin.providerHost,
       signal,
@@ -2268,7 +2221,7 @@ export class TabManager implements TabManagerInterface {
           this.#advanceTabCommandContextRevision(tabId);
         },
         resolveTimeoutMs: () => {
-          const tab = this.tabs.get(tabId);
+          const tab = this.getTab(tabId);
           if (!tab || !this.#isTabAlive(tab)) return undefined;
           const providerId = getTabProviderId(tab, this.plugin);
           if (!providerId) return undefined;
@@ -2306,14 +2259,16 @@ export class TabManager implements TabManagerInterface {
     if (this.destroyed) return;
     this.destroyed = true;
     this.shutdownSnapshotOpen = true;
-    for (const tab of this.tabs.values()) {
+    for (const tab of this.getAllTabs()) {
       tab.session.pauseIntentAdmission();
+      tab.session.turns.cancel('shutdown');
     }
   }
 
   /** Seals the final identity snapshot so late runtime callbacks cannot mutate tab state. */
   sealShutdownSnapshot(): void {
     this.shutdownSnapshotOpen = false;
+    for (const tab of this.getAllTabs()) tab.session.sealIdentity();
   }
 
   /** Cancels and drains active tab work while terminal binding callbacks remain accepted. */
@@ -2340,7 +2295,7 @@ export class TabManager implements TabManagerInterface {
     }
     this.#reconcileShutdownSnapshotOwner();
     const results = await Promise.all(
-      Array.from(this.tabs.values()).map(tab => drainTabForShutdownSnapshot(tab)),
+      this.getAllTabs().map(tab => drainTabForShutdownSnapshot(tab)),
     );
     drainErrors.push(...results.flatMap(result => (
       result.cleanupFailures.map(failure => failure.error)
@@ -2362,7 +2317,7 @@ export class TabManager implements TabManagerInterface {
   #reconcileShutdownSnapshotOwner(): void {
     if (this.activeTabId === null) return;
 
-    const activeTab = this.activeTabId ? this.tabs.get(this.activeTabId) ?? null : null;
+    const activeTab = this.activeTabId ? this.getTab(this.activeTabId) ?? null : null;
     if (activeTab && activeTab.lifecycleState !== 'closing') {
       if (this.committedTabIds.has(activeTab.id)) {
         this.committedActiveTabId = activeTab.id;
@@ -2370,7 +2325,7 @@ export class TabManager implements TabManagerInterface {
       return;
     }
 
-    const replacement = Array.from(this.tabs.values())
+    const replacement = this.getAllTabs()
       .find(tab => tab.lifecycleState !== 'closing') ?? null;
     this.activeTabId = replacement?.id ?? null;
     this.committedActiveTabId = replacement && this.committedTabIds.has(replacement.id)
@@ -2406,10 +2361,10 @@ export class TabManager implements TabManagerInterface {
     } catch (error) {
       destroyErrors.push(error);
     }
-    const tabs = Array.from(this.tabs.values());
+    const tabs = this.getAllTabs();
     const metadataTabIds = new Set<TabId>([
       ...tabs.map(tab => tab.id),
-      ...this.providerRuntimeCommandWarmups.keys(),
+      ...this.providerRuntimeCommandLoads.keys(),
       ...this.providerRuntimeCommandCache.keys(),
       ...this.providerCommandDiscoveryStores.keys(),
       ...this.tabCommandContextRevisions.keys(),
@@ -2428,7 +2383,7 @@ export class TabManager implements TabManagerInterface {
     }
     const finalMetadataTabIds = new Set<TabId>([
       ...tabs.map(tab => tab.id),
-      ...this.providerRuntimeCommandWarmups.keys(),
+      ...this.providerRuntimeCommandLoads.keys(),
       ...this.providerRuntimeCommandCache.keys(),
       ...this.providerCommandDiscoveryStores.keys(),
       ...this.tabCommandContextRevisions.keys(),
@@ -2439,7 +2394,7 @@ export class TabManager implements TabManagerInterface {
     }
     this.tabs.clear();
     this.committedTabIds.clear();
-    this.providerRuntimeCommandWarmups.clear();
+    this.providerRuntimeCommandLoads.clear();
     this.providerRuntimeCommandCache.clear();
     this.providerCommandDiscoveryStores.clear();
     this.tabCommandContextRevisions.clear();

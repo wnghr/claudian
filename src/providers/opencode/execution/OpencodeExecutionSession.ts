@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  ExecutionEventQueue,
   type ProviderBackgroundTurnCompletedEvent,
   type ProviderBackgroundTurnStartedEvent,
   type ProviderExecutionEvent,
@@ -12,15 +13,16 @@ import {
   type ProviderSessionEvent,
   type ProviderSessionSnapshot,
   type ProviderSessionStatus,
+  type SteerableExecutionSession,
 } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type { ChatMessage, PermissionMode } from '@/core/types';
 import {
-  AcpExecutionEventNormalizer,
-  type AcpSessionNotification,
-  type AcpUsageUpdate,
-  buildAcpUsageInfo,
-  extractAcpSessionThoughtLevelState,
+  ACPExecutionEventNormalizer,
+  type ACPSessionNotification,
+  type ACPUsageUpdate,
+  buildACPUsageInfo,
+  extractACPSessionThoughtLevelState,
 } from '@/providers/acp';
 
 import { ProviderModelUnavailableError } from '../../../core/providers/models/ProviderModelUnavailableError';
@@ -47,68 +49,27 @@ import {
   OpencodeSessionMissingError,
 } from './OpencodeSessionContract';
 import { DefaultOpencodeSessionKernel } from './OpencodeSessionKernel';
+import { OpencodeSessionPersistence } from './OpencodeSessionPersistence';
 
-export type OpencodeAcpSessionKernelFactory = (
+export type OpencodeACPSessionKernelFactory = (
   options: OpencodeSessionKernelOptions,
 ) => OpencodeSessionKernel;
 
 export interface OpencodeExecutionSessionOptions {
   readonly commandCatalog?: Pick<OpencodeCommandCatalog, 'setCommandSnapshot'>;
   readonly serverService: OpencodeServerService;
-  readonly createKernel?: OpencodeAcpSessionKernelFactory;
-}
-
-class AsyncEventQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
-  private closed = false;
-  private readonly values: T[] = [];
-  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
-
-  constructor(private readonly onEarlyReturn: () => void) {}
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return this;
-  }
-
-  next(): Promise<IteratorResult<T>> {
-    const value = this.values.shift();
-    if (value !== undefined) return Promise.resolve({ done: false, value });
-    if (this.closed) return Promise.resolve({ done: true, value: undefined });
-    return new Promise((resolve) => this.waiters.push(resolve));
-  }
-
-  return(): Promise<IteratorResult<T>> {
-    if (!this.closed) this.onEarlyReturn();
-    return Promise.resolve({ done: true, value: undefined });
-  }
-
-  push(value: T): void {
-    if (this.closed) return;
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter({ done: false, value });
-    } else {
-      this.values.push(value);
-    }
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined });
-    }
-  }
+  readonly createKernel?: OpencodeACPSessionKernelFactory;
 }
 
 class OpencodeExecutionRun implements ProviderExecutionRun {
   readonly executionId = randomUUID();
   readonly turnId = randomUUID();
   readonly events: AsyncIterable<ProviderExecutionEvent>;
-  readonly queue: AsyncEventQueue<ProviderExecutionEvent>;
+  readonly queue: ExecutionEventQueue<ProviderExecutionEvent>;
   terminal = false;
   accepted = false;
   acceptingLiveOutput = false;
-  contextUsage: AcpUsageUpdate | null = null;
+  contextUsage: ACPUsageUpdate | null = null;
   cancellationRequested = false;
   lastSequence = 0;
   abortCleanup: (() => void) | null = null;
@@ -118,7 +79,7 @@ class OpencodeExecutionRun implements ProviderExecutionRun {
     readonly sessionInstanceId: string,
     private readonly cancelRun: (run: OpencodeExecutionRun) => void,
   ) {
-    this.queue = new AsyncEventQueue(() => this.cancel());
+    this.queue = new ExecutionEventQueue<ProviderExecutionEvent>(() => this.cancel());
     this.events = this.queue;
   }
 
@@ -165,11 +126,12 @@ class OpencodeExecutionRun implements ProviderExecutionRun {
   }
 }
 
-export class OpencodeExecutionSession implements ProviderExecutionSession {
+export class OpencodeExecutionSession implements ProviderExecutionSession, SteerableExecutionSession {
   readonly providerId = 'opencode' as const;
   readonly sessionInstanceId = randomUUID();
 
-  private readonly createKernel: OpencodeAcpSessionKernelFactory;
+  private readonly persistence: OpencodeSessionPersistence;
+  private readonly createKernel: OpencodeACPSessionKernelFactory;
   private readonly listeners = new Set<(event: ProviderSessionEvent) => void>();
   private activeRun: OpencodeExecutionRun | null = null;
   private kernel: OpencodeSessionKernel | null = null;
@@ -195,8 +157,9 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
     private readonly config: ProviderSessionConfig,
     private readonly options: OpencodeExecutionSessionOptions,
   ) {
+    this.persistence = new OpencodeSessionPersistence(config);
     this.createKernel = options.createKernel
-      ?? ((kernelOptions) => new DefaultOpencodeSessionKernel(kernelOptions, options.serverService));
+      ?? ((kernelOptions) => new DefaultOpencodeSessionKernel(kernelOptions, options.serverService, this.persistence));
     const providerState = getOpencodeState(config.resumeSeed?.providerState);
     this.nativeSessionId = config.resumeSeed?.providerSessionId ?? providerState.sessionId ?? null;
     this.seedProviderState = Object.freeze({ ...providerState });
@@ -242,6 +205,32 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
     void this.#disposeKernel();
   }
 
+  /** Only kernels whose native protocol can steer accept; V1 ACP declines. */
+  async steer(request: ProviderExecutionRequest): Promise<boolean> {
+    try {
+      assertOpencodeModelAvailable(this.plugin.settings, request.configuration.model);
+    } catch (error) {
+      if (error instanceof ProviderModelUnavailableError) return false;
+      throw error;
+    }
+    const run = this.activeRun;
+    const kernel = this.kernel;
+    const native = this.nativeInfo;
+    if (
+      !run
+      || run.terminal
+      || run.cancellationRequested
+      || !run.acceptingLiveOutput
+      || !kernel?.steer
+      || !native
+      || request.signal.aborted
+    ) return false;
+    return kernel.steer({
+      prompt: buildPromptBlocks(request, false),
+      sessionId: native.sessionId,
+    });
+  }
+
   getSnapshot(): ProviderSessionSnapshot {
     return this.snapshot;
   }
@@ -271,7 +260,7 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
     this.backgroundTurn = null;
     this.listeners.clear();
     this.snapshot = this.#createSnapshot('disposed');
-    this.disposePromise = this.#disposeKernel();
+    this.disposePromise = this.#disposeKernel().finally(() => this.persistence.dispose());
     return this.disposePromise;
   }
 
@@ -306,7 +295,8 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
         const kernelGeneration = ++this.kernelGeneration;
         kernel = this.createKernel({
           config: this.config,
-          databasePath: this.#resolveDatabasePath(),
+          databasePath: this.databasePath ?? undefined,
+          forkSource: getOpencodeState(this.seedProviderState).forkSource,
           nativeVersion: this.nativeVersion,
           getActiveTurnId: () => this.activeRun?.turnId ?? this.backgroundTurn?.id ?? null,
           openNativeInteraction: () => {
@@ -325,6 +315,12 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
               kind: 'session', sequence: ++this.sessionEventSequence, sessionInstanceId: this.sessionInstanceId,
             } });
             this.#closeBackgroundScope(event.subagentId, event.status === 'completed' ? 'completed' : 'provider-ended');
+          },
+          onNativeSubagentProgress: (progress) => {
+            if (kernelGeneration !== this.kernelGeneration || this.disposed) return;
+            this.#emitSessionEvent({ type: 'subagent_progress', progress, scope: {
+              kind: 'session', sequence: ++this.sessionEventSequence, sessionInstanceId: this.sessionInstanceId,
+            } });
           },
           onNativeTurn: (status, error, requested) => {
             if (kernelGeneration !== this.kernelGeneration || this.disposed) return;
@@ -415,7 +411,7 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
       run.nativeCompleted = response.stopReason !== 'cancelled';
       run.accept(response.userMessageId ?? undefined);
       if (response.usage) {
-        const usage = buildAcpUsageInfo({
+        const usage = buildACPUsageInfo({
           contextWindow: run.contextUsage,
           model: this.#resolveSelectedRawModelId(request.configuration.model) ?? undefined,
           promptUsage: response.usage,
@@ -499,7 +495,7 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
   private async handleNotification(
     generation: number,
     run: OpencodeExecutionRun,
-    notification: AcpSessionNotification,
+    notification: ACPSessionNotification,
   ): Promise<void> {
     if (
       !this.#isRunCurrent(run, generation)
@@ -564,18 +560,18 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
 
   private readonly runNormalizers = new WeakMap<
     OpencodeExecutionRun,
-    AcpExecutionEventNormalizer
+    ACPExecutionEventNormalizer
   >();
 
   #getRunNormalizer(
     run: OpencodeExecutionRun,
-  ): AcpExecutionEventNormalizer {
+  ): ACPExecutionEventNormalizer {
     let normalizer = this.runNormalizers.get(run);
     if (!normalizer) {
-      normalizer = new AcpExecutionEventNormalizer({
+      normalizer = new ACPExecutionEventNormalizer({
         mapUsage: (usage) => {
           if (run.acceptingLiveOutput) run.contextUsage = usage;
-          return buildAcpUsageInfo({
+          return buildACPUsageInfo({
             contextWindow: usage,
             model: this.#resolveSelectedRawModelId(undefined) ?? undefined,
           });
@@ -622,14 +618,11 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
       });
     }
 
-    const thoughtState = extractAcpSessionThoughtLevelState({ configOptions });
-    if (
-      request.configuration.reasoning
-      && thoughtState.configId
-      && thoughtState.availableLevels.some(
-        ({ id }) => id === request.configuration.reasoning,
-      )
-    ) {
+    const thoughtState = extractACPSessionThoughtLevelState({ configOptions });
+    if (request.configuration.reasoning) {
+      if (!thoughtState.configId || !thoughtState.availableLevels.some(({ id }) => id === request.configuration.reasoning)) {
+        throw new Error(`OpenCode model "${selectedModel}" does not support thinking level "${request.configuration.reasoning}".`);
+      }
       await kernel.setConfigOption({
         configId: thoughtState.configId,
         sessionId: native.sessionId,
@@ -775,19 +768,6 @@ export class OpencodeExecutionSession implements ProviderExecutionSession {
     } else {
       this.#emitSessionSnapshot();
     }
-  }
-
-  #resolveDatabasePath(): string | undefined {
-    if (
-      this.config.nativePersistence === 'disabled-if-supported'
-      || (
-        this.config.nativePersistence === 'provider-default'
-        && this.config.lifecycle === 'ephemeral'
-      )
-    ) {
-      return ':memory:';
-    }
-    return this.databasePath ?? undefined;
   }
 
   #isRunCurrent(

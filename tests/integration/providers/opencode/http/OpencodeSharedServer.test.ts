@@ -2,13 +2,15 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
-import { type ProviderExecutionEvent, ProviderExecutionLifecycleRegistry, type ProviderExecutionRequest } from '@/core/execution';
+import { type ProviderExecutionEvent, ProviderExecutionLifecycleRegistry, type ProviderExecutionRequest, type ProviderSessionConfig } from '@/core/execution';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
+import { SideChatSession } from '@/features/chat/side-chat/SideChatSession';
 import { createOpencodeWorkspaceServices } from '@/providers/opencode/app/OpencodeWorkspaceServices';
 import { OpencodeExecutionBackend } from '@/providers/opencode/execution/OpencodeExecutionBackend';
 import { forkOpencodeSession } from '@/providers/opencode/history/OpencodeSessionFork';
 import { opencodeProviderRegistration } from '@/providers/opencode/registration';
 import { buildOpencodeRuntimeEnv } from '@/providers/opencode/runtime/OpencodeRuntimeEnvironment';
+import { getOpencodeProviderSettings } from '@/providers/opencode/settings';
 
 const fixture = `#!/usr/bin/env node
 const fs = require('node:fs'), http = require('node:http');
@@ -16,7 +18,10 @@ if (process.argv.includes('--version')) { console.log('2.0.14'); return; }
 fs.appendFileSync(process.env.PROCESS_LOG, JSON.stringify({ pid: process.pid, db: process.env.OPENCODE_DB }) + '\\n');
 const feeds = new Set(), forms = new Map(); let sequence = 0;
 const emit = (type, data) => { if(type==='form.created') forms.set(data.form.id,data.form); if(type==='form.cancelled'||type==='form.replied') forms.delete(data.id); for (const feed of feeds) feed.write('data: ' + JSON.stringify({ type, data }) + '\\n\\n'); };
-const sessions = new Map();
+const store = process.env.OPENCODE_DB + '.sessions.json';
+const saved = process.env.OPENCODE_DB !== ':memory:' && fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, 'utf8')) : {sessions:[],deleted:[],sequence:0};
+const sessions = new Map(saved.sessions), deleted = saved.deleted; sequence = saved.sequence; let held = null;
+const save = () => { if (process.env.OPENCODE_DB !== ':memory:') fs.writeFileSync(store, JSON.stringify({sessions:[...sessions],deleted,sequence})); };
 const config = () => { const a=JSON.parse(fs.readFileSync(process.env.OPENCODE_CONFIG, 'utf8')), b=JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}'); return {...a,...b,agent:{...a.agent,...b.agent},agents:{...a.agents,...b.agents}}; };
 const agents = () => { const c = config(); return Object.entries(c.agent || {}).map(([id, a]) => ({id, system:a.prompt})).concat(Object.entries(c.agents || {}).map(([id,a]) => ({id,...a}))).filter(a => !a.disabled && !c.agents?.[a.id]?.disabled); };
 const server = http.createServer(async (req, res) => {
@@ -30,16 +35,21 @@ const server = http.createServer(async (req, res) => {
  if (route === '/fixture/event') { emit(body.type, body.data); res.writeHead(204).end(); return; }
  if (route === '/fixture/disconnect') { for(const f of feeds) f.end(); res.writeHead(204).end(); return; }
  if (route === '/api/session/global/form/form_owned' && req.method==='DELETE') { emit('form.cancelled',{sessionID:'global',id:'form_owned'}); res.writeHead(204).end(); return; }
- if (route === '/api/model') return reply([{ id:'chat', providerID:'local', name:'Chat', enabled:true, variants:[] }]);
+ // Saved provider credentials live in the native database.
+ if (route === '/api/model') return reply(process.env.OPENCODE_DB === ':memory:' ? [{ id:'free', providerID:'opencode', name:'Free', enabled:true, variants:[] }] : [{ id:'chat', providerID:'local', name:'Chat', enabled:true, variants:[] }]);
  if (route === '/api/form') return reply([...forms.values()]);
  if (route === '/api/command') return reply([]);
  if (route === '/api/agent') return reply(agents());
- if (route === '/api/session') { const id = 'ses_' + (++sequence); const session = {id, agent:body.agent}; sessions.set(id,session); return reply(session); }
+ if (route === '/fixture/sessions') return reply({ ids:[...sessions.keys()], held:held?.length ?? 0, deleted });
+ if (route === '/fixture/hold-sessions') { held = []; res.writeHead(204).end(); return; }
+ if (route === '/fixture/release-sessions') { const pending = held ?? []; held = null; for (const send of pending) send(); res.writeHead(204).end(); return; }
+ if (route === '/api/session') { const id = 'ses_' + (++sequence); const session = {id, agent:body.agent}; sessions.set(id,session); save(); if (held) { held.push(() => reply(session)); return; } return reply(session); }
  const session = sessions.get(id);
  if (!session) { res.writeHead(404).end(); return; }
+ if (parts.length === 4 && req.method === 'DELETE') { sessions.delete(id); deleted.push(id); save(); res.writeHead(204).end(); return; }
  if (parts.length === 4) return reply(session);
- if (parts[4] === 'fork') { const child={...session,id:'ses_'+(++sequence)}; sessions.set(child.id,child); return reply(child); }
- if (parts[4] === 'message') { res.end(JSON.stringify({data:[],cursor:{}})); return; }
+ if (parts[4] === 'fork') { const child={...session,id:'ses_'+(++sequence)}; sessions.set(child.id,child); save(); if (held) { held.push(() => reply(child)); return; } return reply(child); }
+ if (parts[4] === 'message') { res.end(JSON.stringify({data:[{id:'msg_source',type:'assistant',content:[{type:'text',text:'Source reply'}]}],cursor:{}})); return; }
  if (parts[4] === 'agent') { session.agent=body.agent; res.writeHead(204).end(); return; }
  if (parts[4] === 'model') { session.model=body.model; res.writeHead(204).end(); return; }
  if (parts[4] === 'interrupt') { emit('session.execution.interrupted',{sessionID:id}); res.writeHead(204).end(); return; }
@@ -67,6 +77,7 @@ async function createFixture(disableBuild = false) {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'claudian-shared-v2-')));
   const cli = path.join(root, 'opencode.cjs'), log = path.join(root, 'processes');
   writeFileSync(cli, fixture, { mode: 0o700 });
+  writeFileSync(path.join(root, 'native.db'), '');
   const plugin: any = {
     app: { vault: { adapter: { basePath: root } } },
     settings: { providerConfigs: { opencode: { enabled: true, cliPath: cli, visibleModels: ['local/chat'], environmentVariables: `OPENCODE_DB=${path.join(root, 'native.db')}\nPROCESS_LOG=${log}\nOPENCODE_CONFIG_CONTENT=${JSON.stringify(disableBuild ? { agents: { build: { disabled: true } } } : {})}` } } },
@@ -78,11 +89,11 @@ async function createFixture(disableBuild = false) {
   };
   const workspace = await createOpencodeWorkspaceServices(plugin);
   const backend = new OpencodeExecutionBackend(plugin, workspace);
-  const createSession = () => backend.createSession({
-    vaultWorkingDirectory: root, lifecycle: 'persistent', nativePersistence: 'provider-default',
+  const createSession = (config: Partial<ProviderSessionConfig> = {}) => backend.createSession({
+    vaultWorkingDirectory: root, lifecycle: 'persistent', nativePersistence: 'provider-default', ...config,
     interactionPort: { requestApproval: async r => ({ interactionId: r.interactionId, decision: 'deny' }), askUserQuestion: async r => ({ interactionId: r.interactionId, answers: null }), dismissInteraction() {} },
   });
-  return { root, cli, log, plugin, workspace, createSession,
+  return { root, cli, log, plugin, workspace, backend, createSession,
     environment: buildOpencodeRuntimeEnv(plugin.settings, cli),
     processes: () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { pid: number; db: string }),
     async dispose() { await workspace.dispose?.(); rmSync(root, { recursive: true, force: true }); },
@@ -110,6 +121,47 @@ it('shares discovery and independent chat sessions, retaining the server after o
   } finally { await a.dispose(); await b.dispose(); await f.dispose(); }
 }, 20000);
 
+
+it('runs auxiliary sessions with saved credentials without persisting them or replacing the catalog', async () => {
+  const f = await createFixture();
+  const session = f.createSession({ lifecycle: 'ephemeral', nativePersistence: 'disabled-if-supported' });
+  try {
+    expect(await f.workspace.metadataService.loadCatalog()).toBe(true);
+    const request = turn('title');
+    const events: ProviderExecutionEvent[] = [];
+    for await (const event of session.execute({ ...request, toolPolicy: { kind: 'passive' } }).events) events.push(event);
+    expect(events.at(-1)).toMatchObject({ type: 'turn_completed' });
+    expect(getOpencodeProviderSettings(f.plugin.settings).discoveredModels.map(model => model.rawId)).toEqual(['local/chat']);
+    expect(f.processes().map(process => process.db)).toEqual([f.environment.OPENCODE_DB]);
+    await session.dispose();
+    const lease = await f.workspace.serverService.acquire(f.cli, f.root, f.environment);
+    await expect(lease.request('/api/session/ses_1')).rejects.toThrow('404');
+    await lease.dispose();
+  } finally { await session.dispose(); await f.dispose(); }
+}, 15000);
+
+it('deletes an auxiliary session whose creation was still pending during disposal', async () => {
+  const f = await createFixture();
+  const session = f.createSession({ lifecycle: 'ephemeral', nativePersistence: 'disabled-if-supported' });
+  const control = await f.workspace.serverService.acquire(f.cli, f.root, f.environment);
+  const sessions = () => control.request<{ data: { ids: string[]; held: number } }>('/fixture/sessions').then(result => result.data);
+  try {
+    expect(await f.workspace.metadataService.loadCatalog()).toBe(true);
+    await control.request('/fixture/hold-sessions', { method: 'POST' });
+    const request = turn('title');
+    const run = session.execute({ ...request, toolPolicy: { kind: 'passive' } });
+    const consume = (async () => { const events: ProviderExecutionEvent[] = []; for await (const event of run.events) events.push(event); })();
+    const deadline = Date.now() + 5000;
+    while ((await sessions()).held === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    expect((await sessions()).held).toBe(1);
+    const disposal = session.dispose();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await control.request('/fixture/release-sessions', { method: 'POST' });
+    await disposal;
+    await consume;
+    expect((await sessions()).ids).toEqual([]);
+  } finally { await control.dispose(); await session.dispose(); await f.dispose(); }
+}, 15000);
 
 it('shares native history and fork operations with catalog and chat transport', async () => {
   const f = await createFixture();
@@ -144,9 +196,10 @@ it('isolates different databases and gives each in-memory execution its own proc
     expect(f.processes().filter(process => process.db === ':memory:')).toHaveLength(2);
     await Promise.all(leases.map(lease => lease.dispose()));
     for (const native of f.processes().filter(process => process.db === ':memory:')) expect(() => process.kill(native.pid, 0)).toThrow();
+    for (const native of f.processes()) expect(() => process.kill(native.pid, 0)).toThrow();
     const persistent = await f.workspace.serverService.acquire(f.cli, f.root, f.environment);
     await persistent.request('/api/model');
-    expect(f.processes()).toHaveLength(4);
+    expect(f.processes()).toHaveLength(5);
     await persistent.dispose();
   } finally { await f.dispose(); }
 });
@@ -318,3 +371,80 @@ it('runs safe and yolo chat when the unused native build agent is disabled', asy
     expect(f.processes()).toHaveLength(1);
   } finally { await session.dispose(); await f.dispose(); }
 }, 15000);
+
+async function createSideFixture() {
+  const f = await createFixture();
+  await f.workspace.metadataService.loadCatalog();
+  const control = await f.workspace.serverService.acquire(f.cli, f.root, f.environment);
+  const source = await control.request<{ data: { id: string } }>('/api/session', { method: 'POST', body: {} });
+  const sourceState = { nativeVersion: 2, sessionId: source.data.id, databasePath: f.environment.OPENCODE_DB };
+  const capabilities = opencodeProviderRegistration.getConversationCapabilities?.(sourceState) ?? opencodeProviderRegistration.capabilities;
+  const history = opencodeProviderRegistration.historyService;
+  ProviderWorkspaceRegistry.setServices('opencode', f.workspace);
+  const side = new SideChatSession({
+    providerId: 'opencode', ephemeral: capabilities.supportsEphemeralFork ?? capabilities.supportsEphemeralSessions,
+    lifecycleRegistry: f.plugin.executionLifecycleRegistry, resolveBackend: () => f.backend,
+    vaultWorkingDirectory: f.root,
+    interactionPort: { requestApproval: async r => ({ interactionId: r.interactionId, decision: 'deny' }), askUserQuestion: async r => ({ interactionId: r.interactionId, answers: null }), dismissInteraction() {} },
+    buildChildResumeState: () => Promise.resolve(history.buildForkProviderState(source.data.id, 'msg_source', sourceState, f.root,
+      { settings: f.plugin.settings, environment: f.environment, vaultPath: f.root }, { lifecycle: 'ephemeral' })),
+  });
+  return { ...f, control, side, sourceId: source.data.id,
+    send: (text: string) => side.execute({ text, images: [], configuration: turn(text).configuration }),
+    async dispose() { await side.dispose(); await control.dispose(); ProviderWorkspaceRegistry.setServices('opencode', undefined); await f.dispose(); },
+  };
+}
+
+it('retains a v2 side fork across turns and connection replacement, then deletes only the child on discard', async () => {
+  const f = await createSideFixture();
+  try {
+    expect(await f.send('first side turn')).toMatchObject({ status: 'completed' });
+    const childId = f.side.providerSessionId!;
+    expect(childId).not.toBe(f.sourceId);
+    expect(f.side.canCool()).toBe(false);
+    // Changed instructions replace the kernel, but must not delete the side session.
+    expect(await f.send('second side turn')).toMatchObject({ status: 'completed' });
+    expect(f.side.providerSessionId).toBe(childId);
+    expect(await f.control.request(`/api/session/${childId}`)).toMatchObject({ data: { id: childId } });
+    await f.side.dispose();
+    await f.side.dispose();
+    await expect(f.control.request(`/api/session/${childId}`)).rejects.toThrow('404');
+    expect(await f.control.request(`/api/session/${f.sourceId}`)).toMatchObject({ data: { id: f.sourceId } });
+    expect(await f.control.request('/fixture/sessions')).toMatchObject({ data: { ids: [f.sourceId], deleted: [childId] } });
+  } finally { await f.dispose(); }
+});
+
+it('discards a v2 side fork whose native creation finishes after disposal starts', async () => {
+  const f = await createSideFixture();
+  try {
+    await f.control.request('/fixture/hold-sessions', { method: 'POST' });
+    const run = f.send('discard during fork');
+    const deadline = Date.now() + 5000;
+    while ((await f.control.request<{ data: { held: number } }>('/fixture/sessions')).data.held === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(await f.control.request('/fixture/sessions')).toMatchObject({ data: { held: 1 } });
+    const disposal = f.side.dispose();
+    await f.control.request('/fixture/release-sessions', { method: 'POST' });
+    await disposal;
+    await run;
+    expect(await f.control.request('/fixture/sessions')).toMatchObject({ data: { ids: [f.sourceId] } });
+  } finally { await f.dispose(); }
+});
+
+it.each([false, true])('deletes the side child after a server disconnect (retry: %s)', async retry => {
+  const f = await createSideFixture();
+  let next: Awaited<ReturnType<typeof f.workspace.serverService.acquire>> | undefined;
+  try {
+    expect(await f.send('side before disconnect')).toMatchObject({ status: 'completed' });
+    const childId = f.side.providerSessionId!;
+    let disconnected!: () => void;
+    const failed = new Promise<void>(resolve => { disconnected = resolve; });
+    await f.control.subscribe(() => undefined, disconnected, () => false);
+    await f.control.request('/fixture/disconnect', { method: 'POST' }).catch(() => undefined);
+    await failed;
+    const retried = retry ? await f.send('side after reconnect') : undefined;
+    expect(retried?.status).toBe(retry ? 'completed' : undefined);
+    await f.side.dispose();
+    next = await f.workspace.serverService.acquire(f.cli, f.root, f.environment);
+    expect(await next.request('/fixture/sessions')).toMatchObject({ data: { ids: [f.sourceId], deleted: [childId] } });
+  } finally { await next?.dispose(); await f.dispose(); }
+});

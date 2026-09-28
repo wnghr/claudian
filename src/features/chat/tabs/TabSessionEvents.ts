@@ -4,7 +4,7 @@ import type {
   ProviderBackgroundOutputEvent,
   ProviderSessionEvent,
 } from '../../../core/execution';
-import type { FeatureHost } from '../../FeatureHost';
+import type { ChatFeatureHost } from '../ChatFeatureHost';
 import type { ChatExecutionEventContext } from '../execution/ChatExecutionCoordinator';
 import { type BackgroundTurnRenderTarget, discardBackgroundTurn, renderAutoTriggeredTurn, renderSessionTaskNotification, reserveBackgroundTurn } from '../rendering/BackgroundTurnRenderer';
 import { updateTabPermissionMode } from './TabProviderState';
@@ -22,7 +22,7 @@ const backgroundTurnBuffers = new WeakMap<
 
 async function handleTabSessionEvent(
   tab: AssembledTabRuntime,
-  plugin: FeatureHost,
+  plugin: ChatFeatureHost,
   event: ProviderSessionEvent,
   context: ChatExecutionEventContext,
   isCurrent: () => boolean,
@@ -38,6 +38,11 @@ async function handleTabSessionEvent(
   if (event.type === 'permission_mode_changed') {
     await updateTabPermissionMode(tab, plugin, event.permissionMode);
     if (!isCurrent()) return;
+    return;
+  }
+  if (event.type === 'subagent_updated') {
+    await tab.controllers.conversationController.save(true);
+    tab.executionCoordinator.notifyMayCool();
     return;
   }
   if (event.type === 'async_subagent_completed') {
@@ -110,7 +115,7 @@ async function handleTabSessionEvent(
 
 export function enqueueTabSessionEvent(
   tab: AssembledTabRuntime,
-  plugin: FeatureHost,
+  plugin: ChatFeatureHost,
   event: ProviderSessionEvent,
   context: ChatExecutionEventContext,
 ): Promise<void> | undefined {
@@ -126,6 +131,14 @@ export function enqueueTabSessionEvent(
 
   if (!canAcceptTabBackgroundWork(tab)) {
     discardBackgroundTurnBuffers(tab, context.bindingId);
+    return undefined;
+  }
+  // Display-only progress must not wait behind queued background rendering.
+  if (event.type === 'subagent_updated' && !tab.controllers.streamController.handleSubagentUpdate(event.subagent)) {
+    return undefined;
+  }
+  if (event.type === 'subagent_progress') {
+    tab.controllers.streamController.handleSubagentProgress(event.progress);
     return undefined;
   }
   if (event.type === 'background_turn_started') {

@@ -1,6 +1,7 @@
 import type { ProviderAsyncSubagentCompletedEvent, ProviderBackgroundOutputEvent, ProviderSessionConfig, ProviderSystemInstructions } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
-import type { AcpPromptRequest, AcpPromptResponse, AcpSessionConfigOption, AcpSessionModelState, AcpSessionModeState, AcpSessionNotification } from '@/providers/acp';
+import type { ForkSource, SubagentProgress } from '@/core/types';
+import type { ACPPromptRequest, ACPPromptResponse, ACPSessionConfigOption, ACPSessionModelState, ACPSessionModeState, ACPSessionNotification } from '@/providers/acp';
 
 type WithoutScope<T> = T extends unknown ? Omit<T, 'scope'> : never;
 export type OpencodeNativeOutput = WithoutScope<ProviderBackgroundOutputEvent>;
@@ -16,9 +17,9 @@ export interface OpencodeNativeSessionInfo {
   readonly sessionId: string;
   readonly nativeVersion?: 1 | 2;
   readonly databasePath: string | null;
-  readonly configOptions?: AcpSessionConfigOption[] | null;
-  readonly models?: AcpSessionModelState | null;
-  readonly modes?: AcpSessionModeState | null;
+  readonly configOptions?: ACPSessionConfigOption[] | null;
+  readonly models?: ACPSessionModelState | null;
+  readonly modes?: ACPSessionModeState | null;
 }
 
 export interface OpencodeSessionKernelOptions {
@@ -26,13 +27,15 @@ export interface OpencodeSessionKernelOptions {
   readonly onNativeTaskStarted?: (sessionId: string, originatingTurnId: string) => string | undefined;
   readonly onNativeTaskCompleted?: (event: Omit<ProviderAsyncSubagentCompletedEvent, 'scope'>) => void;
   readonly onNativeOutput?: (event: OpencodeNativeOutput, childSessionId?: string) => void;
+  readonly onNativeSubagentProgress?: (progress: SubagentProgress) => void;
   readonly onNativeTurn?: (status: 'started' | 'completed', error?: string, requested?: boolean) => void;
   readonly config: ProviderSessionConfig;
+  readonly forkSource?: ForkSource;
   readonly databasePath?: string;
   readonly nativeVersion?: 1 | 2;
   readonly getActiveTurnId: () => string | null;
   readonly onClosed: (error: Error) => void;
-  readonly onNotification: (notification: AcpSessionNotification) => void;
+  readonly onNotification: (notification: ACPSessionNotification) => void;
   readonly plugin: ProviderHost;
   readonly sessionInstanceId: string;
 }
@@ -41,12 +44,17 @@ export interface OpencodeSessionKernel {
   connect(options: OpencodeKernelConnectOptions): Promise<void>;
   openSession(resumeSessionId?: string): Promise<OpencodeNativeSessionInfo>;
   setConfigOption(request: Record<string, unknown>): Promise<{
-    configOptions?: AcpSessionConfigOption[] | null;
+    configOptions?: ACPSessionConfigOption[] | null;
   }>;
-  prompt(request: AcpPromptRequest): Promise<Pick<
-    AcpPromptResponse,
+  prompt(request: ACPPromptRequest): Promise<Pick<
+    ACPPromptResponse,
     'usage' | 'userMessageId'
-  > & Partial<Pick<AcpPromptResponse, 'stopReason'>>>;
+  > & Partial<Pick<ACPPromptResponse, 'stopReason'>>>;
+  /**
+   * Hands input to the running requested prompt under the neutral steer
+   * contract. Absent where the native protocol cannot steer a running turn.
+   */
+  steer?(request: ACPPromptRequest): Promise<boolean>;
   cancel(sessionId: string): void;
   dispose(): Promise<void>;
 }

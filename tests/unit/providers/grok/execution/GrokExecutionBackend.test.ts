@@ -26,14 +26,14 @@ import {
 } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type {
-  AcpLoadSessionRequest,
-  AcpNewSessionRequest,
-  AcpPromptRequest,
-  AcpSessionModelState,
-  AcpSessionNotification,
-  AcpSetSessionModelRequest,
-  AcpSetSessionModelResponse,
-  AcpSetSessionModeRequest,
+  ACPLoadSessionRequest,
+  ACPNewSessionRequest,
+  ACPPromptRequest,
+  ACPSessionModelState,
+  ACPSessionNotification,
+  ACPSetSessionModelRequest,
+  ACPSetSessionModelResponse,
+  ACPSetSessionModeRequest,
 } from '@/providers/acp';
 import {
   GrokExecutionBackend,
@@ -48,7 +48,7 @@ import {
 } from '@/providers/grok/settings';
 
 function createGrokHost(model = 'grok-4'): ProviderHost {
-  const host = { settings: { model: `grok/${model}`, providerConfigs: { grok: { enabled: true, visibleModels: [model, "grok-3"] } } } } as unknown as ProviderHost;
+  const host = { getResolvedProviderCliPath: async () => 'grok', settings: { model: `grok/${model}`, providerConfigs: { grok: { enabled: true, visibleModels: [model, "grok-3"] } } } } as unknown as ProviderHost;
   updateCurrentGrokCatalog(host.settings, { defaultModelId: model, fingerprint: 'fixture', refreshedAt: 1, models: [{ rawId: "grok-3", displayName: "Grok 3", supportsReasoning: false, reasoningEfforts: [] }, { rawId: model, displayName: model, supportsReasoning: true, reasoningEfforts: [] }] });
   return host;
 }
@@ -175,11 +175,11 @@ async function drainMicrotasks(): Promise<void> {
 }
 
 class FakeNativeConnection implements GrokExecutionNativeConnection {
-  readonly loadRequests: AcpLoadSessionRequest[] = [];
-  readonly modeRequests: AcpSetSessionModeRequest[] = [];
-  readonly modelRequests: AcpSetSessionModelRequest[] = [];
-  readonly newRequests: AcpNewSessionRequest[] = [];
-  readonly promptRequests: AcpPromptRequest[] = [];
+  readonly loadRequests: ACPLoadSessionRequest[] = [];
+  readonly modeRequests: ACPSetSessionModeRequest[] = [];
+  readonly modelRequests: ACPSetSessionModelRequest[] = [];
+  readonly newRequests: ACPNewSessionRequest[] = [];
+  readonly promptRequests: ACPPromptRequest[] = [];
   cancelCalls = 0;
   forkCalls: unknown[] = [];
   initializeCalls = 0;
@@ -188,19 +188,19 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
   shutdownCalls = 0;
   loadResponse: Awaited<ReturnType<GrokExecutionNativeConnection['loadSession']>> | null = null;
   loadImplementation: (
-    request: AcpLoadSessionRequest,
+    request: ACPLoadSessionRequest,
   ) => ReturnType<GrokExecutionNativeConnection['loadSession']> = async request => (
     this.loadResponse ?? { sessionId: request.sessionId }
   );
-  private notification: ((value: AcpSessionNotification, source: 'extension' | 'standard') => void)
+  private notification: ((value: ACPSessionNotification, source: 'extension' | 'standard') => void)
     | null = null;
   private retainedNotification: ((
-    value: AcpSessionNotification,
+    value: ACPSessionNotification,
     source: 'extension' | 'standard',
   ) => void) | null = null;
   private permissionModeChanged: ((mode: 'normal' | 'yolo') => void) | null = null;
-  private modelsChanged: ((models: AcpSessionModelState) => void) | null = null;
-  private retainedModelsChanged: ((models: AcpSessionModelState) => void) | null = null;
+  private modelsChanged: ((models: ACPSessionModelState) => void) | null = null;
+  private retainedModelsChanged: ((models: ACPSessionModelState) => void) | null = null;
   initializeImplementation: () => Promise<void> = async () => {};
   forkImplementation: (request: {
     newCwd: string;
@@ -225,8 +225,8 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
   }
   interjectImplementation: () => Promise<void> = async () => {};
   modelImplementation: (
-    request: AcpSetSessionModelRequest,
-  ) => Promise<AcpSetSessionModelResponse> = async () => ({});
+    request: ACPSetSessionModelRequest,
+  ) => Promise<ACPSetSessionModelResponse> = async () => ({});
   promptImplementation: () => Promise<{ stopReason: string }> = async () => ({
     stopReason: 'end_turn',
   });
@@ -265,32 +265,32 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
   }
 
   async loadSession(
-    request: AcpLoadSessionRequest,
+    request: ACPLoadSessionRequest,
   ): ReturnType<GrokExecutionNativeConnection['loadSession']> {
     this.loadRequests.push(request);
     return this.loadImplementation(request);
   }
 
-  async newSession(request: AcpNewSessionRequest): Promise<{ sessionId: string }> {
+  async newSession(request: ACPNewSessionRequest): Promise<{ sessionId: string }> {
     this.newRequests.push(request);
     return { sessionId: 'session-new' };
   }
 
   onNotification(
-    listener: (value: AcpSessionNotification, source: 'extension' | 'standard') => void,
+    listener: (value: ACPSessionNotification, source: 'extension' | 'standard') => void,
   ): () => void {
     this.notification = listener;
     this.retainedNotification = listener;
     return () => { this.notification = null; };
   }
 
-  onModelsChanged(listener: (models: AcpSessionModelState) => void): () => void {
+  onModelsChanged(listener: (models: ACPSessionModelState) => void): () => void {
     this.modelsChanged = listener;
     this.retainedModelsChanged = listener;
     return () => { this.modelsChanged = null; };
   }
 
-  async prompt(request: AcpPromptRequest): Promise<{ stopReason: string }> {
+  async prompt(request: ACPPromptRequest): Promise<{ stopReason: string }> {
     this.promptRequests.push(request);
     return this.promptImplementation();
   }
@@ -321,11 +321,11 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
     this.permissionModeChanged?.(mode);
   }
 
-  async setMode(request: AcpSetSessionModeRequest): Promise<void> {
+  async setMode(request: ACPSetSessionModeRequest): Promise<void> {
     this.modeRequests.push(request);
   }
 
-  async setModel(request: AcpSetSessionModelRequest): Promise<AcpSetSessionModelResponse> {
+  async setModel(request: ACPSetSessionModelRequest): Promise<ACPSetSessionModelResponse> {
     this.modelRequests.push(request);
     return this.modelImplementation(request);
   }
@@ -344,7 +344,7 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
       sessionId: 'session-existing',
       update,
       ...(metadata ? { _meta: metadata } : {}),
-    } as unknown as AcpSessionNotification, source);
+    } as unknown as ACPSessionNotification, source);
   }
 
   emitRetained(
@@ -354,14 +354,14 @@ class FakeNativeConnection implements GrokExecutionNativeConnection {
     this.retainedNotification?.({
       sessionId: 'session-existing',
       update,
-    } as unknown as AcpSessionNotification, source);
+    } as unknown as ACPSessionNotification, source);
   }
 
-  emitModelsChanged(models: AcpSessionModelState): void {
+  emitModelsChanged(models: ACPSessionModelState): void {
     this.modelsChanged?.(models);
   }
 
-  emitRetainedModelsChanged(models: AcpSessionModelState): void {
+  emitRetainedModelsChanged(models: ACPSessionModelState): void {
     this.retainedModelsChanged?.(models);
   }
 }
@@ -389,19 +389,79 @@ describe('GrokExecutionBackend', () => {
     );
   });
 
-  it.each(['notification', 'update', 'standard'] as const)(
-    'preserves Grok checkpoint IDs from %s metadata across assistant messages',
+  it.each(['', 'Inspect these images'])('sends native ACP image blocks with text %j', async text => {
+    const native = new FakeNativeConnection();
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: () => native },
+    }).createSession(sessionConfig);
+    try {
+      const events = await collect(session.execute({
+        ...executionRequest(text),
+        input: [
+          ...(text ? [{ type: 'text' as const, text }] : []),
+          {
+            type: 'image',
+            image: { id: 'image-1', name: 'first.png', mediaType: 'image/png', data: 'aGVsbG8=', size: 5, source: 'paste' },
+          },
+          {
+            type: 'image',
+            image: { id: 'image-2', name: 'second.webp', mediaType: 'image/webp', data: 'd29ybGQ=', size: 5, source: 'drop' },
+          },
+        ],
+      }).events);
+      expect(events.at(-1)?.type).toBe('turn_completed');
+      expect(native.promptRequests).toEqual([expect.objectContaining({
+        prompt: [
+          ...(text ? [{ type: 'text', text }] : []),
+          { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
+          { type: 'image', mimeType: 'image/webp', data: 'd29ybGQ=' },
+        ],
+      })]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it('preserves standard Grok message IDs across assistant messages', async () => {
+    const native = new FakeNativeConnection();
+    native.promptImplementation = async () => {
+      for (const id of ['assistant-first', 'assistant-final']) {
+        native.emit({
+          content: { text: id, type: 'text' },
+          messageId: id,
+          sessionUpdate: 'agent_message_chunk',
+        }, 'extension');
+      }
+      return { stopReason: 'end_turn' };
+    };
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: () => native },
+    }).createSession(sessionConfig);
+    try {
+      const events = await collect(session.execute(executionRequest()).events);
+      expect(events.filter(event => event.type === 'assistant_message_started')).toEqual([
+        expect.objectContaining({ nativeAssistantId: 'assistant-first' }),
+        expect.objectContaining({ nativeAssistantId: 'assistant-final' }),
+      ]);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it.each(['notification', 'update'] as const)(
+    'keeps per-token Grok chunks from %s metadata in one assistant message keyed by prompt ID',
     async location => {
+      // Grok assigns a fresh eventId to every streamed token; only promptId is stable per turn.
       const native = new FakeNativeConnection();
       native.promptImplementation = async () => {
-        for (const id of ['assistant-first', 'assistant-final']) {
+        ['Hello', ',', ' world'].forEach((text, index) => {
+          const metadata = { eventId: `event-${index}`, promptId: 'prompt-1' };
           native.emit({
-            content: { text: id, type: 'text' },
+            content: { text, type: 'text' },
             sessionUpdate: 'agent_message_chunk',
-            ...(location === 'standard' ? { messageId: id } : {}),
-            ...(location === 'update' ? { _meta: { eventId: id } } : {}),
-          }, 'extension', location === 'notification' ? { eventId: id } : undefined);
-        }
+            ...(location === 'update' ? { _meta: metadata } : {}),
+          }, 'extension', location === 'notification' ? metadata : undefined);
+        });
         return { stopReason: 'end_turn' };
       };
       const session = new GrokExecutionBackend(createGrokHost(), {
@@ -410,9 +470,10 @@ describe('GrokExecutionBackend', () => {
       try {
         const events = await collect(session.execute(executionRequest()).events);
         expect(events.filter(event => event.type === 'assistant_message_started')).toEqual([
-          expect.objectContaining({ nativeAssistantId: 'assistant-first' }),
-          expect.objectContaining({ nativeAssistantId: 'assistant-final' }),
+          expect.objectContaining({ nativeAssistantId: 'prompt-1' }),
         ]);
+        expect(events.flatMap(event => (event.type === 'text_delta' ? [event.text] : [])).join(''))
+          .toBe('Hello, world');
       } finally {
         await session.dispose();
       }
@@ -471,6 +532,7 @@ describe('GrokExecutionBackend', () => {
 
     expect(native.loadRequests).toHaveLength(1);
     expect(native.modelRequests[0]).toEqual({
+      _meta: { reasoningEffort: 'high' },
       modelId: 'grok-4',
       sessionId: 'session-existing',
     });
@@ -540,7 +602,7 @@ describe('GrokExecutionBackend', () => {
     );
   });
 
-  it('drops an unsupported reasoning effort after cold-session model discovery', async () => {
+  it('rejects an unsupported reasoning effort after cold-session model discovery', async () => {
     const native = new FakeNativeConnection();
     native.loadResponse = {
       models: {
@@ -559,28 +621,26 @@ describe('GrokExecutionBackend', () => {
       nativeFactory: { create: () => native },
     }).createSession(sessionConfig);
 
-    await collect(session.execute(grok45Request('max')).events);
+    const events = await collect(session.execute(grok45Request('max')).events);
 
     expect(mergeLiveModels).toHaveBeenCalledTimes(1);
-    expect(native.modelRequests).toEqual([{
-      modelId: 'grok-4.5',
-      sessionId: 'session-existing',
-    }]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+    expect(native.modelRequests).toEqual([]);
+    expect(native.promptRequests).toEqual([]);
   });
 
-  it('omits the requested reasoning effort when the selected model metadata is unknown', async () => {
+  it('rejects an unadvertised reasoning effort when model metadata is unknown', async () => {
     const native = new FakeNativeConnection();
     const session = new GrokExecutionBackend(
       createGrok45Host(),
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
-    await collect(session.execute(grok45Request('max')).events);
+    const events = await collect(session.execute(grok45Request('max')).events);
 
-    expect(native.modelRequests).toEqual([{
-      modelId: 'grok-4.5',
-      sessionId: 'session-existing',
-    }]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+    expect(native.modelRequests).toEqual([]);
+    expect(native.promptRequests).toEqual([]);
   });
 
   it('accepts a future effort value advertised by live session metadata', async () => {
@@ -734,9 +794,9 @@ describe('GrokExecutionBackend', () => {
       modelCatalogCoordinator: { mergeLiveModels },
       nativeFactory: { create: () => native },
     }).createSession(sessionConfig);
-    const run = session.execute(grok45Request('max'));
+    const run = session.execute(grok45Request('high'));
     while (native.promptRequests.length === 0) await Promise.resolve();
-    const models: AcpSessionModelState = {
+    const models: ACPSessionModelState = {
       availableModels: [{
         _meta: {
           reasoningEffort: 'max',
@@ -771,7 +831,7 @@ describe('GrokExecutionBackend', () => {
     expect(mergeLiveModels).toHaveBeenCalledTimes(1);
   });
 
-  it('uses a valid per-model preference when the requested reasoning effort is unsupported', async () => {
+  it('rejects an unsupported toolbar effort without substituting a saved preference', async () => {
     const native = new FakeNativeConnection();
     const host = createGrok45Host();
     persistGrok45Catalog(host);
@@ -783,13 +843,11 @@ describe('GrokExecutionBackend', () => {
       { nativeFactory: { create: () => native } },
     ).createSession(sessionConfig);
 
-    await collect(session.execute(grok45Request('max')).events);
+    const events = await collect(session.execute(grok45Request('max')).events);
 
-    expect(native.modelRequests).toEqual([{
-      _meta: { reasoningEffort: 'low' },
-      modelId: 'grok-4.5',
-      sessionId: 'session-existing',
-    }]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+    expect(native.modelRequests).toEqual([]);
+    expect(native.promptRequests).toEqual([]);
   });
 
   it('omits a saved per-model preference when the request has no projected effort', async () => {
@@ -938,6 +996,7 @@ describe('GrokExecutionBackend', () => {
   it('keeps the full Grok prompt replacement when adding provider-default dynamic sections', async () => {
     const native = new FakeNativeConnection();
     const host = {
+      ...createGrokHost(),
       settings: {
         ...createGrokHost().settings,
         mediaFolder: 'media',
@@ -954,7 +1013,7 @@ describe('GrokExecutionBackend', () => {
       configuration: {
         ...base.configuration,
         systemInstructions: {
-          dynamicSections: ['## Collab Mode\nRuntime guidance.'],
+          dynamicSections: ['## Additional context\nRuntime guidance.'],
           kind: 'provider-default',
         },
       },
@@ -963,12 +1022,14 @@ describe('GrokExecutionBackend', () => {
     await collect(session.execute(request).events);
 
     const systemPrompt = String(native.loadRequests[0]?._meta?.systemPromptOverride);
+    expect(systemPrompt).toContain("inside **Ada**'s Obsidian Vault");
+    expect(systemPrompt).toContain('Vault absolute path: /tmp/vault');
     expect(systemPrompt).toContain('## Runtime Context');
     expect(systemPrompt).toContain('Use `bash: date`');
     expect(systemPrompt).toContain('## Vault Media');
     expect(systemPrompt).toContain('Keep the shared instruction.');
-    expect(systemPrompt).toContain('## Collab Mode\nRuntime guidance.');
-    expect(systemPrompt.match(/## Collab Mode/g)).toHaveLength(1);
+    expect(systemPrompt).toContain('## Additional context\nRuntime guidance.');
+    expect(systemPrompt.match(/## Additional context/g)).toHaveLength(1);
   });
 
   it('bootstraps canonical history only when creating a new native session', async () => {
@@ -1226,6 +1287,24 @@ describe('GrokExecutionBackend', () => {
     });
     expect(firstEvents.at(-1)?.type).toBe('cancelled');
     expect(secondEvents.at(-1)?.type).toBe('turn_completed');
+  });
+
+  it('cancels the run when the consumer stops iterating while it is still open', async () => {
+    const native = new FakeNativeConnection();
+    native.promptImplementation = () => new Promise(() => {});
+    const session = new GrokExecutionBackend(
+      createGrokHost(),
+      { nativeFactory: { create: () => native } },
+    ).createSession(sessionConfig);
+    const run = session.execute(executionRequest());
+    while (native.promptRequests.length === 0) await Promise.resolve();
+
+    await run.events[Symbol.asyncIterator]().return?.();
+    for (let attempt = 0; attempt < 20 && native.cancelCalls === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    expect(native.cancelCalls).toBe(1);
   });
 
   it('quarantines native output as soon as cancellation begins', async () => {
@@ -1930,6 +2009,7 @@ describe('GrokExecutionBackend', () => {
   it('forks from provider-owned checkpoint metadata and loads the child with system instructions', async () => {
     const native = new FakeNativeConnection();
     const host = {
+      ...createGrokHost(),
       settings: { ...createGrokHost().settings, systemPrompt: 'Keep the Grok replacement.' },
     } as unknown as ProviderHost;
     const session = new GrokExecutionBackend(
@@ -1945,7 +2025,7 @@ describe('GrokExecutionBackend', () => {
       configuration: {
         ...base.configuration,
         systemInstructions: {
-          dynamicSections: ['## Collab Mode\nFork runtime guidance.'],
+          dynamicSections: ['## Additional context\nFork runtime guidance.'],
           kind: 'provider-default',
         },
       },
@@ -1962,7 +2042,7 @@ describe('GrokExecutionBackend', () => {
       expect.objectContaining({
         _meta: expect.objectContaining({
           systemPromptOverride: expect.stringContaining(
-            '## Collab Mode\nFork runtime guidance.',
+            '## Additional context\nFork runtime guidance.',
           ),
         }),
         sessionId: 'session-forked',
@@ -2181,6 +2261,31 @@ describe('GrokExecutionBackend', () => {
     expect(native.loadRequests).toEqual([
       expect.objectContaining({ sessionId: 'session-forked-unexpected-parent' }),
     ]);
+  });
+
+  it('cancels an approval already resolved by the UI when the native turn is cancelled', async () => {
+    const native = new FakeNativeConnection();
+    native.promptImplementation = () => new Promise(() => {});
+    let nativeOptions!: GrokExecutionNativeCreateOptions;
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: options => { nativeOptions = options; return native; } },
+    }).createSession({
+      ...sessionConfig,
+      interactionPort: {
+        ...interactionPort,
+        requestApproval: async request => ({ interactionId: request.interactionId, decision: 'allow' }),
+      },
+    });
+    const run = session.execute(executionRequest());
+    while (native.promptRequests.length === 0) await Promise.resolve();
+    const permission = nativeOptions.requestPermission({
+      options: [{ kind: 'allow_once', name: 'Allow', optionId: 'allow' }],
+      sessionId: 'session-existing', toolCall: { title: 'write', toolCallId: 'tool-1' },
+    });
+    run.cancel();
+    await expect(permission).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+    await collect(run.events);
+    await session.dispose();
   });
 
   it('publishes live model metadata and rejects passive auxiliary permissions', async () => {

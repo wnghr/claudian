@@ -2,17 +2,24 @@
 
 import '@/providers';
 
+import { createConversationPorts } from '@test/helpers/ConversationPorts';
 import { fireEvent, within } from '@testing-library/dom';
 import { axe } from 'jest-axe';
 import { MarkdownRenderer } from 'obsidian';
 
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
 import type { ChatMessage } from '@/core/types';
+import { ConversationController } from '@/features/chat/controllers/ConversationController';
 import { MessageRenderer } from '@/features/chat/rendering/MessageRenderer';
+import { createResponseTextBlock } from '@/features/chat/rendering/ResponseLayout';
+import { createThinkingBlock, finalizeThinkingBlock } from '@/features/chat/rendering/ThinkingBlockRenderer';
+import { ChatState } from '@/features/chat/state/ChatState';
+import { buildTabRuntimeInputBindings } from '@/features/chat/tabs/runtime/TabRuntimeInputBindings';
 
 HTMLElement.prototype.appendText = function (text) { this.append(document.createTextNode(text)); };
 HTMLElement.prototype.empty = function () { this.replaceChildren(); };
 HTMLElement.prototype.addClass = function (...classes) { this.classList.add(...classes); };
+HTMLElement.prototype.removeClass = function (...classes) { this.classList.remove(...classes); };
 
 function setup(providerId = 'claude') {
   const messagesEl = document.body.createDiv();
@@ -53,6 +60,8 @@ it('collapses completed history above the answer and puts copy, fork, time below
   renderer.renderMessages(messages, () => 'Hello');
   await Promise.resolve();
   const header = within(messagesEl).getByRole('button', { name: 'Worked for 01:05' });
+  expect(header.hasAttribute('aria-label')).toBe(false);
+  expect(header.hasAttribute('title')).toBe(false);
   expect(header.getAttribute('aria-expanded')).toBe('false');
   const history = document.getElementById(header.getAttribute('aria-controls')!)!;
   expect(history.hidden).toBe(true);
@@ -62,6 +71,12 @@ it('collapses completed history above the answer and puts copy, fork, time below
   fireEvent.click(header);
   expect(history.hidden).toBe(false);
   expect(header.getAttribute('aria-expanded')).toBe('true');
+  const thinking = within(history).getByRole('button', { name: 'Thought' });
+  expect(thinking.hasAttribute('aria-label')).toBe(false);
+  expect(thinking.hasAttribute('title')).toBe(false);
+  fireEvent.keyDown(thinking, { key: 'Enter' });
+  expect(thinking.getAttribute('aria-expanded')).toBe('true');
+  expect((await axe(history)).violations).toEqual([]);
   fireEvent.click(header);
   expect(history.hidden).toBe(true);
 
@@ -170,6 +185,20 @@ it('returns from a completed answer to its captured PDF attachment and page', as
   renderer.dispose();
 });
 
+it('keeps live and finalized thinking accessible without hover tooltip attributes', async () => {
+  const host = document.body.createDiv();
+  const state = createThinkingBlock(host);
+  const header = within(host).getByRole('button', { name: 'Thinking 0s...' });
+  expect(header.hasAttribute('aria-label')).toBe(false);
+  expect(header.hasAttribute('title')).toBe(false);
+  fireEvent.keyDown(header, { key: ' ' });
+  expect(header.getAttribute('aria-expanded')).toBe('true');
+  finalizeThinkingBlock(state);
+  expect(within(host).getByRole('button', { name: /^Thought for \d+s$/ })).toBe(header);
+  expect(header.getAttribute('aria-expanded')).toBe('false');
+  expect((await axe(host)).violations).toEqual([]);
+});
+
 it('keeps live output in place until completion, then preserves the same content elements', async () => {
   const { renderer, messagesEl } = setup();
   const msg: ChatMessage = { id: 'live', role: 'assistant', content: 'Done.', timestamp: 4,
@@ -177,7 +206,8 @@ it('keeps live output in place until completion, then preserves the same content
   const el = renderer.addMessage(msg);
   const content = el.querySelector<HTMLElement>('.claudian-message-content')!;
   const work = content.createDiv({ cls: 'claudian-thinking-block', text: 'Working' });
-  const answer = content.createDiv({ cls: 'claudian-text-block', text: 'Done.' });
+  const answer = createResponseTextBlock(content);
+  answer.setText('Done.');
   expect(within(messagesEl).queryByRole('button', { name: /Worked/ })).toBeNull();
   expect(work.parentElement).toBe(content);
   msg.durationSeconds = 0;
@@ -205,14 +235,16 @@ it('leaves interrupted and unsuccessful output expanded', () => {
   }
 });
 
-it('copies interrupted replay text without legacy marker markup', async () => {
+it('copies retired interruption markup as ordinary message text', async () => {
   const { renderer, messagesEl } = setup();
   const marker = '<span class="claudian-interrupted">Interrupted</span> <span class="claudian-interrupted-hint">· What should Claudian do instead?</span>';
   renderer.renderStoredMessage({ id: 'legacy', role: 'assistant', timestamp: 5,
     content: `Partial answer\n\n${marker}` });
   fireEvent.click(within(messagesEl).getByRole('button', { name: 'Copy message' }));
   await Promise.resolve();
-  expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Partial answer');
+  expect(navigator.clipboard.writeText).toHaveBeenCalledWith(`Partial answer\n\n${marker}`);
+  expect(messagesEl.querySelectorAll('.claudian-interrupted')).toHaveLength(0);
+  expect(await axe(messagesEl)).toHaveNoViolations();
   renderer.dispose();
 });
 
@@ -286,7 +318,6 @@ it('offers fork on the final live response of a multi-message turn', async () =>
   renderer.dispose();
 });
 
-
 it('offers full-session fork only on the latest reply and removes it when another turn starts', async () => {
   const { renderer, messagesEl, fork } = setup('opencode');
   const latest: ChatMessage = { id: 'a3', role: 'assistant', content: 'Latest answer', timestamp: 7,
@@ -339,7 +370,7 @@ it('shows one task notification disclosure between the initial and automatic rep
   renderer.dispose();
 });
 
-it('preserves requested work before a notification arriving in the same response', async () => {
+it('folds requested commentary and its notification together before the final answer', async () => {
   const { renderer, messagesEl } = setup();
   renderer.renderStoredMessage({
     id: 'requested-with-notification', role: 'assistant', timestamp: 1,
@@ -353,15 +384,19 @@ it('preserves requested work before a notification arriving in the same response
   });
   await Promise.resolve();
   const work = within(messagesEl).getByRole('button', { name: 'Worked for 00:05' });
-  expect(within(messagesEl).getByRole('button', { name: 'Task notification' }).closest('[hidden]')).toBeNull();
-  expect(within(messagesEl).getByText('Initial reply.').closest('[hidden]')).toBeNull();
+  const notification = within(messagesEl).getByRole('button', { name: 'Task notification', hidden: true });
+  expect(notification.closest('[hidden]')).not.toBeNull();
+  expect(within(messagesEl).getByText('Initial reply.').closest('[hidden]')).not.toBeNull();
   expect(within(messagesEl).getByText('Follow-up reply.').closest('[hidden]')).toBeNull();
   fireEvent.click(work);
   expect(within(messagesEl).getByText('Initial reasoning.').closest('[hidden]')).toBeNull();
+  expect(within(messagesEl).getByText('Initial reply.').closest('[hidden]')).toBeNull();
+  expect(within(messagesEl).getByText('Initial reply.').compareDocumentPosition(notification) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(notification.closest('[hidden]')).toBeNull();
   renderer.dispose();
 });
 
-it('keeps a requested response disclosure separate when a notification precedes its first output', async () => {
+it('nests a notification before the first output inside the requested work disclosure', async () => {
   const { renderer, messagesEl } = setup();
   renderer.renderStoredMessage({
     id: 'requested-after-notification', role: 'assistant', timestamp: 1,
@@ -373,13 +408,15 @@ it('keeps a requested response disclosure separate when a notification precedes 
     ],
   });
   await Promise.resolve();
-  const notification = within(messagesEl).getByRole('button', { name: 'Task notification' });
+  const notification = within(messagesEl).getByRole('button', { name: 'Task notification', hidden: true });
   const work = within(messagesEl).getByRole('button', { name: 'Worked for 00:05' });
-  fireEvent.click(notification);
-  expect(within(messagesEl).getByText('Old task result.').closest('[hidden]')).toBeNull();
+  expect(notification.closest('[hidden]')).not.toBeNull();
   expect(within(messagesEl).getByText('Reasoning about the new request.').closest('[hidden]')).not.toBeNull();
   fireEvent.click(work);
   expect(within(messagesEl).getByText('Reasoning about the new request.').closest('[hidden]')).toBeNull();
+  expect(within(messagesEl).getByText('Old task result.').closest('[hidden]')).not.toBeNull();
+  fireEvent.click(notification);
+  expect(within(messagesEl).getByText('Old task result.').closest('[hidden]')).toBeNull();
   expect(within(messagesEl).getByText('The requested answer.').closest('[hidden]')).toBeNull();
   renderer.dispose();
 });
@@ -420,14 +457,14 @@ it('keeps requested work on both sides of a mid-response notification in its own
     ],
   });
   await Promise.resolve();
-  fireEvent.click(within(messagesEl).getByRole('button', { name: 'Task notification' }));
   expect(within(messagesEl).getByText('Work after notification.').closest('[hidden]')).not.toBeNull();
   fireEvent.click(within(messagesEl).getByRole('button', { name: 'Worked for 00:05' }));
+  fireEvent.click(within(messagesEl).getByRole('button', { name: 'Task notification' }));
+  expect(within(messagesEl).getByText('Old task result.').closest('[hidden]')).toBeNull();
   expect(within(messagesEl).getByText('Work before notification.').closest('[hidden]')).toBeNull();
   expect(within(messagesEl).getByText('Work after notification.').closest('[hidden]')).toBeNull();
   renderer.dispose();
 });
-
 
 it.each(['claude', 'pi', 'opencode', 'codex'])('shows native throughput for %s on replay', async (provider) => {
   const { renderer, messagesEl } = setup(provider);
@@ -483,5 +520,249 @@ it('keeps time after throughput when timestamps are refreshed or toggled', () =>
   renderer.refreshMessageTimestamps();
   renderer.refreshMessageTimestamps();
   expectOrder();
+  renderer.dispose();
+});
+
+it('renders accessible Pi branch controls at the prompt and disables them while busy', async () => {
+  const messagesEl = document.body.createDiv();
+  const navigate = jest.fn().mockResolvedValue(undefined);
+  let busy = false;
+  const renderer = new MessageRenderer(
+    { app: {}, settings: { mediaFolder: '' } } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined, () => ProviderRegistry.getCapabilities('pi'),
+    { navigate, isBusy: () => busy },
+  );
+  const prompt: ChatMessage = { id: 'user', role: 'user', content: 'Try B', timestamp: 1,
+    userMessageId: 'b', treeBranches: ['a', 'b'] };
+  const previousSessionPrompt: ChatMessage = { id: 'previous-session', role: 'user', content: 'Earlier session',
+    timestamp: 1, userMessageId: 'old-native-id' };
+  renderer.renderMessages([messages[0], previousSessionPrompt, prompt], () => 'Hello');
+  expect(within(messagesEl.querySelector('[data-message-id="previous-session"]') as HTMLElement)
+    .queryByRole('button', { name: 'Branch from this prompt' })).toBeNull();
+  expect(within(messagesEl.querySelector('[data-message-id="u1"]') as HTMLElement)
+    .queryByRole('button', { name: 'Branch from this prompt' })).toBeNull();
+  const edit = within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }) as HTMLButtonElement;
+  const previous = within(messagesEl).getByRole('button', { name: 'Previous branch' }) as HTMLButtonElement;
+  const next = within(messagesEl).getByRole('button', { name: 'Next branch' }) as HTMLButtonElement;
+  const assertNativeTooltipsOnly = () => {
+    for (const button of [edit, previous, next]) expect(button.hasAttribute('title')).toBe(false);
+  };
+  assertNativeTooltipsOnly();
+  expect(edit.type).toBe('button');
+  expect(next.disabled).toBe(true);
+  expect(within(messagesEl).getByText('2/2')).toBeDefined();
+  previous.focus();
+  expect(document.activeElement).toBe(previous);
+  fireEvent.click(previous);
+  expect(navigate).toHaveBeenCalledWith('user', 'a');
+  fireEvent.click(edit);
+  expect(navigate).toHaveBeenCalledWith('user', undefined);
+  busy = true;
+  renderer.refreshBranchButtonState();
+  expect(edit.disabled).toBe(true);
+  expect(previous.disabled).toBe(true);
+  assertNativeTooltipsOnly();
+  fireEvent.click(previous);
+  expect(navigate).toHaveBeenCalledTimes(2);
+  busy = false;
+  renderer.refreshBranchButtonState();
+  expect(previous.disabled).toBe(false);
+  expect(next.disabled).toBe(true);
+  assertNativeTooltipsOnly();
+  expect(await axe(messagesEl)).toHaveNoViolations();
+  renderer.dispose();
+});
+
+
+it('shows the tree action from the second live prompt before native IDs arrive and enables it without reloading', async () => {
+  const messagesEl = document.body.createDiv();
+  const navigate = jest.fn().mockResolvedValue(undefined);
+  let busy = true;
+  const renderer = new MessageRenderer(
+    { app: {}, settings: { mediaFolder: '' } } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined, () => ProviderRegistry.getCapabilities('pi'),
+    { navigate, isBusy: () => busy },
+  );
+  const first: ChatMessage = { ...messages[0], treeBranches: ['native-u1'] };
+  renderer.addMessage(first);
+  renderer.refreshBranchButtons([first]);
+  expect(within(messagesEl).queryByRole('button', { name: 'Branch from this prompt' })).toBeNull();
+  const second: ChatMessage = { id: 'u2', role: 'user', content: 'Second prompt', timestamp: 2 };
+  renderer.addMessage(second);
+  let edit = within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }) as HTMLButtonElement;
+  expect(edit.disabled).toBe(true);
+  expect(edit.getAttribute('aria-description')).toContain('response');
+  expect(edit.hasAttribute('title')).toBe(false);
+  busy = false;
+  second.userMessageId = 'native-u2';
+  renderer.refreshActionButtons(second, [first, second], 1);
+  edit = within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }) as HTMLButtonElement;
+  expect(edit.disabled).toBe(false);
+  fireEvent.click(edit);
+  expect(navigate).toHaveBeenCalledWith('u2', undefined);
+  second.treeBranches = ['native-u2'];
+  renderer.renderMessages([first, second], () => 'Hello');
+  expect(within(messagesEl).getAllByRole('button', { name: 'Branch from this prompt' })).toHaveLength(1);
+  expect(await axe(messagesEl)).toHaveNoViolations();
+  renderer.dispose();
+});
+
+
+it.each([true, false])('enables branches after switching and native history correlation (initial ID: %s)', async hasNativeId => {
+  const messagesEl = document.body.createDiv();
+  const inputEl = document.body.createEl('textarea');
+  const state = new ChatState();
+  const first: ChatMessage = { ...messages[0], treeBranches: ['native-u1'] };
+  const second: ChatMessage = { id: 'u2', role: 'user', content: 'Second prompt', timestamp: 2,
+    treeBranches: ['native-u2'], ...(hasNativeId ? { userMessageId: 'native-u2' } : {}) };
+  const plugin = { app: {}, settings: { mediaFolder: '' }, updateConversation: jest.fn(),
+    switchConversation: jest.fn().mockResolvedValue({ id: 'pi-chat', messages: [first, second] }) };
+  const navigateConversationBranch = jest.fn().mockResolvedValue({ status: 'committed', messages: [first] });
+  const coordinator = { navigateConversationBranch, supportsConversationBranches: true,
+    getConversationBranches: jest.fn().mockResolvedValue({ branches: { 'native-u1': ['native-u1'], 'native-u2': ['native-u2'] },
+      userMessageIds: { u1: 'native-u1', u2: 'native-u2' } }),
+  };
+  const renderer: MessageRenderer = new MessageRenderer(plugin as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined, () => ProviderRegistry.getCapabilities('pi'), {
+      navigate: (id, target) => controller.navigateBranch(id, target),
+      isBusy: () => state.isSwitchingConversation || state.isRewinding,
+    });
+  let welcomeEl: HTMLElement | null = null;
+  const controller = new ConversationController({ plugin, state, renderer,
+    ...createConversationPorts({ state, getInputEl: () => inputEl, getImageContextManager: () => null }),
+    subagentManager: { orphanAllActive: jest.fn(), clear: jest.fn() },
+    getInputEl: () => inputEl, getMessagesEl: () => messagesEl,
+    getWelcomeEl: () => welcomeEl, setWelcomeEl: (el: HTMLElement) => { welcomeEl = el; },
+    getLinkedContentController: () => ({ lock: jest.fn() }),
+    getImageContextManager: () => null, clearQueuedMessage: jest.fn(),
+    getExecutionCoordinator: () => coordinator,
+  } as any);
+  await controller.switchTo('pi-chat');
+  expect((within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }) as HTMLButtonElement).disabled).toBe(!hasNativeId);
+  await controller.save();
+  const edit = within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }) as HTMLButtonElement;
+  expect(edit.disabled).toBe(false);
+  edit.click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(navigateConversationBranch).not.toHaveBeenCalled();
+  expect(inputEl.value).toBe('Second prompt');
+  expect(await controller.commitBranchDraft()).toMatchObject({ status: 'committed' });
+  expect(navigateConversationBranch).toHaveBeenCalledWith(expect.objectContaining({ userMessageId: 'native-u2' }));
+  expect(state.messages).toEqual([first]);
+  renderer.dispose();
+});
+
+it('orders the Pi prompt toolbar as branches, tree, copy, time through live and replay refreshes', async () => {
+  const messagesEl = document.body.createDiv();
+  const fork = jest.fn().mockResolvedValue(undefined);
+  const settings = { mediaFolder: '', showMessageTimestamps: true };
+  let busy = true;
+  const renderer = new MessageRenderer({ app: {}, settings } as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, fork, () => ProviderRegistry.getCapabilities('pi'),
+    { navigate: jest.fn(), isBusy: () => busy });
+  const first: ChatMessage = { ...messages[0], treeBranches: ['native-u1'] };
+  const prompt: ChatMessage = { id: 'second', role: 'user', content: 'Try B', timestamp: 2 };
+  const reply: ChatMessage = { id: 'reply-b', role: 'assistant', content: 'Answer B', timestamp: 3,
+    assistantMessageId: 'native-reply-b' };
+  renderer.addMessage(first);
+  renderer.addMessage(prompt);
+  let promptEl = messagesEl.querySelector<HTMLElement>('[data-message-id="second"]')!;
+  expect(within(promptEl).queryByRole('button', { name: 'Fork conversation' })).toBeNull();
+  prompt.userMessageId = 'native-b';
+  prompt.treeBranches = ['native-a', 'native-b'];
+  const history = [first, prompt, reply];
+  renderer.addMessage(reply);
+  busy = false;
+  renderer.refreshActionButtons(prompt, history, 1);
+  const assertOrder = () => {
+    const toolbar = promptEl.querySelector('.claudian-message-actions')!;
+    const labels = Array.from(toolbar.children).map(child => child.classList.contains('claudian-message-timestamp')
+      ? 'time' : child.getAttribute('aria-label'));
+    expect(labels).toEqual(['Previous branch', 'Branch 2 of 2', 'Next branch', 'Branch from this prompt', 'Copy message', 'time']);
+    expect(within(toolbar as HTMLElement).queryByRole('button', { name: 'Fork conversation' })).toBeNull();
+    const markers = promptEl.querySelectorAll('.claudian-branch-marker');
+    expect(markers).toHaveLength(1);
+    expect(markers[0].parentElement).toBe(promptEl.querySelector('.claudian-message-content'));
+    expect(markers[0].getAttribute('aria-hidden')).toBe('true');
+    expect(messagesEl.querySelector('[data-message-id="u1"] .claudian-branch-marker')).toBeNull();
+  };
+  assertOrder();
+  renderer.refreshBranchButtons(history);
+  assertOrder();
+  renderer.refreshMessageTimestamps();
+  assertOrder();
+  settings.showMessageTimestamps = false;
+  renderer.refreshMessageTimestamps();
+  renderer.refreshBranchButtons(history);
+  settings.showMessageTimestamps = true;
+  renderer.refreshMessageTimestamps();
+  assertOrder();
+  renderer.renderMessages(history, () => 'Hello');
+  promptEl = messagesEl.querySelector<HTMLElement>('[data-message-id="second"]')!;
+  assertOrder();
+  expect(await axe(promptEl)).toHaveNoViolations();
+  prompt.treeBranches = ['native-b'];
+  renderer.refreshBranchButtons(history);
+  expect(promptEl.querySelector('.claudian-branch-marker')).toBeNull();
+  expect(within(promptEl).getByRole('button', { name: 'Branch from this prompt' })).toBeTruthy();
+  renderer.dispose();
+});
+
+
+it('previews a branch without saving it and restores history when focus leaves the composer', async () => {
+  const messagesEl = document.body.createDiv();
+  const inputComposerEl = document.body.createDiv();
+  const inputEl = inputComposerEl.createEl('textarea');
+  const send = inputComposerEl.createEl('button', { text: 'Send', attr: { type: 'button' } });
+  const outside = document.body.createEl('button', { text: 'Outside', attr: { type: 'button' } });
+  const state = new ChatState();
+  state.currentConversationId = 'pi-chat';
+  const prompt: ChatMessage = { id: 'second', role: 'user', content: 'Try B', timestamp: 2,
+    userMessageId: 'native-b', treeBranches: ['native-b'] };
+  const history = [{ ...messages[0], treeBranches: ['native-u1'] }, prompt, messages[2]];
+  state.messages = history;
+  const navigateConversationBranch = jest.fn().mockResolvedValue({ status: 'committed', messages: [history[0]] });
+  const coordinator = { navigateConversationBranch };
+  const plugin = { app: {}, settings: {}, updateConversation: jest.fn() };
+  const renderer: MessageRenderer = new MessageRenderer(plugin as any,
+    { registerDomEvent: jest.fn(), register: jest.fn(), addChild: jest.fn() } as any,
+    messagesEl, undefined, undefined, () => ProviderRegistry.getCapabilities('pi'),
+    { navigate: (id, target) => controller.navigateBranch(id, target), isBusy: () => state.isRewinding });
+  const controller = new ConversationController({ plugin, state, renderer,
+    ...createConversationPorts({ state, getInputEl: () => inputEl, getImageContextManager: () => null }),
+    getInputEl: () => inputEl, getMessagesEl: () => messagesEl,
+    getWelcomeEl: () => null, setWelcomeEl: jest.fn(),
+    getImageContextManager: () => null,
+    getExecutionCoordinator: () => coordinator,
+  } as any);
+  const cleanup: (() => void)[] = [];
+  buildTabRuntimeInputBindings({ dom: { messagesEl, inputEl, inputComposerEl }, state } as any,
+    { navigationSidebar: { setOnScrollIntent: jest.fn() }, composerDropdown: { handleInputChange: jest.fn() } } as any,
+    { conversationController: controller, sideChatController: { handleComposerInput: jest.fn() } } as any,
+    { plugin, registerCleanup: (_name: string, fn: () => void) => cleanup.push(fn) } as any,
+    { requirePublished: () => ({ lifecycleState: 'warm', session: { claimUserOwnership: jest.fn() } }) } as any);
+  renderer.renderMessages(history, () => 'Hello');
+  fireEvent.click(within(messagesEl).getByRole('button', { name: 'Branch from this prompt' }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(inputEl.value).toBe('Try B');
+  expect(messagesEl.querySelector('[data-message-id="second"]')).toBeNull();
+  expect(state.messages).toEqual(history);
+  expect(navigateConversationBranch).not.toHaveBeenCalled();
+  await controller.save();
+  expect(plugin.updateConversation).toHaveBeenLastCalledWith('pi-chat', expect.objectContaining({ messages: history }));
+  send.focus();
+  expect(inputEl.value).toBe('Try B');
+  inputEl.focus();
+  inputEl.value = 'Edited draft';
+  outside.focus();
+  expect(inputEl.value).toBe('');
+  expect(messagesEl.querySelector('[data-message-id="second"]')).not.toBeNull();
+  expect(messagesEl.querySelector('[data-message-id="a2"]')).not.toBeNull();
+  expect(navigateConversationBranch).not.toHaveBeenCalled();
+  for (const dispose of cleanup) dispose();
   renderer.dispose();
 });

@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import {
+  ExecutionEventQueue,
   type ProviderExecutionErrorCategory,
   type ProviderExecutionEvent,
   type ProviderExecutionRequest,
@@ -46,6 +47,7 @@ import {
 import { getCodexModelOptions } from '../modelOptions';
 import {
   findCodexModel,
+  getCodexReasoningEffortOptions,
   resolveCodexModelServiceTier,
   resolveCodexReasoningEffort,
 } from '../models';
@@ -56,6 +58,7 @@ import {
   resolveCodexAppServerLaunchSpec,
 } from '../runtime/codexAppServerSupport';
 import type {
+  ItemCompletedNotification,
   SandboxPolicy,
   ServerRequestResolvedNotification,
   ThreadCompactStartResult,
@@ -77,9 +80,9 @@ import { assertCodexModelAvailable } from '../runtime/CodexModelAvailability';
 import { CodexNotificationRouter } from '../runtime/CodexNotificationRouter';
 import { createCodexPluginTools } from '../runtime/CodexPluginTools';
 import {
-  CodexRpcResponseError,
-  CodexRpcTransport,
-} from '../runtime/CodexRpcTransport';
+  CodexRPCResponseError,
+  CodexRPCTransport,
+} from '../runtime/CodexRPCTransport';
 import {
   type CodexRuntimeContext,
   createCodexRuntimeContext,
@@ -101,6 +104,7 @@ import type {
 } from '../types';
 import { adaptCodexStreamChunk } from './CodexExecutionEventAdapter';
 import { CodexExecutionServerRequestRouter } from './CodexExecutionServerRequestRouter';
+import { CodexSubagentTracker } from './CodexSubagentTracker';
 
 const PASSIVE_INSTRUCTIONS =
   'Do not invoke tools. Complete the request only from the supplied input and context.';
@@ -160,7 +164,7 @@ class CodexExecutionRun implements ProviderExecutionRun {
   readonly turnId = randomUUID();
   readonly events: AsyncIterable<ProviderExecutionEvent>;
 
-  private readonly queue = new AsyncEventQueue<ProviderExecutionEvent>(
+  private readonly queue = new ExecutionEventQueue<ProviderExecutionEvent>(
     () => this.cancel(),
   );
   private sequence = 0;
@@ -231,52 +235,6 @@ class CodexExecutionRun implements ProviderExecutionRun {
   }
 }
 
-class AsyncEventQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
-  private readonly values: T[] = [];
-  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
-  private closed = false;
-
-  constructor(private readonly onEarlyReturn: () => void) {}
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return this;
-  }
-
-  next(): Promise<IteratorResult<T>> {
-    const value = this.values.shift();
-    if (value !== undefined) {
-      return Promise.resolve({ done: false, value });
-    }
-    if (this.closed) {
-      return Promise.resolve({ done: true, value: undefined });
-    }
-    return new Promise(resolve => this.waiters.push(resolve));
-  }
-
-  return(): Promise<IteratorResult<T>> {
-    if (!this.closed) this.onEarlyReturn();
-    return Promise.resolve({ done: true, value: undefined });
-  }
-
-  push(value: T): void {
-    if (this.closed) return;
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter({ done: false, value });
-      return;
-    }
-    this.values.push(value);
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined });
-    }
-  }
-}
-
 export class CodexExecutionSession
   implements ProviderExecutionSession, SteerableExecutionSession {
   readonly providerId = 'codex' as const;
@@ -289,7 +247,7 @@ export class CodexExecutionSession
   private readonly activeInputBundles = new Set<CodexInputBundle>();
 
   private process: CodexAppServerProcess | null = null;
-  private transport: CodexRpcTransport | null = null;
+  private transport: CodexRPCTransport | null = null;
   private launchSpec: CodexLaunchSpec | null = null;
   private runtimeContext: CodexRuntimeContext | null = null;
   private dynamicToolRegistry = new CodexDynamicToolRegistry();
@@ -304,6 +262,18 @@ export class CodexExecutionSession
   private completionRecovery: CompletionRecovery | null = null;
   private disposed = false;
   private lifecycleGeneration = 0;
+
+  private sessionSequence = 0;
+  private readonly subagents = new CodexSubagentTracker(
+    subagent => this.#emitSessionEvent({ type: 'subagent_updated', subagent }),
+    async threadId => {
+      if (!this.transport) throw new Error('Codex transport is unavailable');
+      return (await this.transport.request<ThreadReadResult>('thread/read', { threadId, includeTurns: true }, 5_000)).thread;
+    },
+    () => this.#resolveTargetWorkingDirectory(),
+  );
+
+  hasBackgroundWork(): boolean { return this.subagents.hasBackgroundWork(); }
 
   private threadId: string | null;
   private loadedThreadId: string | null = null;
@@ -428,7 +398,7 @@ export class CodexExecutionSession
       return true;
     } catch (error) {
       if (
-        error instanceof CodexRpcResponseError
+        error instanceof CodexRPCResponseError
         && JSON_RPC_PRE_HANDOFF_REJECTION_CODES.has(error.code)
       ) {
         return false;
@@ -555,7 +525,6 @@ export class CodexExecutionSession
 
       this.notificationRouter = new CodexNotificationRouter(
         chunk => this.handleStreamChunk(run, chunk),
-        undefined,
         this.#resolveTargetWorkingDirectory(),
       );
       this.notificationRouter.beginTurn();
@@ -660,7 +629,7 @@ export class CodexExecutionSession
       if (this.disposed || generation !== this.lifecycleGeneration) {
         throw new Error('Codex execution session has been disposed.');
       }
-      const transport = new CodexRpcTransport(process);
+      const transport = new CodexRPCTransport(process);
       this.transport = transport;
       transport.start();
       if (this.disposed || generation !== this.lifecycleGeneration) {
@@ -704,7 +673,7 @@ export class CodexExecutionSession
   }
 
   #wireTransportHandlers(
-    transport: CodexRpcTransport,
+    transport: CodexRPCTransport,
     generation: number,
   ): void {
     const notificationMethods = [
@@ -766,7 +735,7 @@ export class CodexExecutionSession
   }
 
   #isTransportCurrent(
-    transport: CodexRpcTransport,
+    transport: CodexRPCTransport,
     generation: number,
   ): boolean {
     return (
@@ -786,6 +755,24 @@ export class CodexExecutionSession
       );
       return;
     }
+
+    if (method === 'item/completed') {
+      const notification = params as ItemCompletedNotification;
+      if (notification.threadId === this.threadId && notification.item.type === 'subAgentActivity') {
+        this.subagents.activity(notification.item, notification.turnId);
+      }
+    }
+    if (method === 'turn/started') {
+      const started = params as TurnStartedNotification;
+      if (this.subagents.turnStarted(started.threadId, started.turn.id)) return;
+    }
+    if (method === 'turn/completed') {
+      const completed = params as TurnCompletedNotification;
+      if (this.subagents.turnCompleted(completed.threadId, completed.turn)) return;
+    }
+
+    const childScope = extractNotificationScope(method, params);
+    if (childScope && this.subagents.handleNotification(childScope.threadId, childScope.turnId, method, params)) return;
 
     const run = this.activeRun;
     if (!run || run.isTerminal || run.isCancellationRequested) return;
@@ -1167,6 +1154,7 @@ export class CodexExecutionSession
             : {}),
         },
       );
+      this.subagents.seed(result.thread);
       this.loadedThreadId = result.thread.id;
       this.loadedThreadBaseInstructions = baseInstructions;
       return {
@@ -1272,7 +1260,7 @@ export class CodexExecutionSession
     baseInstructions: string,
     persistExtendedHistory: boolean | undefined,
     generation: number,
-    transport: CodexRpcTransport,
+    transport: CodexRPCTransport,
   ): Promise<CodexEnsuredThread> {
     const fork = this.pendingFork;
     if (!fork) throw new Error('Codex fork source is not available.');
@@ -1371,7 +1359,7 @@ export class CodexExecutionSession
   #resolveForkIdentity(
     run: CodexExecutionRun,
     fork: NonNullable<CodexProviderState['forkSource']>,
-    transport: CodexRpcTransport,
+    transport: CodexRPCTransport,
     overrides: Record<string, unknown> = {},
   ): Promise<CodexPendingForkTarget> {
     if (this.forkIdentityPromise) return this.forkIdentityPromise;
@@ -1647,6 +1635,7 @@ export class CodexExecutionSession
 
     this.launchSpec = null;
     this.runtimeContext = null;
+    this.subagents.clear();
     this.loadedThreadId = null;
     this.loadedThreadBaseInstructions = null;
     this.dynamicToolRegistry = new CodexDynamicToolRegistry();
@@ -1694,21 +1683,16 @@ export class CodexExecutionSession
   }
 
   #emitSessionState(): void {
-    const event: ProviderSessionEvent = {
-      type: 'session_state_changed',
-      scope: {
-        kind: 'session',
-        sessionInstanceId: this.sessionInstanceId,
-        sequence: this.snapshot.revision,
-      },
-      snapshot: this.snapshot,
-    };
+    this.#emitSessionEvent({ type: 'session_state_changed', snapshot: this.snapshot });
+  }
+
+  #emitSessionEvent(event: Omit<Extract<ProviderSessionEvent, { type: 'session_state_changed' }>, 'scope'>
+    | Omit<Extract<ProviderSessionEvent, { type: 'subagent_updated' }>, 'scope'>): void {
+    const scoped = { ...event, scope: {
+      kind: 'session' as const, sessionInstanceId: this.sessionInstanceId, sequence: ++this.sessionSequence,
+    } };
     for (const listener of this.sessionEventListeners) {
-      try {
-        listener(event);
-      } catch {
-        // Session listeners cannot interfere with native lifecycle cleanup.
-      }
+      try { listener(scoped); } catch { /* Listeners cannot interrupt native event handling. */ }
     }
   }
 
@@ -1846,7 +1830,8 @@ export class CodexExecutionSession
     request: ProviderExecutionRequest,
     settings: Record<string, unknown>,
     model: string,
-  ): string {
+  ): string | null {
+    if (request.configuration.reasoning === null) return null;
     const codexSettings = getCodexProviderSettings(settings);
     const modelMetadata = findCodexModel(codexSettings.discoveredModels, model);
     const effort = resolveCodexReasoningEffort(
@@ -1855,6 +1840,11 @@ export class CodexExecutionSession
       normalizeString(request.configuration.reasoning)
         ?? normalizeString(settings.effortLevel),
     );
+    if (request.configuration.reasoning !== undefined && (effort !== request.configuration.reasoning
+      || (modelMetadata && !getCodexReasoningEffortOptions(modelMetadata, codexSettings.enableUltraEffort)
+        .some(option => option.value === request.configuration.reasoning)))) {
+      throw new Error(`Codex model "${model}" does not support reasoning effort "${request.configuration.reasoning}".`);
+    }
     if (!effort) {
       throw new Error(`Codex model "${model}" has no enabled reasoning efforts.`);
     }

@@ -1,20 +1,15 @@
+import { getInstallationKey, getLegacyDeviceSettingsKey } from '@/core/device/InstallationKey';
+
 import {
   CLAUDIAN_SETTINGS_PATH,
-  LEGACY_CLAUDIAN_SETTINGS_PATH,
 } from '../../core/bootstrap/storagePaths';
-import {
-  DEFAULT_COLLAB_PROJECTS_FOLDER,
-  parseCollabProjectsFolder,
-} from '../../core/collab/CollabProjectsFolder';
 import { normalizeLinkedContentPath } from '../../core/path/LinkedContentPath';
 import {
-  normalizeHiddenCommandList,
   normalizeHiddenProviderCommands,
 } from '../../core/providers/commands/hiddenCommands';
+import { decodeProviderModelSelectionId, toProviderRuntimeModelId } from '../../core/providers/modelSelection';
 import {
-  getSharedEnvironmentVariables,
-  inferEnvironmentSnippetScope,
-  resolveEnvironmentSnippetScope,
+  getSharedEnvironmentVariables
 } from '../../core/providers/providerEnvironment';
 import { ProviderRegistry } from '../../core/providers/ProviderRegistry';
 import type { VaultFileAdapter } from '../../core/storage/VaultFileAdapter';
@@ -26,31 +21,19 @@ import {
   type DualPaneSide,
   type EnvironmentScope,
   type EnvSnippet,
-  type HiddenProviderCommands,
   type ProviderConfigMap,
   type SessionManagerOrganization,
   type StoredChatModelSelection,
 } from '../../core/types/settings';
-import { getHostnameKey, getLegacyDeviceSettingsKey } from '../../utils/env';
 import { DEFAULT_CLAUDIAN_SETTINGS } from './defaultSettings';
 
 export {
-  CLAUDIAN_SETTINGS_PATH,
-  LEGACY_CLAUDIAN_SETTINGS_PATH,
+  CLAUDIAN_SETTINGS_PATH
 };
 
 export type StoredClaudianSettings = ClaudianSettings;
 
-const LEGACY_STRIPPED_SHARED_SETTING_FIELDS = [
-  'activeConversationId',
-  'show1MModel',
-  'hiddenSlashCommands',
-  'slashCommands',
-  'allowExternalAccess',
-  'allowedExportPaths',
-  'enableBlocklist',
-  'blockedCommands',
-  'openInMainTab',
+const RETIRED_SHARED_SETTING_FIELDS = [
   'pinnedLinkedNotePaths',
   'enableFilePane',
   'persistentExternalContextPaths',
@@ -63,16 +46,9 @@ function getProviderSettingsAdapters() {
   }));
 }
 
-function getLegacyTopLevelProviderFields(): string[] {
-  return getProviderSettingsAdapters().flatMap(({ adapter }) => adapter.legacyTopLevelFields ?? []);
-}
-
-function stripLegacyFields(settings: Record<string, unknown>): Record<string, unknown> {
+function stripRetiredSharedFields(settings: Record<string, unknown>): Record<string, unknown> {
   const cleaned = { ...settings };
-  for (const key of [
-    ...LEGACY_STRIPPED_SHARED_SETTING_FIELDS,
-    ...getLegacyTopLevelProviderFields(),
-  ]) {
+  for (const key of RETIRED_SHARED_SETTING_FIELDS) {
     delete cleaned[key];
   }
   return cleaned;
@@ -81,32 +57,6 @@ function stripLegacyFields(settings: Record<string, unknown>): Record<string, un
 function isChatViewPlacement(value: unknown): value is ChatViewPlacement {
   return typeof value === 'string'
     && (CHAT_VIEW_PLACEMENTS as readonly string[]).includes(value);
-}
-
-function normalizeChatViewPlacement(
-  value: unknown,
-  legacyOpenInMainTab: unknown,
-): ChatViewPlacement {
-  if (isChatViewPlacement(value)) {
-    return value;
-  }
-
-  if (typeof legacyOpenInMainTab === 'boolean') {
-    return legacyOpenInMainTab ? 'main-tab' : 'right-sidebar';
-  }
-
-  return DEFAULT_CLAUDIAN_SETTINGS.chatViewPlacement;
-}
-
-function shouldPersistChatViewPlacementMigration(
-  stored: Record<string, unknown>,
-  normalized: ChatViewPlacement,
-): boolean {
-  return 'openInMainTab' in stored
-    || (
-      'chatViewPlacement' in stored
-      && stored.chatViewPlacement !== normalized
-    );
 }
 
 function normalizeEnableDualPane(value: unknown): boolean {
@@ -126,17 +76,6 @@ function normalizeRestoreTabsOnStartup(value: unknown): boolean {
   return typeof value === 'boolean'
     ? value
     : DEFAULT_CLAUDIAN_SETTINGS.restoreTabsOnStartup;
-}
-
-function normalizeCollabGitPath(value: unknown): string {
-  if (typeof value !== 'string') return DEFAULT_CLAUDIAN_SETTINGS.collabGitPath;
-  const trimmed = value.trim();
-  return trimmed.length <= 4_096
-    && !trimmed.includes('\u0000')
-    && !trimmed.includes('\r')
-    && !trimmed.includes('\n')
-    ? trimmed
-    : DEFAULT_CLAUDIAN_SETTINGS.collabGitPath;
 }
 
 function normalizeLlmForZoteroCacheRoot(value: unknown): string {
@@ -167,12 +106,6 @@ function normalizeEnableZoteroSupport(value: unknown): boolean {
     : DEFAULT_CLAUDIAN_SETTINGS.enableZoteroSupport !== false;
 }
 
-function normalizeCollabEnabled(value: unknown): boolean {
-  return typeof value === 'boolean'
-    ? value
-    : DEFAULT_CLAUDIAN_SETTINGS.collabEnabled;
-}
-
 function normalizeSessionManagerOrganization(
   value: unknown,
 ): SessionManagerOrganization {
@@ -194,12 +127,6 @@ function normalizePinnedLinkedContentPaths(value: unknown): string[] {
     normalizedPaths.push(path);
   }
   return normalizedPaths;
-}
-
-function normalizeCollabProjectsFolder(value: unknown): string {
-  if (typeof value !== 'string') return DEFAULT_COLLAB_PROJECTS_FOLDER;
-  const parsed = parseCollabProjectsFolder(value);
-  return parsed.ok ? parsed.value : DEFAULT_COLLAB_PROJECTS_FOLDER;
 }
 
 function shouldPersistChatViewNormalization(
@@ -237,7 +164,7 @@ function normalizeProviderConfigs(value: unknown): ProviderConfigMap {
 function migrateCurrentDeviceProviderConfigKeys(
   providerConfigs: ProviderConfigMap,
 ): { changed: boolean; providerConfigs: ProviderConfigMap } {
-  const currentKey = getHostnameKey();
+  const currentKey = getInstallationKey();
   const legacyKey = getLegacyDeviceSettingsKey();
   if (!legacyKey || legacyKey === currentKey) {
     return { changed: false, providerConfigs };
@@ -307,6 +234,50 @@ function projectPersistableProviderConfigs(settings: Record<string, unknown>): P
     providerConfigs[providerId] = persisted;
   }
   return providerConfigs;
+}
+
+/** Drop saved model-dependent projections when their model was explicitly deselected. */
+function pruneDeselectedProviderProjections(settings: Record<string, unknown>): Record<string, unknown> {
+  const cleaned = { ...settings };
+  const configs = normalizeProviderConfigs(settings.providerConfigs);
+  const contextLimitMatchers: Array<(model: string) => boolean> = [];
+  for (const providerId of ProviderRegistry.getRegisteredProviderIds()) {
+    const selected = configs[providerId]?.visibleModels;
+    if (!Array.isArray(selected)) continue;
+    const ui = ProviderRegistry.getModelPolicy(providerId);
+    const normalize = (id: string) => toProviderRuntimeModelId(providerId, ui.normalizeModelVariant(
+      ui.normalizeAvailableModelSelection?.(id, settings) ?? id,
+      settings,
+    ));
+    const normalizeContextModel = (id: string) => {
+      const normalized = normalize(id);
+      return normalized.toLowerCase();
+    };
+    const selectedContextModels = new Set(selected.filter((id): id is string => typeof id === 'string')
+      .map(normalizeContextModel));
+    contextLimitMatchers.push(model => {
+      const owner = decodeProviderModelSelectionId(model)?.providerId;
+      return (!owner || owner === providerId) && selectedContextModels.has(normalizeContextModel(model));
+    });
+    const savedModels = settings.savedProviderModel as Record<string, unknown> | undefined;
+    const model = savedModels?.[providerId];
+    if (typeof model !== 'string') continue;
+    if (selected.some(id => typeof id === 'string' && normalize(id) === normalize(model))) continue;
+    for (const key of ['savedProviderModel', 'savedProviderEffort', 'savedProviderThinkingBudget', 'savedProviderServiceTier']) {
+      const values = cleaned[key];
+      if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+      const remaining = { ...values } as Record<string, unknown>;
+      delete remaining[providerId];
+      cleaned[key] = remaining;
+    }
+  }
+  const limits = settings.customContextLimits;
+  if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+    const entries = Object.entries(limits);
+    const selected = entries.filter(([model]) => contextLimitMatchers.some(matches => matches(model)));
+    if (selected.length !== entries.length) cleaned.customContextLimits = Object.fromEntries(selected);
+  }
+  return cleaned;
 }
 
 function hasHostScopedProviderConfigNormalization(
@@ -409,37 +380,13 @@ function normalizeEnvSnippets(value: unknown): EnvSnippet[] {
       name: candidate.name,
       description: candidate.description,
       envVars: candidate.envVars,
-      scope: resolveEnvironmentSnippetScope(
-        candidate.envVars,
-        isEnvironmentScope(candidate.scope)
-          ? candidate.scope
-          : inferEnvironmentSnippetScope(candidate.envVars),
-      ),
+      scope: isEnvironmentScope(candidate.scope) ? candidate.scope : undefined,
       contextLimits: normalizeContextLimits(candidate.contextLimits),
       modelAliases,
     });
   }
 
   return snippets;
-}
-
-function hasLegacyTopLevelProviderFields(stored: Record<string, unknown>): boolean {
-  return getLegacyTopLevelProviderFields().some((key) => key in stored);
-}
-
-function mergeLegacyClaudeHiddenCommands(
-  hiddenProviderCommands: HiddenProviderCommands,
-  legacyHiddenSlashCommands: unknown,
-): HiddenProviderCommands {
-  const legacyCommands = normalizeHiddenCommandList(legacyHiddenSlashCommands);
-  if (legacyCommands.length === 0 || hiddenProviderCommands.claude) {
-    return hiddenProviderCommands;
-  }
-
-  return {
-    ...hiddenProviderCommands,
-    claude: legacyCommands,
-  };
 }
 
 function trimStoredString(value: unknown): string {
@@ -494,12 +441,11 @@ export class ClaudianSettingsStorage {
   constructor(private adapter: VaultFileAdapter) {}
 
   async load(): Promise<StoredClaudianSettings> {
-    const settingsPath = await this.#getLoadPath();
-    if (!settingsPath) {
+    if (!await this.adapter.exists(CLAUDIAN_SETTINGS_PATH)) {
       return this.#getDefaults();
     }
 
-    const content = await this.adapter.read(settingsPath);
+    const content = await this.adapter.read(CLAUDIAN_SETTINGS_PATH);
     const stored = JSON.parse(content) as Record<string, unknown>;
     const hasStoredChatModelSelection = Object.prototype.hasOwnProperty.call(
       stored,
@@ -510,10 +456,7 @@ export class ClaudianSettingsStorage {
       : migrateLegacyChatModelSelection(stored);
     const didNormalizeChatModelSelection = !hasStoredChatModelSelection
       || JSON.stringify(lastSelectedChatModel) !== JSON.stringify(stored.lastSelectedChatModel);
-    const hiddenProviderCommands = mergeLegacyClaudeHiddenCommands(
-      normalizeHiddenProviderCommands(stored.hiddenProviderCommands),
-      stored.hiddenSlashCommands,
-    );
+    const hiddenProviderCommands = normalizeHiddenProviderCommands(stored.hiddenProviderCommands);
     const envSnippets = normalizeEnvSnippets(stored.envSnippets);
     const {
       changed: didStripRuntimeProviderConfig,
@@ -523,18 +466,14 @@ export class ClaudianSettingsStorage {
       changed: didMigrateCurrentDeviceProviderConfigs,
       providerConfigs,
     } = migrateCurrentDeviceProviderConfigKeys(projectedProviderConfigs);
-    const chatViewPlacement = normalizeChatViewPlacement(
-      stored.chatViewPlacement,
-      stored.openInMainTab,
-    );
+    const chatViewPlacement = isChatViewPlacement(stored.chatViewPlacement)
+      ? stored.chatViewPlacement
+      : DEFAULT_CLAUDIAN_SETTINGS.chatViewPlacement;
     const enableDualPane = normalizeEnableDualPane(stored.enableDualPane);
     const dualPaneSide = normalizeDualPaneSide(stored.dualPaneSide);
     const restoreTabsOnStartup = normalizeRestoreTabsOnStartup(
       stored.restoreTabsOnStartup,
     );
-    const collabEnabled = normalizeCollabEnabled(stored.collabEnabled);
-    const collabProjectsFolder = normalizeCollabProjectsFolder(stored.collabProjectsFolder);
-    const collabGitPath = normalizeCollabGitPath(stored.collabGitPath);
     const llmForZoteroCacheRoot = normalizeLlmForZoteroCacheRoot(stored.llmForZoteroCacheRoot);
     const zoteroDataDirectory = normalizeZoteroDataDirectory(stored.zoteroDataDirectory);
     const enableZoteroSupport = normalizeEnableZoteroSupport(stored.enableZoteroSupport);
@@ -550,18 +489,18 @@ export class ClaudianSettingsStorage {
     const sessionManagerOrganization = normalizeSessionManagerOrganization(
       stored.sessionManagerOrganization,
     );
-    const legacyProviderSettings = {
+    const normalizedProviderSettings = {
       ...stored,
       hiddenProviderCommands,
       providerConfigs,
     };
-    const storedWithoutLegacy = stripLegacyFields({
-      ...legacyProviderSettings,
+    const storedSharedSettings = stripRetiredSharedFields({
+      ...normalizedProviderSettings,
     });
 
-    const legacyNormalized = {
-      ...storedWithoutLegacy,
-      sharedEnvironmentVariables: getSharedEnvironmentVariables(legacyProviderSettings),
+    const normalizedSettings = {
+      ...storedSharedSettings,
+      sharedEnvironmentVariables: getSharedEnvironmentVariables(normalizedProviderSettings),
       envSnippets,
       hiddenProviderCommands,
       providerConfigs,
@@ -569,9 +508,6 @@ export class ClaudianSettingsStorage {
       enableDualPane,
       dualPaneSide,
       restoreTabsOnStartup,
-      collabEnabled,
-      collabProjectsFolder,
-      collabGitPath,
       llmForZoteroCacheRoot,
       zoteroDataDirectory,
       enableZoteroSupport,
@@ -582,53 +518,35 @@ export class ClaudianSettingsStorage {
 
     const merged = {
       ...this.#getDefaults(),
-      ...legacyNormalized,
+      ...normalizedSettings,
     };
 
     let didNormalizeProviderSettings = false;
     for (const { adapter } of getProviderSettingsAdapters()) {
       didNormalizeProviderSettings = adapter.normalizeStored(
         merged,
-        legacyProviderSettings,
+        normalizedProviderSettings,
       ) || didNormalizeProviderSettings;
     }
+    const pruned = pruneDeselectedProviderProjections(merged);
+    const didPruneDeselectedModels = pruned.savedProviderModel !== merged.savedProviderModel
+      || pruned.customContextLimits !== merged.customContextLimits;
+    Object.assign(merged, pruned);
     const didNormalizeHostScopedProviderConfigs = hasHostScopedProviderConfigNormalization(
       providerConfigs,
       merged.providerConfigs,
     );
 
     if (
-      settingsPath !== CLAUDIAN_SETTINGS_PATH
-      || (
-      hasLegacyTopLevelProviderFields(stored)
-      || 'show1MModel' in stored
-      || 'slashCommands' in stored
-      || 'hiddenSlashCommands' in stored
-      || 'activeConversationId' in stored
-      || 'allowExternalAccess' in stored
-      || 'allowedExportPaths' in stored
-      || 'persistentExternalContextPaths' in stored
-      || 'enableBlocklist' in stored
-      || 'blockedCommands' in stored
-      || shouldPersistChatViewPlacementMigration(stored, chatViewPlacement)
+      'persistentExternalContextPaths' in stored
+      || ('chatViewPlacement' in stored && stored.chatViewPlacement !== chatViewPlacement)
       || shouldPersistChatViewNormalization(
         stored,
         enableDualPane,
         dualPaneSide,
         restoreTabsOnStartup,
       )
-      || (
-        'collabEnabled' in stored
-        && stored.collabEnabled !== collabEnabled
-      )
-      || (
-        'collabProjectsFolder' in stored
-        && stored.collabProjectsFolder !== collabProjectsFolder
-      )
-      || (
-        'collabGitPath' in stored
-        && stored.collabGitPath !== collabGitPath
-      )
+
       || (
         'enableZoteroSupport' in stored
         && stored.enableZoteroSupport !== enableZoteroSupport
@@ -649,7 +567,7 @@ export class ClaudianSettingsStorage {
       || didMigrateCurrentDeviceProviderConfigs
       || didNormalizeHostScopedProviderConfigs
       || didNormalizeChatModelSelection
-      )
+      || didPruneDeselectedModels
     ) {
       await this.save(merged);
     }
@@ -660,7 +578,7 @@ export class ClaudianSettingsStorage {
   async save(settings: StoredClaudianSettings): Promise<void> {
     const providerConfigs = projectPersistableProviderConfigs(settings);
     const content = JSON.stringify(
-      stripLegacyFields({
+      stripRetiredSharedFields(pruneDeselectedProviderProjections({
         ...settings,
         providerConfigs,
         sessionManagerOrganization: normalizeSessionManagerOrganization(
@@ -669,46 +587,15 @@ export class ClaudianSettingsStorage {
         pinnedLinkedContentPaths: normalizePinnedLinkedContentPaths(
           settings.pinnedLinkedContentPaths,
         ),
-      }),
+      })),
       null,
       2,
     );
     await this.adapter.write(CLAUDIAN_SETTINGS_PATH, content);
-    await this.#deleteLegacyFileIfPresent();
-  }
-
-  async exists(): Promise<boolean> {
-    if (await this.adapter.exists(CLAUDIAN_SETTINGS_PATH)) {
-      return true;
-    }
-
-    return this.adapter.exists(LEGACY_CLAUDIAN_SETTINGS_PATH);
-  }
-
-  async update(updates: Partial<StoredClaudianSettings>): Promise<void> {
-    const current = await this.load();
-    await this.save({ ...current, ...updates });
   }
 
   #getDefaults(): StoredClaudianSettings {
     return DEFAULT_CLAUDIAN_SETTINGS;
   }
 
-  async #getLoadPath(): Promise<string | null> {
-    if (await this.adapter.exists(CLAUDIAN_SETTINGS_PATH)) {
-      return CLAUDIAN_SETTINGS_PATH;
-    }
-
-    if (await this.adapter.exists(LEGACY_CLAUDIAN_SETTINGS_PATH)) {
-      return LEGACY_CLAUDIAN_SETTINGS_PATH;
-    }
-
-    return null;
-  }
-
-  async #deleteLegacyFileIfPresent(): Promise<void> {
-    if (await this.adapter.exists(LEGACY_CLAUDIAN_SETTINGS_PATH)) {
-      await this.adapter.delete(LEGACY_CLAUDIAN_SETTINGS_PATH);
-    }
-  }
 }

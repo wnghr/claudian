@@ -1,7 +1,7 @@
 import '@/providers';
 
+import { FakeAuxiliaryBackend, waitFor } from '@test/helpers/core/auxiliary/AuxiliaryExecutionTestHarness';
 import { modelCatalogCases } from '@test/helpers/providerModelCatalogs';
-import { FakeAuxiliaryBackend, waitFor } from '@test/unit/core/auxiliary/AuxiliaryExecutionTestHarness';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -105,15 +105,6 @@ it('routes plain and qualified Claude haiku selections to the same model', async
     expect(ProviderRegistry.resolveTitleGenerationSelection(settings)?.providerId).toBe('claude');
     expect(await generateTitleModel(settings, 'claude')).toBe('haiku');
   }
-});
-
-it('passes a selected OpenCode title model through the execution availability guard', () => {
-  const settings: Record<string, unknown> = {};
-  modelCatalogCases.find(provider => provider.id === 'opencode')!.populate(settings);
-  settings.titleGenerationModel = 'opencode:anthropic/selected';
-  const selection = ProviderRegistry.resolveTitleGenerationSelection(settings)!;
-  const resolved = selection.model;
-  expect(() => assertOpencodeModelAvailable(settings, resolved)).not.toThrow();
 });
 
 it.each(titleCases)('$id preserves omitted-model execution fallback without accepting an explicit missing model', ({ id, populate, selected }) => {

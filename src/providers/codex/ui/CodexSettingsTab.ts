@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import { Setting } from 'obsidian';
 
-import type { ProviderCliResolver } from '@/core/providers/types';
+import type { ProviderCLIResolver } from '@/core/providers/types';
 import { OPENAI_PROVIDER_ICON } from '@/shared/icons';
-import { renderCliInstallationSetting } from '@/shared/settings/CliInstallationSetting';
+import { renderCLIInstallationSetting } from '@/shared/settings/CLIInstallationSetting';
 
 import type { ProviderModelCatalog } from '../../../core/providers/models/ProviderModelCatalog';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
@@ -16,21 +16,20 @@ import {
   renderProviderModelEnablementWarning,
 } from '../../../shared/settings/ProviderModelEnablementWarning';
 import { renderProviderModelsSection } from '../../../shared/settings/ProviderModelsSection';
-import { getHostnameKey } from '../../../utils/env';
-import { normalizeConfiguredCliPath, stripSurroundingQuotes } from '../../../utils/path';
+import { normalizeConfiguredCLIPath, stripSurroundingQuotes } from '../../../utils/path';
 import { getCodexModelOptions } from '../modelOptions';
-import { isWindowsStyleCliReference } from '../runtime/CodexBinaryLocator';
-import { inspectCodexInstallation } from '../runtime/CodexCliInstallation';
+import { isWindowsStyleCLIReference } from '../runtime/CodexBinaryLocator';
+import { inspectCodexInstallation } from '../runtime/CodexCLIInstallation';
 import { getCodexProviderSettings, updateCodexProviderSettings } from '../settings';
 
 export function createCodexSettingsTabRenderer(
-  codexWorkspace: { cliResolver: Pick<ProviderCliResolver, 'reset'>; modelCatalog: ProviderModelCatalog; },
+  codexWorkspace: { cliResolver: Pick<ProviderCLIResolver, 'reset'>; modelCatalog: ProviderModelCatalog; },
 ): ProviderSettingsTabRenderer {
   return {
     render(container, context) {
       const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
       const codexSettings = getCodexProviderSettings(settingsBag);
-      const hostnameKey = getHostnameKey();
+      const hostnameKey = context.plugin.storage.installationKey;
       const isWindowsHost = process.platform === 'win32';
       let installationMethod = codexSettings.installationMethod;
 
@@ -127,13 +126,13 @@ export function createCodexSettingsTabRenderer(
         if (!trimmed) return null;
 
         if (!shouldValidateCliPathAsFile()) {
-          if (isWindowsStyleCliReference(stripSurroundingQuotes(trimmed))) {
+          if (isWindowsStyleCLIReference(stripSurroundingQuotes(trimmed))) {
             return t('settings.codex.cliPath.validation.wslWindowsPath');
           }
           return null;
         }
 
-        const expandedPath = normalizeConfiguredCliPath(trimmed);
+        const expandedPath = normalizeConfiguredCLIPath(trimmed);
 
         if (!fs.existsSync(expandedPath)) {
           return t('settings.cliPath.validation.notExist');
@@ -148,7 +147,7 @@ export function createCodexSettingsTabRenderer(
       let wslDistroSettingEl: HTMLElement | null = null;
       let wslDistroInputEl: HTMLInputElement | null = null;
 
-      const cliPathControl = renderCliInstallationSetting({
+      const cliPathControl = renderCLIInstallationSetting({
         cliName: 'Codex CLI',
         icon: OPENAI_PROVIDER_ICON,
         inspect: () => inspectCodexInstallation(context.plugin),

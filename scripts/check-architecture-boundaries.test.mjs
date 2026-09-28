@@ -13,7 +13,7 @@ import {
   inspectEvaluationDuration,
   inspectPluginArtifactReferences,
   mainBudgetBytes,
-  preCollabReferenceMainBytes,
+  referenceMainBytes,
   preStep11BundleHealthBaselineBytes,
 } from './check-startup-performance.mjs';
 import {
@@ -46,59 +46,6 @@ function findMatches(roots, pattern) {
     }
   }
   return matches;
-}
-
-const step12ProjectMembershipOperations = Object.freeze([
-  'createCloudProject',
-  'createProjectInvitation',
-  'listProjectInvitations',
-  'revokeProjectInvitation',
-  'joinCloudProject',
-  'listProjectMembers',
-  'reissueTransferredMembershipClaim',
-  'revokeTransferredMembershipClaim',
-  'createManagerResponsibilityOffer',
-  'listCurrentManagerResponsibilityOffers',
-  'getManagerResponsibilityOffer',
-  'acknowledgeManagerResponsibility',
-  'declineManagerResponsibility',
-  'cancelManagerResponsibilityOffer',
-  'promoteManager',
-  'demoteManager',
-  'removeMember',
-  'leaveProject',
-]);
-
-function symbolPattern(symbols) {
-  return new RegExp(`\\b(?:${symbols.join('|')})\\b`, 'u');
-}
-
-function inspectForbiddenSymbolInventory(entries, pattern, allowedOccurrences) {
-  const counts = new Map();
-  const matcherFlags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
-  for (const entry of entries) {
-    const count = [...entry.source.matchAll(new RegExp(pattern.source, matcherFlags))].length;
-    if (count > 0) counts.set(entry.file, count);
-  }
-  const files = new Set([...counts.keys(), ...allowedOccurrences.keys()]);
-  return [...files].sort().flatMap(file => {
-    const actual = counts.get(file) ?? 0;
-    const expected = allowedOccurrences.get(file) ?? 0;
-    return actual === expected
-      ? []
-      : [`${file}: expected ${expected} compatibility occurrence, found ${actual}`];
-  });
-}
-
-function findForbiddenSymbolInventoryViolations(pattern, allowedOccurrences) {
-  return inspectForbiddenSymbolInventory(
-    listTypeScriptFiles(sourceRoot).map(file => ({
-      file: normalizeRepositoryPath(path.relative(process.cwd(), file)),
-      source: fs.readFileSync(file, 'utf8'),
-    })),
-    pattern,
-    allowedOccurrences,
-  );
 }
 
 function listSourceImports(file, sourceText = fs.readFileSync(file, 'utf8')) {
@@ -166,10 +113,6 @@ function normalizeModuleTarget(target) {
   return target.replace(/\.(?:[cm]?[jt]sx?)$/, '');
 }
 
-function importsPackage(specifier, packageName) {
-  return specifier === packageName || specifier.startsWith(`${packageName}/`);
-}
-
 function resolvedImportKey(importer, target) {
   return `${path.normalize(importer)}::${normalizeModuleTarget(path.normalize(target))}`;
 }
@@ -186,22 +129,6 @@ function resolveTypeScriptImport(importer, specifier) {
   ];
   return candidates.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile())
     ?? null;
-}
-
-function listStaticSourceGraph(entry) {
-  const pending = [entry];
-  const visited = new Set();
-  while (pending.length > 0) {
-    const file = pending.pop();
-    if (!file || visited.has(file)) continue;
-    visited.add(file);
-    for (const sourceImport of listSourceImports(file)) {
-      if (sourceImport.dynamic || sourceImport.typeOnly) continue;
-      const target = resolveTypeScriptImport(file, sourceImport.specifier);
-      if (target && isPathWithin(target, sourceRoot)) pending.push(target);
-    }
-  }
-  return [...visited].sort();
 }
 
 function findResolvedImportViolations(roots, isForbidden, allowedImports = new Set()) {
@@ -229,6 +156,7 @@ function findResolvedImportViolations(roots, isForbidden, allowedImports = new S
 
 const sourceRoot = path.join(process.cwd(), 'src');
 const appRoot = path.join(sourceRoot, 'app');
+const compositionRoot = path.join(sourceRoot, 'composition');
 const featuresRoot = path.join(sourceRoot, 'features');
 const providersRoot = path.join(sourceRoot, 'providers');
 
@@ -254,12 +182,6 @@ const allowedAppProviderImports = new Set([
   resolvedImportKey(
     path.join(appRoot, 'settings', 'defaultSettings.ts'),
     path.join(providersRoot, 'defaultProviderConfigs'),
-  ),
-]);
-const allowedProviderAppImports = new Set([
-  resolvedImportKey(
-    path.join(providersRoot, 'claude', 'storage', 'ClaudianSettingsStorage.ts'),
-    path.join(appRoot, 'settings', 'ClaudianSettingsStorage'),
   ),
 ]);
 
@@ -306,11 +228,10 @@ test('providers are independent from main and features', () => {
   assert.deepEqual(findMatches([path.join(sourceRoot, 'providers')], pattern), []);
 });
 
-test('providers avoid root app imports outside Claude compatibility seams', () => {
+test('providers avoid root app imports', () => {
   assert.deepEqual(findResolvedImportViolations(
     [providersRoot],
     target => isPathWithin(target, appRoot),
-    allowedProviderAppImports,
   ), []);
 });
 
@@ -327,120 +248,36 @@ test('features are independent from the composition root and app adapters', () =
   assert.deepEqual(findMatches([path.join(sourceRoot, 'features')], pattern), []);
 });
 
-test('Collab Host installation authority stays outside membership and presentation', () => {
-  const collabAppRoot = path.join(appRoot, 'collab');
-  const repositorySource = fs.readFileSync(
-    path.join(collabAppRoot, 'CollabLocalProjectRepository.ts'),
-    'utf8',
-  );
-  const membershipStart = repositorySource.indexOf('interface CollabLocalMembershipRecordBase');
-  const membershipEnd = repositorySource.indexOf('export interface CollabLocalProjectPaths');
-  assert.notEqual(membershipStart, -1);
-  assert.notEqual(membershipEnd, -1);
-  const membershipSource = repositorySource.slice(membershipStart, membershipEnd);
-
-  assert.doesNotMatch(membershipSource, /ownerInstallationKey|installationKey|deviceId|deviceRole/);
-  assert.equal(
-    fs.existsSync(path.join(collabAppRoot, 'host-installation', 'HostInstallationBindingService.ts')),
-    true,
-  );
-  assert.deepEqual(findMatches(
-    [path.join(featuresRoot, 'collab')],
-    /HostInstallationBindingService|CollabLocalProjectRepository|getInstallationKey/,
-  ), []);
-  assert.deepEqual(findMatches(
-    [collabAppRoot],
-    /isRecoveryOwner\?|bindEligibleLegacyRecovery\?|prepareLegacyRuntime\?|commitHostedRoute\?/,
-  ), []);
-});
-
-test('Collab LAN data lanes retain one adapter and no Host-only authority bypass', () => {
-  const collabAppRoot = path.join(appRoot, 'collab');
-  const dataPlaneRoots = [
-    path.join(collabAppRoot, 'accept'),
-    path.join(collabAppRoot, 'conflicts'),
-    path.join(collabAppRoot, 'membership'),
-    path.join(collabAppRoot, 'publish'),
-    path.join(collabAppRoot, 'reconnect'),
-    path.join(collabAppRoot, 'remote-authority'),
-    path.join(collabAppRoot, 'review'),
-  ];
-
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /new LanAuthorityAdapter\b/,
-    new Map([['src/app/collab/publish/CollabPublicationService.ts', 1]]),
-  ), []);
-  assert.deepEqual(findMatches(
-    dataPlaneRoots,
-    /allowHostRemoteRepair|collabStoppedHostRemoteUrl|\.openAuthority\(|\.createAuthority\(|\.inspectAuthority\(/,
-  ), []);
-  assert.deepEqual(findMatches(
-    [path.join(collabAppRoot, 'publish'), path.join(collabAppRoot, 'remote-authority')],
-    /hostOwnership\.ownsAuthority/,
-  ), []);
-});
-
-test('Collab modal and shared code do not depend on detail or sidebar surfaces', () => {
-  const collabRoot = path.join(featuresRoot, 'collab');
-  const detailRoot = path.join(collabRoot, 'detail');
-  const sidebarRoot = path.join(collabRoot, 'sidebar');
+test('only main and composition modules import composition wiring', () => {
+  const roots = fs.readdirSync(sourceRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name !== 'composition')
+    .map(entry => path.join(sourceRoot, entry.name));
   assert.deepEqual(findResolvedImportViolations(
-    [path.join(collabRoot, 'modals'), path.join(collabRoot, 'shared')],
-    target => isPathWithin(target, detailRoot) || isPathWithin(target, sidebarRoot),
+    roots,
+    target => isPathWithin(target, compositionRoot),
   ), []);
 });
 
-test('Collab detail sessions do not depend on the detail view router', () => {
-  const detailRoot = path.join(featuresRoot, 'collab', 'detail');
+test('no source module imports the composition root', () => {
+  const roots = fs.readdirSync(sourceRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => path.join(sourceRoot, entry.name));
   assert.deepEqual(findResolvedImportViolations(
-    [path.join(detailRoot, 'sessions')],
-    target => normalizeModuleTarget(target) === path.join(detailRoot, 'CollabDetailView'),
+    roots,
+    target => normalizeModuleTarget(target) === path.join(sourceRoot, 'main'),
   ), []);
 });
 
-test('active Collab code has no singular Manager or transfer compatibility surface', () => {
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /\bmanager_member_id\b/,
-    new Map([['src/app/collab/authority/AuthoritySchema.ts', 5]]),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /\bmanagerMemberId\b/,
-    new Map(),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /\btransferManager\b/,
-    new Map(),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /manager-transfer/,
-    new Map([
-      ['src/app/collab/authority/AuthoritySchema.ts', 2],
-      ['src/app/collab/exit/LocalExitStores.ts', 3],
-      ['src/app/collab/exit/ManagerResponsibilityReceiptRecord.ts', 2],
-    ]),
-  ), []);
-  assert.deepEqual(
-    findForbiddenSymbolInventoryViolations(
-      /\bexpectedManagerMemberId\b/,
-      new Map([
-        ['src/app/collab/authority/MembershipAdminService.ts', 1],
-        ['src/app/collab/exit/PendingLeaveRecord.ts', 2],
-        ['src/app/collab/retirement/RetirementIntent.ts', 1],
-      ]),
+test('composition modules do not import main or concrete providers', () => {
+  assert.deepEqual(findResolvedImportViolations(
+    [compositionRoot],
+    target => (
+      normalizeModuleTarget(target) === path.join(sourceRoot, 'main')
+      || isPathWithin(target, providersRoot)
     ),
-    [],
-  );
+  ), []);
 });
 
-test('singular Manager compatibility inventory rejects an extra active occurrence', () => {
-  assert.deepEqual(inspectForbiddenSymbolInventory(
-    [{ file: 'compatibility-owner.ts', source: 'manager_member_id manager_member_id' }],
-    /\bmanager_member_id\b/,
-    new Map([['compatibility-owner.ts', 1]]),
-  ), [
-    'compatibility-owner.ts: expected 1 compatibility occurrence, found 2',
-  ]);
-});
 
 test('features and shared UI are independent from concrete providers', () => {
   const pattern = new RegExp(
@@ -452,72 +289,25 @@ test('features and shared UI are independent from concrete providers', () => {
   ], pattern), []);
 });
 
-test('chat consumes Collab only through the FeatureHost surface seam', () => {
-  const chatRoot = path.join(featuresRoot, 'chat');
-  const collabRoot = path.join(featuresRoot, 'collab');
-  const violations = findResolvedImportViolations(
-    [chatRoot],
-    target => isPathWithin(target, collabRoot) || isPathWithin(target, path.join(appRoot, 'collab')),
-  );
-
+test('the shared FeatureHost contract does not depend on chat', () => {
+  const featureHostFile = path.join(featuresRoot, 'FeatureHost.ts');
+  const violations = listSourceImports(featureHostFile)
+    .filter(sourceImport => {
+      const target = resolveSourceImport(featureHostFile, sourceImport.specifier);
+      return target !== null && isPathWithin(target, path.join(featuresRoot, 'chat'));
+    })
+    .map(sourceImport => `${sourceImport.line}: ${sourceImport.specifier}`);
   assert.deepEqual(violations, []);
-  assert.ok(
-    listSourceImports(path.join(chatRoot, 'ClaudianView.ts'))
-      .some(sourceImport => normalizeModuleTarget(resolveSourceImport(
-        path.join(chatRoot, 'ClaudianView.ts'),
-        sourceImport.specifier,
-      ) ?? '') === normalizeModuleTarget(path.join(featuresRoot, 'FeatureHost'))),
-  );
+  const contract = fs.readFileSync(featureHostFile, 'utf8');
+  assert.doesNotMatch(contract, /\b(?:getView|getAllViews|warmExecutionPool|chatModelSelection)\b/);
+
 });
 
-test('ordinary main evaluation cannot reach Collab runtime foundations', () => {
-  const mainFile = path.join(sourceRoot, 'main.ts');
-  const eagerGraph = listStaticSourceGraph(mainFile);
-  const collabAppRoot = path.join(appRoot, 'collab');
-  const forbiddenPackages = ['@codemirror/merge', 'node-forge', 'sql.js', 'ws'];
-  const heavyImports = eagerGraph.flatMap(file => (
-    listSourceImports(file)
-      .filter(sourceImport => (
-        !sourceImport.dynamic
-        && !sourceImport.typeOnly
-        && forbiddenPackages.some(packageName => (
-          importsPackage(sourceImport.specifier, packageName)
-        ))
-      ))
-      .map(sourceImport => (
-        `${path.relative(process.cwd(), file)}:${sourceImport.line}`
-        + ` imports ${sourceImport.specifier}`
-      ))
-  ));
 
-  assert.deepEqual(eagerGraph.filter(file => isPathWithin(file, collabAppRoot)), []);
-  assert.deepEqual(heavyImports, []);
-  assert.ok(
-    listSourceImports(mainFile).some(sourceImport => (
-      sourceImport.dynamic && sourceImport.specifier === './app/collab'
-    )),
-  );
-  const collabReviewRoot = path.join(featuresRoot, 'collab', 'detail', 'review');
-  assert.ok(
-    listSourceImports(path.join(collabReviewRoot, 'CollabDiffRenderer.ts'))
-      .some(sourceImport => (
-        sourceImport.dynamic
-        && sourceImport.specifier === './CollabCodeMirrorDiffModule'
-      )),
-  );
-  assert.ok(
-    listSourceImports(path.join(collabReviewRoot, 'CollabCodeMirrorDiffModule.ts'))
-      .some(sourceImport => (
-        !sourceImport.dynamic
-        && sourceImport.specifier === '@codemirror/merge'
-      )),
-  );
-});
 
 test('persisted settings changes use the coordinator boundary', () => {
   const matches = findMatches([sourceRoot], /\.saveSettings\(\)/).filter(file => ![
     'src/main.ts',
-    'src/app/providers/ClaudianProviderHost.ts',
   ].includes(file));
   assert.deepEqual(matches, []);
 });
@@ -634,241 +424,23 @@ test('only TabRuntimeFactory can register runtime resource ownership', () => {
   ].sort());
 });
 
-test('Claudian consumes the standalone Collab protocol only from the exact registry package', async () => {
-  const root = process.cwd();
-  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  const lockfile = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
-  const protocolPackageName = '@claudian-collab/protocol';
-  const protocolInstallPath = `node_modules/${protocolPackageName}`;
-  const protocolManifest = JSON.parse(fs.readFileSync(
-    path.join(root, protocolInstallPath, 'package.json'),
-    'utf8',
-  ));
 
-  const protocol = await import(protocolPackageName);
 
-  const protocolVersion = manifest.dependencies?.[protocolPackageName];
-  assert.match(protocolVersion, /^\d+\.\d+\.\d+$/u);
-  assert.equal(protocolManifest.version, protocolVersion);
-  assert.equal(manifest.dependencies?.['@lezer/markdown'], '1.7.2');
-  assert.equal(protocolManifest.dependencies?.['@lezer/markdown'], '1.7.2');
-  assert.equal(manifest.dependencies?.['@claudian/collab-protocol'], undefined);
-  assert.equal(manifest.workspaces, undefined);
-  assert.equal(lockfile.packages?.['']?.dependencies?.[protocolPackageName], protocolVersion);
-  assert.equal(lockfile.packages?.[protocolInstallPath]?.version, protocolVersion);
-  assert.match(lockfile.packages?.[protocolInstallPath]?.integrity ?? '', /^sha512-[A-Za-z0-9+/]+=*$/u);
-  assert.equal(lockfile.packages?.['node_modules/@lezer/markdown']?.version, '1.7.2');
-  assert.equal(
-    lockfile.packages?.[protocolInstallPath]?.resolved,
-    `https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-${protocolVersion}.tgz`,
-  );
-  assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 15);
-  assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 10);
-  assert.equal(protocol.COLLAB_PROJECT_BACKUP_COORDINATION_FORMAT_VERSION, 3);
-  assert.deepEqual(
-    protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
-    step12ProjectMembershipOperations,
-  );
-  assert.deepEqual(
-    Object.keys(protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATION_CODECS),
-    protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
-  );
 
-  for (const retiredPath of [
-    'packages/collab-protocol',
-    'scripts/check-collab-protocol-compatibility.mjs',
-    'scripts/check-collab-protocol-compatibility.test.mjs',
-    'scripts/sourcePackageAliases.js',
-    'tsconfig.source.json',
-  ]) {
-    assert.equal(fs.existsSync(path.join(root, retiredPath)), false, `${retiredPath} must be absent`);
-  }
 
-  const violations = [];
-  for (const sourceRoot of [path.join(root, 'src'), path.join(root, 'tests')]) {
-    for (const file of listTypeScriptFiles(sourceRoot)) {
-      for (const sourceImport of listSourceImports(file)) {
-        if (
-          sourceImport.specifier === '@claudian/collab-protocol'
-          || sourceImport.specifier.startsWith(`${protocolPackageName}/`)
-          || sourceImport.specifier.includes('packages/collab-protocol')
-        ) {
-          violations.push(
-            `${path.relative(root, file)}:${sourceImport.line} imports ${sourceImport.specifier}`,
-          );
-        }
-      }
-    }
-  }
-  assert.deepEqual(violations, []);
-});
 
-test('standalone Collab protocol registry and contract constants are not redefined', () => {
-  const pattern = /export\s+(?:const|interface|type|class|function)\s+(?:COLLAB_CONTROL_OPERATION_CODECS|CollabControlOperationMap|COLLAB_EVENT_KINDS|COLLAB_ERROR_CODES|COLLAB_LIMITS|COLLAB_PROTOCOL_VERSION|COLLAB_MAIN_REF|COLLAB_MEMBER_REF_PREFIX)\b/;
-  assert.deepEqual(findMatches([sourceRoot], pattern), []);
-});
 
-test('Cloud wire management adaptation stays outside presentation', () => {
-  const packageManagementSurface = [
-    'COLLAB_PROJECT_MEMBERSHIP_LIMITS',
-    'COLLAB_PROJECT_MEMBERSHIP_OPERATIONS',
-    'COLLAB_PROJECT_MEMBERSHIP_OPERATION_CODECS',
-    'decodeCollabProjectMembershipOperationRequest',
-    'decodeCollabProjectMembershipOperationResponse',
-  ];
-  const cloudPresentationSurface = symbolPattern([
-    'createCloudProject',
-    'createProjectInvitation',
-    'joinCloudProject',
-    'listCurrentManagerResponsibilityOffers',
-    'listProjectInvitations',
-    'listProjectMembers',
-    'reissueTransferredMembershipClaim',
-    'revokeProjectInvitation',
-    'revokeTransferredMembershipClaim',
-    ...packageManagementSurface,
-  ]);
 
-  assert.deepEqual(findMatches([featuresRoot], cloudPresentationSurface), []);
-});
-
-test('active Collab consumers use protocol-owned semantic identity predicates', () => {
-  const entries = [
-    ...listTypeScriptFiles(path.join(appRoot, 'collab')),
-    ...listTypeScriptFiles(path.join(featuresRoot, 'collab')),
-  ].map(file => ({
-    file: normalizeRepositoryPath(path.relative(process.cwd(), file)),
-    source: fs.readFileSync(file, 'utf8'),
-  }));
-
-  // These are application-owned filesystem slugs, directory names, and a Host lock nonce.
-  assert.deepEqual(inspectForbiddenSymbolInventory(
-    entries,
-    /\[A-Za-z0-9\]\[A-Za-z0-9_-\]\{0,63\}/,
-    new Map([
-      ['src/app/collab/lan/LanHostCoordinator.ts', 1],
-      ['src/app/collab/project/CollabWorkingCopySlug.ts', 1],
-    ]),
-  ), []);
-
-  // These are application-owned workspace and Host-transfer staging directory names.
-  assert.deepEqual(inspectForbiddenSymbolInventory(
-    entries,
-    /\[A-Za-z0-9\]\[A-Za-z0-9_-\]\{0,127\}/,
-    new Map([
-      ['src/app/collab/host-transfer/HostTransferRecoveryRecord.ts', 1],
-    ]),
-  ), []);
-
-  // Native Git machine-output parsers retain their exact subprocess grammar.
-  assert.deepEqual(inspectForbiddenSymbolInventory(
-    entries,
-    /\[0-9a-f\]\{40\}\(\?:\[0-9a-f\]\{24\}\)\?/,
-    new Map([
-      ['src/app/collab/git/gitConflictPaths.ts', 1],
-      ['src/app/collab/git/GitRepositoryService.ts', 10],
-      ['src/app/collab/project/CollabWorkingCopySetup.ts', 1],
-    ]),
-  ), []);
-
-  // Agent Runtime owns a frozen declarative JSON-schema descriptor, not a runtime validator.
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /\(\?:\[0-9a-f\]\{40\}\|\[0-9a-f\]\{64\}\)/,
-    new Map([['src/app/agent-runtime/AgentRuntimeMethodRegistry.ts', 1]]),
-  ), []);
-});
-
-test('superseded Collab state authorities stay removed', () => {
-  assert.deepEqual(findMatches(
-    [path.join(appRoot, 'collab')],
-    /\bupdateMembershipEventSequence\b/,
-  ), []);
-  assert.deepEqual(findMatches(
-    [path.join(appRoot, 'collab', 'publish')],
-    /\bconfirmed\s*:/,
-  ), []);
-});
-
-test('production consumes protocol-owned canonical Collab Git refs', () => {
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /refs\/heads\/main/,
-    new Map([['src/app/collab/authority/AuthoritySchema.ts', 2]]),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /refs\/heads\/members\//,
-    new Map(),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /refs\/remotes\/origin\/main/,
-    new Map(),
-  ), []);
-  assert.deepEqual(findForbiddenSymbolInventoryViolations(
-    /refs\/remotes\/origin\/members\//,
-    new Map(),
-  ), []);
-});
-
-test('src does not re-export the collab protocol package', () => {
-  const pattern = /export\s+(?:\*|\{[^}]*\})\s*from\s*['"]@claudian-collab\/protocol['"]/;
-  assert.deepEqual(findMatches([sourceRoot], pattern), []);
-});
-
-test('src and tests import the collab protocol package only through its root entry', () => {
-  const violations = [];
-  for (const root of [sourceRoot, path.join(process.cwd(), 'tests')]) {
-    for (const file of listTypeScriptFiles(root)) {
-      for (const sourceImport of listSourceImports(file)) {
-        const { specifier } = sourceImport;
-        if (
-          specifier.startsWith('@claudian-collab/protocol/')
-          || specifier.includes('packages/collab-protocol')
-        ) {
-          violations.push(
-            `${path.relative(process.cwd(), file)}:${sourceImport.line} imports ${specifier}`,
-          );
-        }
-      }
-    }
-  }
-  assert.deepEqual(violations, []);
-});
-
-test('TypeScript resolves the Collab protocol through the installed registry package', () => {
-  const configPath = path.join(process.cwd(), 'tsconfig.json');
-  const config = ts.readConfigFile(configPath, ts.sys.readFile);
-  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, process.cwd());
-  const resolution = ts.resolveModuleName(
-    '@claudian-collab/protocol',
-    path.join(process.cwd(), 'src', 'main.ts'),
-    parsed.options,
-    ts.sys,
-  ).resolvedModule;
-  const expectedFileName = path.join(
-    process.cwd(),
-    'node_modules',
-    '@claudian-collab',
-    'protocol',
-    'dist',
-    'index.d.ts',
-  );
-
-  assert.equal(
-    resolution?.resolvedFileName
-      ? normalizeRepositoryPath(resolution.resolvedFileName)
-      : undefined,
-    normalizeRepositoryPath(expectedFileName),
-  );
-});
 
 test('performance policy enforces the main bundle budget and reports health deltas', () => {
   assert.equal(preStep11BundleHealthBaselineBytes, 4_896_000);
-  assert.equal(mainBudgetBytes, 6_000_000);
+  assert.equal(mainBudgetBytes, 5_000_000);
   assert.deepEqual(inspectArtifactSize(mainBudgetBytes), {
     budgetExceeded: false,
     healthBaselineDeltaBytes: mainBudgetBytes - preStep11BundleHealthBaselineBytes,
-    referenceDeltaBytes: mainBudgetBytes - preCollabReferenceMainBytes,
+    referenceDeltaBytes: mainBudgetBytes - referenceMainBytes,
   });
-  assert.equal(inspectArtifactSize(mainBudgetBytes + 1).budgetExceeded, true);
+  assert.equal(inspectArtifactSize(5_000_001).budgetExceeded, true);
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs), 'within-indicator');
   assert.equal(inspectEvaluationDuration(evaluationIndicatorMs + 1), 'warning');
   assert.equal(
@@ -880,13 +452,11 @@ test('performance policy enforces the main bundle budget and reports health delt
 test('bundle-critical runtime dependencies require exact manifest and lock agreement', () => {
   assert.deepEqual(bundleCriticalRuntimeDependencies, [
     '@anthropic-ai/claude-agent-sdk',
-    '@codemirror/merge',
     'smol-toml',
   ]);
   const packageJson = {
     dependencies: {
       '@anthropic-ai/claude-agent-sdk': '0.3.226',
-      '@codemirror/merge': '6.12.2',
       'smol-toml': '1.7.1',
     },
   };
@@ -894,7 +464,6 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     packages: {
       '': { dependencies: { ...packageJson.dependencies } },
       'node_modules/@anthropic-ai/claude-agent-sdk': { version: '0.3.226' },
-      'node_modules/@codemirror/merge': { version: '6.12.2' },
       'node_modules/smol-toml': { version: '1.7.1' },
     },
   };
@@ -904,7 +473,6 @@ test('bundle-critical runtime dependencies require exact manifest and lock agree
     },
     packages: {
       '@anthropic-ai/claude-agent-sdk': ['@anthropic-ai/claude-agent-sdk@0.3.226'],
-      '@codemirror/merge': ['@codemirror/merge@6.12.2'],
       'smol-toml': ['smol-toml@1.7.1'],
     },
   };
@@ -970,7 +538,6 @@ test('production artifact entry rejects dependency drift before emitting main.js
     fs.writeFileSync(path.join(fixtureRoot, 'package.json'), JSON.stringify({
       dependencies: {
         '@anthropic-ai/claude-agent-sdk': '0.3.226',
-      '@codemirror/merge': '6.12.2',
         'smol-toml': '1.7.1',
       },
     }));
@@ -979,12 +546,10 @@ test('production artifact entry rejects dependency drift before emitting main.js
         '': {
           dependencies: {
             '@anthropic-ai/claude-agent-sdk': '0.3.226',
-      '@codemirror/merge': '6.12.2',
             'smol-toml': '1.7.1',
           },
         },
         'node_modules/@anthropic-ai/claude-agent-sdk': { version: '0.3.226' },
-      'node_modules/@codemirror/merge': { version: '6.12.2' },
         'node_modules/smol-toml': { version: '1.6.1' },
       },
     }));
@@ -1073,4 +638,35 @@ test('runtime source imports are acyclic', () => {
   }
   for (const file of files) visit(file);
   assert.deepEqual(cycles, []);
+});
+
+test('Claudian is independent from the standalone collaboration plugin', () => {
+  const sources = listTypeScriptFiles(sourceRoot);
+  const dependencies = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')).dependencies;
+  assert.equal(dependencies['@claudian-collab/protocol'], undefined);
+  for (const file of sources) {
+    const source = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(source, /(?:from\s*|import\s*\()['"][^'"]*(?:\/collab(?:\/|['"])|\/agent-runtime(?:\/|['"])|@claudian-collab\/protocol)/, file);
+  }
+});
+
+test('documented and scheduled npm commands exist in the package manifest', () => {
+  const { scripts } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  const files = [
+    'README.md',
+    'CONTRIBUTING.md',
+    ...fs.readdirSync('.github/workflows')
+      .filter(file => /\.ya?ml$/.test(file))
+      .map(file => path.join('.github/workflows', file)),
+  ];
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8');
+    for (const [, command] of source.matchAll(/\bnpm run ([\w:-]+)/g)) {
+      assert.ok(Object.hasOwn(scripts, command), `${file} invokes missing npm script: ${command}`);
+    }
+  }
+});
+
+test('application and core selection consume provider policy rather than chat UI', () => {
+  assert.deepEqual(findMatches([appRoot, path.join(sourceRoot, 'core')], /\.getChatUIConfig\s*\(/), []);
 });

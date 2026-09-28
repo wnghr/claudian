@@ -10,8 +10,8 @@ export function createPiModels(host: ProviderHost): ProviderModelCatalogControll
     host,
     update: updatePiProviderSettings,
     providerName: 'Pi',
-    read: () => {
-      const current = getPiProviderSettings(host.settings);
+    read: (settings = host.settings) => {
+      const current = getPiProviderSettings(settings);
       return {
         enabled: current.enabled,
         models: current.discoveredModels.map(model => ({
@@ -21,7 +21,7 @@ export function createPiModels(host: ProviderHost): ProviderModelCatalogControll
             model.contextWindow ? `${model.contextWindow.toLocaleString()} context` : '',
             model.reasoning ? `thinking: ${model.thinkingLevels.join(', ')}` : 'thinking: off',
           ].filter(Boolean).join(' | '),
-        })),
+        })).reverse(),
         selectedIds: current.visibleModels,
         aliases: current.modelAliases,
       };

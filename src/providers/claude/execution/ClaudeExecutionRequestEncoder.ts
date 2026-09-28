@@ -41,12 +41,7 @@ import {
   buildContextFromHistory,
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
-import { getMissingNodeError } from '../cli/claudeLaunchValidation';
-import {
-  findClaudeModelOption,
-  getClaudeModelCatalog,
-  getClaudeModelOptions,
-} from '../modelOptions';
+import { findEnabledClaudeModelOption } from '../modelOptions';
 import { toClaudeRuntimeModelId } from '../modelSelection';
 import { createClaudePluginToolServers } from '../runtime/ClaudePluginTools';
 import { createCustomSpawnFunction } from '../runtime/customSpawn';
@@ -94,6 +89,11 @@ export interface ClaudeEncodedExecutionRequest {
   readonly allowedTools: ReadonlySet<string> | null;
 }
 
+export interface ClaudeEncodedSteer {
+  readonly prompt: string;
+  readonly images: ImageAttachment[];
+}
+
 export interface ClaudeExecutionRequestEncoderDeps {
   readonly host: ProviderHost;
   readonly getLinkedPaperPath: () => string | null;
@@ -122,16 +122,11 @@ export class ClaudeExecutionRequestEncoder {
       this.deps.host.getActiveEnvironmentVariables('claude'),
     );
     const enhancedPath = getEnhancedPath(customEnv.PATH, cliPath);
-    const missingNodeError = getMissingNodeError(cliPath, enhancedPath);
-    if (missingNodeError) {
-      throw new Error(missingNodeError);
-    }
 
     const settings = this.#resolveSettings(request);
     const claudeSettings = getClaudeProviderSettings(settings);
-    const selected = findClaudeModelOption(getClaudeModelCatalog(this.deps.host.settings), settings.model);
-    if (!getClaudeProviderSettings(this.deps.host.settings).enabled || !selected
-      || !getClaudeModelOptions(this.deps.host.settings).some(option => option.value === selected.value)) {
+    const selected = findEnabledClaudeModelOption(this.deps.host.settings, settings.model);
+    if (!getClaudeProviderSettings(this.deps.host.settings).enabled || !selected) {
       throw new ProviderModelUnavailableError('Claude');
     }
     const model = toClaudeRuntimeModelId(selected.value);
@@ -143,6 +138,11 @@ export class ClaudeExecutionRequestEncoder {
           ? request.configuration.reasoning
           : settings.effortLevel,
       );
+    const requestedEffort = request.configuration.reasoning;
+    if (requestedEffort != null && (!isEffortLevel(requestedEffort)
+      || !selected.supportedEffortLevels?.includes(requestedEffort))) {
+      throw new Error(`Claude model "${model}" does not support reasoning effort "${request.configuration.reasoning}".`);
+    }
     const sdkPermissionMode = settings.permissionMode === 'yolo'
       ? 'bypassPermissions'
       : claudeSettings.safeMode;
@@ -196,9 +196,13 @@ export class ClaudeExecutionRequestEncoder {
       // Auto mode stays available so safe-mode switches remain live setters.
       extraArgs: {
         'enable-auto-mode': null,
+        // Replays acknowledge when a streamed send, including a steer, enters a native turn.
+        'replay-user-messages': null,
         ...(claudeSettings.enableChrome ? { chrome: null } : {}),
       },
       includePartialMessages: true,
+      // Subagent cards show the SDK's periodic one-line summaries while they run.
+      agentProgressSummaries: true,
       enableFileCheckpointing: true,
       canUseTool,
       ...(request.toolPolicy.kind === 'passive'
@@ -237,9 +241,7 @@ export class ClaudeExecutionRequestEncoder {
 
     return {
       prompt,
-      images: request.input
-        .filter((block) => block.type === 'image')
-        .map((block) => ({ ...block.image })),
+      images: encodeImages(request),
       options,
       model,
       effort,
@@ -286,11 +288,19 @@ export class ClaudeExecutionRequestEncoder {
     }
   }
 
+  /** A steer joins the live turn, so it carries only its own input and context. */
+  encodeSteer(request: ProviderExecutionRequest): ClaudeEncodedSteer {
+    return {
+      prompt: this.#encodePrompt(request, false),
+      images: encodeImages(request),
+    };
+  }
+
   #resolveSettings(request: ProviderExecutionRequest): ClaudianSettings {
-    const settings = ProviderSettingsCoordinator.getProviderSettingsSnapshot(
+    const settings = { ...ProviderSettingsCoordinator.getProviderSettingsSnapshot(
       this.deps.host.settings,
       'claude',
-    );
+    ) };
     if (request.configuration.model?.trim()) {
       settings.model = request.configuration.model;
     }
@@ -345,6 +355,12 @@ export class ClaudeExecutionRequestEncoder {
       [...history],
     );
   }
+}
+
+function encodeImages(request: ProviderExecutionRequest): ImageAttachment[] {
+  return request.input
+    .filter((block) => block.type === 'image')
+    .map((block) => ({ ...block.image }));
 }
 
 function resolveToolPolicy(request: ProviderExecutionRequest): {

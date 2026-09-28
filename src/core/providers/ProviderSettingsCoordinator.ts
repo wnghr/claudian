@@ -7,7 +7,7 @@ import {
   type ProviderProjectionKey,
   type ProviderProjectionMap,
 } from './settings/ProviderProjectionMap';
-import type { ProviderChatUIConfig, ProviderId } from './types';
+import type { ProviderId,ProviderModelPolicy } from './types';
 
 export interface SettingsReconciliationResult {
   changed: boolean;
@@ -67,7 +67,7 @@ function mergeProviderSettings(
 }
 
 function normalizeReasoningValue(
-  uiConfig: ProviderChatUIConfig,
+  uiConfig: ProviderModelPolicy,
   settings: Record<string, unknown>,
   model: string,
   value: unknown,
@@ -80,7 +80,7 @@ function normalizeReasoningValue(
 }
 
 function normalizeProviderModel(
-  uiConfig: ProviderChatUIConfig,
+  uiConfig: ProviderModelPolicy,
   settings: Record<string, unknown>,
   model: string | undefined,
 ): string | undefined {
@@ -91,17 +91,17 @@ function normalizeProviderModel(
 }
 
 function normalizeServiceTier(
-  uiConfig: ProviderChatUIConfig,
+  uiConfig: ProviderModelPolicy,
   settings: Record<string, unknown>,
 ): void {
-  const toggle = uiConfig.getServiceTierToggle?.(settings) ?? null;
+  const toggle = uiConfig.getServiceTierPolicy?.(settings) ?? null;
   settings.serviceTier = toggle
     ? (toggle.isActive ? toggle.activeValue : toggle.inactiveValue)
     : 'default';
 }
 
 function normalizeModelDependentSettings(
-  uiConfig: ProviderChatUIConfig,
+  uiConfig: ProviderModelPolicy,
   settings: Record<string, unknown>,
   model: string,
 ): void {
@@ -125,17 +125,6 @@ function normalizeModelDependentSettings(
 }
 
 export class ProviderSettingsCoordinator {
-  static applyModelSelection(
-    settings: Record<string, unknown>,
-    providerId: ProviderId,
-    model: string,
-  ): void {
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
-    settings.model = model;
-    uiConfig.applyModelDefaults(model, settings);
-    normalizeModelDependentSettings(uiConfig, settings, model);
-  }
-
   static applyTitleGenerationModelSelection(
     settings: Record<string, unknown>,
     model: string,
@@ -148,7 +137,7 @@ export class ProviderSettingsCoordinator {
     providerId: ProviderId,
     model: string,
   ): void {
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
+    const uiConfig = ProviderRegistry.getModelPolicy(providerId);
     settings.model = model;
     uiConfig.applyModelProjectionDefaults?.(model, settings);
     normalizeModelDependentSettings(uiConfig, settings, model);
@@ -237,19 +226,34 @@ export class ProviderSettingsCoordinator {
     return snapshot;
   }
 
-  static commitProviderSettingsSnapshot(
+  /** Commit only this provider's changed execution preferences. Projections are read models. */
+  static commitProviderSettingsChange(
     settings: Record<string, unknown>,
     providerId: ProviderId,
-    snapshot: Record<string, unknown>,
+    before: Record<string, unknown>,
+    after: Record<string, unknown>,
   ): void {
-    this.persistProjectedProviderState(snapshot, providerId);
-
-    if (providerId === getSettingsProviderId(settings)) {
-      Object.assign(settings, snapshot);
-      return;
+    const fields = {
+      model: 'savedProviderModel', effortLevel: 'savedProviderEffort',
+      serviceTier: 'savedProviderServiceTier', thinkingBudget: 'savedProviderThinkingBudget',
+      permissionMode: 'savedProviderPermissionMode',
+    } as const;
+    for (const [field, savedKey] of Object.entries(fields)) {
+      if (before[field] === after[field]) continue;
+      const saved = ensureProviderProjectionMap(settings, savedKey);
+      if (typeof after[field] === 'string') saved[providerId] = after[field];
+      else delete saved[providerId];
     }
-
-    mergeProviderSettings(settings, snapshot);
+    const configs = after.providerConfigs as Record<string, unknown> | undefined;
+    if (configs && JSON.stringify(configs[providerId]) !== JSON.stringify(
+      (before.providerConfigs as Record<string, unknown> | undefined)?.[providerId],
+    )) {
+      settings.providerConfigs = {
+        ...settings.providerConfigs as Record<string, unknown>,
+        [providerId]: structuredClone(configs[providerId]),
+      };
+    }
+    if (getSettingsProviderId(settings) === providerId) this.projectProviderState(settings, providerId);
   }
 
   static persistProjectedProviderState(
@@ -261,7 +265,7 @@ export class ProviderSettingsCoordinator {
     const savedServiceTier = ensureProviderProjectionMap(settings, 'savedProviderServiceTier');
     const savedBudget = ensureProviderProjectionMap(settings, 'savedProviderThinkingBudget');
     const savedPermissionMode = ensureProviderProjectionMap(settings, 'savedProviderPermissionMode');
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
+    const uiConfig = ProviderRegistry.getModelPolicy(providerId);
     const normalizedModel = normalizeProviderModel(
       uiConfig,
       settings,
@@ -279,7 +283,7 @@ export class ProviderSettingsCoordinator {
     } else {
       delete savedEffort[providerId];
     }
-    const serviceTierToggle = uiConfig.getServiceTierToggle?.(projectedSettings) ?? null;
+    const serviceTierToggle = uiConfig.getServiceTierPolicy?.(projectedSettings) ?? null;
     if (serviceTierToggle && typeof settings.serviceTier === 'string') {
       savedServiceTier[providerId] = settings.serviceTier;
     }
@@ -290,7 +294,7 @@ export class ProviderSettingsCoordinator {
     } else {
       delete savedBudget[providerId];
     }
-    if (typeof settings.permissionMode === 'string' && uiConfig.getPermissionModeToggle?.()) {
+    if (typeof settings.permissionMode === 'string' && uiConfig.permissionModes) {
       savedPermissionMode[providerId] = settings.permissionMode;
     }
   }
@@ -299,7 +303,7 @@ export class ProviderSettingsCoordinator {
     settings: Record<string, unknown>,
     providerId: ProviderId,
   ): void {
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
+    const uiConfig = ProviderRegistry.getModelPolicy(providerId);
     const projection = (key: ProviderProjectionKey): ProviderProjectionMap => (
       normalizeProviderProjectionMap(settings[key])
     );
@@ -321,7 +325,7 @@ export class ProviderSettingsCoordinator {
     const isDefaultModelOfAnotherProvider = currentModel.length > 0
       && ProviderRegistry.getRegisteredProviderIds()
         .filter(id => id !== providerId)
-        .some(id => ProviderRegistry.getChatUIConfig(id).isDefaultModel(currentModel));
+        .some(id => ProviderRegistry.getModelPolicy(id).isDefaultModel(currentModel));
     const canReuseCurrentModel = currentModel.length > 0
       && !isDefaultModelOfAnotherProvider
       && (
@@ -349,7 +353,7 @@ export class ProviderSettingsCoordinator {
       }
     }
 
-    const serviceTierToggle = uiConfig.getServiceTierToggle?.({
+    const serviceTierToggle = uiConfig.getServiceTierPolicy?.({
       ...settings,
       ...(model ? { model } : {}),
     }) ?? null;
@@ -395,7 +399,7 @@ export class ProviderSettingsCoordinator {
       settings.thinkingBudget = normalizeReasoningValue(uiConfig, settings, model, settings.thinkingBudget);
     }
 
-    const permissionToggle = uiConfig.getPermissionModeToggle?.() ?? null;
+    const permissionToggle = uiConfig.permissionModes ?? null;
     if (!permissionToggle) {
       return;
     }
@@ -423,18 +427,6 @@ export class ProviderSettingsCoordinator {
     if (projectedPermissionMode !== undefined) {
       settings.permissionMode = projectedPermissionMode;
     }
-  }
-
-  /** Each provider's reconciler only processes its own conversations. */
-  static reconcileAllProviders(
-    settings: Record<string, unknown>,
-    conversations: Conversation[],
-  ): SettingsReconciliationResult {
-    return this.reconcileProviders(
-      settings,
-      conversations,
-      ProviderRegistry.getRegisteredProviderIds(),
-    );
   }
 
   static reconcileProviders(
@@ -525,7 +517,7 @@ export class ProviderSettingsCoordinator {
         this.projectProviderState(targetSettings, providerId);
       }
 
-      const changed = reconciler.normalizeModelVariantSettings(targetSettings);
+      const changed = reconciler.normalizeModelVariantSettings?.(targetSettings);
       if (changed) {
         anyChanged = true;
         this.persistProjectedProviderState(targetSettings, providerId);

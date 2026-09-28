@@ -16,7 +16,6 @@ export interface ConversationPersistence {
     conversationId: string,
     target?: SessionMetadataAuthority,
   ): Promise<void>;
-  deleteLegacyMetadata(conversationId: string): Promise<void>;
   assignMetadataToDevice(conversationId: string): Promise<void>;
 }
 
@@ -38,7 +37,7 @@ export class ConversationPersistenceStore implements ConversationPersistence {
   ): Promise<void> {
     await this.adapter.write(
       this.getMetadataPath(metadata.id, target),
-      JSON.stringify(metadata, null, 2),
+      JSON.stringify(metadata),
     );
   }
 
@@ -47,10 +46,6 @@ export class ConversationPersistenceStore implements ConversationPersistence {
     target: SessionMetadataAuthority = 'device',
   ): Promise<void> {
     return this.adapter.delete(this.getMetadataPath(conversationId, target));
-  }
-
-  deleteLegacyMetadata(conversationId: string): Promise<void> {
-    return this.adapter.delete(this.metadataStorage.getLegacyMetadataPath(conversationId));
   }
 
   async assignMetadataToDevice(conversationId: string): Promise<void> {

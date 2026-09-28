@@ -1,21 +1,20 @@
 /** @jest-environment jsdom */
 import '@/providers';
 
+import {
+  createHarness,
+  releaseSideChatHarnesses,
+  startSideChat,
+} from '@test/helpers/features/chat/SideChatDOMHarness';
 import { fireEvent, screen, waitFor } from '@testing-library/dom';
 
 import { ClaudianView } from '@/features/chat/ClaudianView';
 import { MessageRenderer } from '@/features/chat/rendering/MessageRenderer';
 
-import {
-  createHarness,
-  releaseSideChatHarnesses,
-  startSideChat,
-} from './SideChatDomHarness';
-
 afterEach(releaseSideChatHarnesses);
 
 it('passes global dynamic instructions to side chat execution', async () => {
-  const dynamicSections = ['Use the active Collab project context.'];
+  const dynamicSections = ['Use the active workspace context.'];
   const harness = createHarness({ getMainAgentDynamicSystemPromptSections: async () => dynamicSections });
   const { started } = await startSideChat(harness);
   expect(harness.backend.latest.requests[0].configuration.systemInstructions).toEqual({

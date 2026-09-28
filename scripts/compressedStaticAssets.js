@@ -6,7 +6,6 @@ const {
 } = require('node:zlib');
 
 const localeFilter = /[\\/]src[\\/]i18n[\\/]locales[\\/][^\\/]+\.json$/;
-const sqlWasmFilter = /[\\/]node_modules[\\/]sql\.js[\\/]dist[\\/]sql-wasm\.wasm$/;
 const localeCatalogSpecifier = 'claudian:compressed-locale-catalog';
 const localeCatalogNamespace = 'compressed-locale-catalog';
 
@@ -14,7 +13,7 @@ function compress(contents, mode) {
   return brotliCompressSync(contents, {
     params: {
       [zlibConstants.BROTLI_PARAM_MODE]: mode,
-      [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+      [zlibConstants.BROTLI_PARAM_QUALITY]: 9,
     },
   }).toString('base64');
 }
@@ -59,21 +58,6 @@ function createCompressedStaticAssetsPlugin({ root = process.cwd() } = {}) {
             '  if (!dictionary) throw new Error(`Unsupported compressed locale: ${locale}`);',
             '  return dictionary;',
             '}',
-          ].join('\n'),
-          loader: 'js',
-        };
-      });
-
-      build.onLoad({ filter: sqlWasmFilter }, (args) => {
-        const base64 = compress(
-          readFileSync(args.path),
-          zlibConstants.BROTLI_MODE_GENERIC,
-        );
-        return {
-          contents: [
-            'import { brotliDecompressSync } from "node:zlib";',
-            `const wasmBinary = ${decodeExpression(base64)};`,
-            'export default wasmBinary;',
           ].join('\n'),
           loader: 'js',
         };

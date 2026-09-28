@@ -13,10 +13,11 @@ import type {
 import { extractToolResultContent } from '../../../core/tools/toolResultContent';
 import {
   extractAgentIdFromToolUseResult,
-  extractXmlTag,
   resolveToolUseResultStatus,
-} from '../history/ClaudeHistoryStore';
-import { extractFinalResultFromSubagentJsonl } from '../history/subagentJsonl';
+} from '../history/sdkAsyncSubagent';
+import { extractXMLTag } from '../history/sdkMessageParsing';
+import { extractFinalResultFromSubagentJSONL } from '../history/subagentJSONL';
+import { extractHandbackResult } from '../normalization/claudeSubagentResult';
 
 function extractAgentIdFromString(value: string): string | null {
   const regexPatterns = [
@@ -51,31 +52,28 @@ function extractResultFromTaskObject(task: unknown): string | null {
   return output.length > 0 ? output : null;
 }
 
-function extractTextFromContentBlocks(content: unknown): string | null {
-  if (!Array.isArray(content)) {
-    return null;
-  }
-
-  const firstTextBlock = (content as Array<Record<string, unknown>>)
-    .find(block => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string');
-  if (!firstTextBlock || typeof firstTextBlock.text !== 'string') {
-    return null;
-  }
-
-  const text = firstTextBlock.text.trim();
-  return text.length > 0 ? text : null;
+function extractTextFromContentBlocks(content: unknown, agentId: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  const texts = content.flatMap(block => isRecord(block) && block.type === 'text'
+    && typeof block.text === 'string' ? [block.text] : []);
+  // Claude can append a separate metadata block after the answer. Require its
+  // full native shape and matching structured identity; literal tags remain text.
+  const trailer = texts.at(-1)?.match(/^agentId: ([a-zA-Z0-9_-]+)(?: \([^\r\n]*\))?\r?\n<usage>[^]*<\/usage>\s*$/);
+  if (texts.length > 1 && trailer && trailer[1] === agentId) texts.pop();
+  const text = texts.join('\n');
+  return text.trim().length > 0 ? text : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function parseJsonRecord(value: string): Record<string, unknown> | null {
-  const parsed = parseJsonValue(value);
+function parseJSONRecord(value: string): Record<string, unknown> | null {
+  const parsed = parseJSONValue(value);
   return isRecord(parsed) ? parsed : null;
 }
 
-function parseJsonValue(value: string): unknown {
+function parseJSONValue(value: string): unknown {
   try {
     const parsed: unknown = JSON.parse(value);
     return parsed;
@@ -112,13 +110,23 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
 
   interpretResult(result: unknown, isError: boolean, context: ProviderTaskResultContext, toolUseResult?: unknown): ProviderTaskResult {
     const text = extractToolResultContent(result, { fallbackIndent: 2 });
+    if (context.mode === 'sync') {
+      // Sync reports are answer text. Only the complete native hand-back frame
+      // is an envelope; TaskOutput's JSON/XML recovery belongs to async results.
+      const answer = isRecord(toolUseResult)
+        ? extractTextFromContentBlocks(toolUseResult.content, toolUseResult.agentId) : null;
+      return {
+        status: this.#resolveTerminalStatus(toolUseResult, isError ? 'error' : 'completed'),
+        result: answer ?? extractHandbackResult(text) ?? text,
+      };
+    }
     const resolvedId = context.agentId ?? this.#inferAgentIdFromResult(text);
-    const running = context.mode === 'async' && this.#isStillRunningResult(text, isError);
+    const running = this.#isStillRunningResult(text, isError);
     return {
       status: running
         ? 'running'
         : this.#resolveTerminalStatus(toolUseResult, isError ? 'error' : 'completed'),
-      result: running ? text : this.#extractAgentResult(text, resolvedId ?? '', toolUseResult),
+      result: running ? text : this.#extractAsyncResult(text, resolvedId ?? '', toolUseResult),
     };
   }
 
@@ -212,7 +220,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
       return output;
     }
 
-    return extractTextFromContentBlocks(record.content);
+    return null;
   }
 
   #resolveTerminalStatus(
@@ -266,7 +274,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
       return null;
     }
 
-    const parsed = parseJsonRecord(payload);
+    const parsed = parseJSONRecord(payload);
     if (parsed) {
       if (this.#hasTerminalTaskStatus(parsed)) {
         return null;
@@ -283,8 +291,8 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
       }
     }
 
-    const xmlStatus = extractXmlTag(payload, 'retrieval_status')
-      ?? extractXmlTag(payload, 'status');
+    const xmlStatus = extractXMLTag(payload, 'retrieval_status')
+      ?? extractXMLTag(payload, 'status');
     if (this.#isTerminalTaskStatusValue(xmlStatus)) {
       return null;
     }
@@ -334,7 +342,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
     if (isError) return false;
     if (!trimmed) return false;
 
-    const parsed = parseJsonRecord(payload);
+    const parsed = parseJSONRecord(payload);
     if (parsed) {
       const status = parsed.retrieval_status ?? parsed.status;
       const agents = isRecord(parsed.agents) ? parsed.agents : null;
@@ -377,7 +385,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
     return false;
   }
 
-  #extractAgentResult(result: string, agentId: string, toolUseResult?: unknown): string {
+  #extractAsyncResult(result: string, agentId: string, toolUseResult?: unknown): string {
     const structuredResult = this.#extractStructuredResult(toolUseResult);
     const normalizedStructuredResult = this.#extractResultFromCandidateString(structuredResult);
     if (normalizedStructuredResult) {
@@ -387,9 +395,16 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
       return structuredResult;
     }
 
+    const structuredText = isRecord(toolUseResult)
+      ? extractTextFromContentBlocks(toolUseResult.content, toolUseResult.agentId) : null;
+    if (structuredText !== null) return structuredText;
+
     const payload = this.#unwrapTextPayload(result);
 
-    const parsed = parseJsonRecord(payload);
+    const handbackResult = extractHandbackResult(payload);
+    if (handbackResult !== null) return handbackResult;
+
+    const parsed = parseJSONRecord(payload);
     if (parsed) {
       const taskResult = this.#extractResultFromTaskObject(parsed.task);
       if (taskResult) {
@@ -483,7 +498,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
     const agentId = extractAgentIdFromString(result) ?? result.match(/\b([a-f0-9]{8})\b/)?.[1];
     if (agentId) return agentId;
 
-    const parsed = parseJsonRecord(result);
+    const parsed = parseJSONRecord(result);
     if (parsed) {
       const agentId = parsed.agent_id || parsed.agentId;
 
@@ -505,7 +520,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
   }
 
   #inferAgentIdFromResult(result: string): string | null {
-    const parsed = parseJsonRecord(result);
+    const parsed = parseJSONRecord(result);
     if (parsed) {
       const agents = isRecord(parsed.agents) ? parsed.agents : null;
       if (agents) {
@@ -516,7 +531,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
   }
 
   #unwrapTextPayload(raw: string): string {
-    const parsed = parseJsonValue(raw);
+    const parsed = parseJSONValue(raw);
     if (parsed !== null) {
       if (Array.isArray(parsed)) {
         const textBlock = (parsed as unknown[]).find((block) => isRecord(block) && typeof block.text === 'string');
@@ -529,16 +544,16 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
   }
 
   #extractResultFromTaggedPayload(payload: string): string | null {
-    const directResult = extractXmlTag(payload, 'result');
+    const directResult = extractXMLTag(payload, 'result');
     if (directResult) return directResult;
 
-    const outputContent = extractXmlTag(payload, 'output');
+    const outputContent = extractXMLTag(payload, 'output');
     if (!outputContent) return null;
 
     const extractedFromJsonl = this.#extractResultFromOutputJsonl(outputContent);
     if (extractedFromJsonl) return extractedFromJsonl;
 
-    const nestedResult = extractXmlTag(outputContent, 'result');
+    const nestedResult = extractXMLTag(outputContent, 'result');
     if (nestedResult) return nestedResult;
 
     const trimmed = outputContent.trim();
@@ -546,7 +561,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
   }
 
   #extractResultFromOutputJsonl(outputContent: string): string | null {
-    const inlineResult = extractFinalResultFromSubagentJsonl(outputContent);
+    const inlineResult = extractFinalResultFromSubagentJSONL(outputContent);
     if (inlineResult) {
       return inlineResult;
     }
@@ -561,7 +576,7 @@ export class ClaudeTaskResultInterpreter implements ProviderTaskResultInterprete
       return null;
     }
 
-    return extractFinalResultFromSubagentJsonl(fullOutput);
+    return extractFinalResultFromSubagentJSONL(fullOutput);
   }
 
   #extractFullOutputPath(content: string): string | null {

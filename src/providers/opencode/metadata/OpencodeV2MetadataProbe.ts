@@ -1,7 +1,7 @@
 import { formatReasoningValueLabel } from '@/core/providers/reasoning';
-import { normalizeAcpAvailableCommands } from '@/providers/acp';
+import { normalizeACPAvailableCommands } from '@/providers/acp';
 
-import { pollOpencodeUntil } from '../http/OpencodeHttpClient';
+import { pollOpencodeUntil } from '../http/OpencodeHTTPClient';
 import type { OpencodeServerLease } from '../http/OpencodeServerService';
 import type {
   OpencodeMetadataCatalogResult,
@@ -18,14 +18,16 @@ interface NativeModel {
 
 /** V2 catalog reads share native credentials without creating a native session. */
 export class OpencodeV2MetadataProbe implements OpencodeMetadataProbe {
+  private models: NativeModel[] | null = null;
+
   constructor(private readonly client: OpencodeServerLease) {}
 
   async loadCatalog(signal?: AbortSignal): Promise<OpencodeMetadataCatalogResult> {
     const ownedSignal = this.client.signal(signal);
-    const models = await this.loadModels(ownedSignal);
+    const models = this.models = await this.loadModels(ownedSignal);
     const commands = await this.read('command', ownedSignal);
     return {
-      commands: normalizeAcpAvailableCommands(commands.filter(isNamedRecord).map(command => ({
+      commands: normalizeACPAvailableCommands(commands.filter(isNamedRecord).map(command => ({
         name: command.name,
         ...(typeof command.description === 'string' ? { description: command.description } : {}),
       }))),
@@ -34,7 +36,11 @@ export class OpencodeV2MetadataProbe implements OpencodeMetadataProbe {
   }
 
   async warmModel(rawModelId: string, signal?: AbortSignal): Promise<OpencodeMetadataWarmResult> {
-    const models = await this.loadModels(this.client.signal(signal), rawModelId);
+    const ownedSignal = this.client.signal(signal);
+    ownedSignal.throwIfAborted();
+    const models = this.models?.some(model => `${model.providerID}/${model.id}` === rawModelId)
+      ? this.models
+      : this.models = await this.loadModels(ownedSignal, rawModelId);
     const model = models.find(model => `${model.providerID}/${model.id}` === rawModelId);
     if (!model) throw new Error('OpenCode model is no longer available. Refresh the model catalog.');
     const variants = model.variants.length > 0 ? [...new Set([...model.variants, 'default'])] : [];
@@ -51,7 +57,8 @@ export class OpencodeV2MetadataProbe implements OpencodeMetadataProbe {
   async dispose(): Promise<void> { await this.client.dispose(); }
 
   private async loadModels(signal: AbortSignal, rawModelId?: string): Promise<NativeModel[]> {
-    // An initial snapshot may be partial. Later discovery re-reads the retained server.
+    await this.client.waitForActivation(signal);
+    // Older versions and background discovery can still need polling or a later refresh.
     return pollOpencodeUntil(async () => (await this.read('model', signal)).filter(isNamedRecord).flatMap(model => {
       if (model.enabled !== true || typeof model.id !== 'string' || typeof model.providerID !== 'string') return [];
       return [{

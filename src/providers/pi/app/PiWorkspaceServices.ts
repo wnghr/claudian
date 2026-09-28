@@ -4,13 +4,12 @@ import type {
 } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
-  ProviderTabWarmupPolicy,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
 import { PiCommandCatalog } from '../commands/PiCommandCatalog';
 import { PiCommandMetadataProbe } from '../execution/PiCommandMetadataProbe';
-import { PiCliResolver } from '../runtime/PiCliResolver';
+import { PiCLIResolver } from '../runtime/PiCLIResolver';
 import { createPiModels } from '../runtime/PiModels';
 import { createPiSettingsTabRenderer } from '../ui/PiSettingsTab';
 import { PiCommandLoader } from './PiCommandLoader';
@@ -23,12 +22,6 @@ export interface PiWorkspaceServices extends ProviderWorkspaceServices {
 export interface PiWorkspaceServicesOptions {
   readonly commandMetadataProbe?: PiCommandMetadataProbe;
 }
-
-const piTabWarmupPolicy: ProviderTabWarmupPolicy = {
-  resolveMode() {
-    return 'commands';
-  },
-};
 
 export async function createPiWorkspaceServices(
   plugin: ProviderHost,
@@ -54,14 +47,13 @@ export async function createPiWorkspaceServices(
       },
     });
 
-  const cliResolver = new PiCliResolver();
+  const cliResolver = new PiCLIResolver();
   return {
     cliResolver,
     modelCatalog,
     commandCatalog: new PiCommandCatalog(),
     commandLoader: new PiCommandLoader(commandMetadataProbe),
     settingsTabRenderer: createPiSettingsTabRenderer({ cliResolver, modelCatalog }),
-    tabWarmupPolicy: piTabWarmupPolicy,
     async dispose() {
       unregisterTransitionHook();
       await Promise.all([commandMetadataProbe.dispose(), modelCatalog.dispose()]);
@@ -70,12 +62,9 @@ export async function createPiWorkspaceServices(
 }
 
 export const piWorkspaceRegistration: ProviderWorkspaceRegistration<PiWorkspaceServices> = {
+  consumesAgentSkills: true,
   initialize: async ({ plugin }) => createPiWorkspaceServices(plugin),
 };
-
-export function maybeGetPiWorkspaceServices(): PiWorkspaceServices | null {
-  return ProviderWorkspaceRegistry.getServices('pi') as PiWorkspaceServices | null;
-}
 
 export function getPiWorkspaceServices(): PiWorkspaceServices {
   return ProviderWorkspaceRegistry.requireServices('pi') as PiWorkspaceServices;

@@ -1,4 +1,13 @@
 export {
+  type BranchableExecutionSession,
+  type ConversationBranchRecoveryRequest,
+  type ConversationBranchRequest,
+  type ConversationBranchResult,
+  type ConversationBranchState,
+  isBranchableExecutionSession,
+} from './BranchableExecutionSession';
+export { ExecutionEventQueue } from './ExecutionEventQueue';
+export {
   type ProviderExecutionBackend,
   type ProviderNativePersistence,
   type ProviderNativeResumeSeed,
@@ -28,6 +37,8 @@ export {
   type ProviderSessionEvent,
   type ProviderSessionEventScope,
   type ProviderSessionStateChangedEvent,
+  type ProviderSubagentProgressEvent,
+  type ProviderSubagentUpdatedEvent,
   type ProviderTaskNotificationEvent,
   type ProviderTextDeltaEvent,
   type ProviderThinkingDeltaEvent,

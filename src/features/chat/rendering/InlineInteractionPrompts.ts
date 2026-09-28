@@ -45,17 +45,19 @@ export interface InlineInteractionPromptsDeps {
  * provider interaction port. It holds no execution or persistence authority.
  */
 export class InlineInteractionPrompts {
-  private approvalInline: InlineAskUserQuestion | null = null;
-  private questionInline: InlineAskUserQuestion | null = null;
+  private readonly pending = new Map<string, InlineAskUserQuestion>();
   private suppressDepth = 0;
+  private active = true;
 
   constructor(private readonly deps: InlineInteractionPromptsDeps) {}
 
   async requestApproval(
+    interactionId: string,
     toolName: string,
     _input: Record<string, unknown>,
     description: string,
     approvalOptions?: InlineApprovalOptions,
+    signal?: AbortSignal,
   ): Promise<ApprovalDecision> {
     const parentEl = this.#requireParentEl();
     const headerEl = parentEl.createDiv({ cls: 'claudian-ask-approval-info' });
@@ -109,10 +111,10 @@ export class InlineInteractionPrompts {
     });
 
     const result = await this.#showInline(
+      interactionId,
       parentEl,
       { questions: [{ isOther: false, isSecret: false, options: questionOptions, question: 'Allow this action?' }] },
-      (inline) => { this.approvalInline = inline; },
-      undefined,
+      signal,
       { headerEl, immediateSelect: true, showCustomInput: false, title: 'Permission required' },
     );
 
@@ -129,53 +131,52 @@ export class InlineInteractionPrompts {
   }
 
   askUserQuestion(
+    interactionId: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
+    config?: InlineAskQuestionConfig,
   ): Promise<Record<string, string | string[]> | null> {
     return this.#showInline(
+      interactionId,
       this.#requireParentEl(),
       input,
-      (inline) => { this.questionInline = inline; },
       signal,
+      config,
     );
   }
 
-  dismissApproval(): void {
-    if (this.approvalInline) {
-      this.approvalInline.destroy();
-      this.approvalInline = null;
-    }
+  setActive(active: boolean): void {
+    this.active = active;
+    for (const inline of this.pending.values()) inline.setVisible(active);
+    this.#syncSuppression();
   }
 
-  dismiss(kind: 'approval' | 'question'): void {
-    if (kind === 'approval') {
-      this.dismissApproval();
-      return;
-    }
-    this.questionInline?.destroy();
-    this.questionInline = null;
+  dismiss(interactionId: string): void {
+    this.pending.get(interactionId)?.destroy();
   }
 
   dismissAll(): void {
-    this.dismissApproval();
-    this.questionInline?.destroy();
-    this.questionInline = null;
+    for (const inline of [...this.pending.values()]) inline.destroy();
     this.resetSuppression();
   }
 
   resetSuppression(): void {
     if (this.suppressDepth <= 0) return;
     this.suppressDepth = 0;
-    this.deps.getSuppressedEl?.()?.removeClass('claudian-hidden');
+    this.#syncSuppression();
   }
 
   #showInline(
+    interactionId: string,
     parentEl: HTMLElement,
     input: Record<string, unknown>,
-    setPending: (inline: InlineAskUserQuestion | null) => void,
     signal?: AbortSignal,
     config?: InlineAskQuestionConfig,
   ): Promise<Record<string, string | string[]> | null> {
+    if (signal?.aborted) return Promise.resolve(null);
+    if (this.pending.has(interactionId)) {
+      return Promise.reject(new Error(`Duplicate inline interaction: ${interactionId}`));
+    }
     this.deps.onBeforeShow?.();
     this.#suppress();
 
@@ -184,20 +185,23 @@ export class InlineInteractionPrompts {
         parentEl,
         input,
         (result) => {
-          setPending(null);
+          if (this.pending.get(interactionId) !== inline) return;
+          this.pending.delete(interactionId);
           this.#restore();
           resolve(result);
         },
         signal,
         config,
       );
-      setPending(inline);
+      this.pending.set(interactionId, inline);
       try {
         inline.render();
+        inline.setVisible(this.active);
       } catch (error) {
-        setPending(null);
+        this.pending.delete(interactionId);
         this.#restore();
         reject(error instanceof Error ? error : new Error(String(error)));
+        inline.destroy();
       }
     });
   }
@@ -211,16 +215,19 @@ export class InlineInteractionPrompts {
   }
 
   #suppress(): void {
-    const el = this.deps.getSuppressedEl?.();
-    if (!el) return;
     this.suppressDepth += 1;
-    el.addClass('claudian-hidden');
+    this.#syncSuppression();
   }
 
   #restore(): void {
+    this.suppressDepth = Math.max(0, this.suppressDepth - 1);
+    this.#syncSuppression();
+  }
+
+  #syncSuppression(): void {
     const el = this.deps.getSuppressedEl?.();
-    if (!el || this.suppressDepth <= 0) return;
-    this.suppressDepth -= 1;
-    if (this.suppressDepth === 0) el.removeClass('claudian-hidden');
+    if (!el) return;
+    if (this.active && this.suppressDepth > 0) el.addClass('claudian-hidden');
+    else el.removeClass('claudian-hidden');
   }
 }

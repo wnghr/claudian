@@ -1,4 +1,4 @@
-import { AcpJsonRpcTransport, AcpSubprocess } from '../../acp';
+import { ACPJSONRPCTransport, ACPSubprocess } from '../../acp';
 import {
   type NormalizedGrokSessionModels,
   normalizeGrokSessionModelMetadata,
@@ -22,16 +22,16 @@ export interface GrokModelCatalogProbeLike {
 export class GrokModelCatalogProbe implements GrokModelCatalogProbeLike {
   async discover(request: GrokModelCatalogProbeRequest): Promise<NormalizedGrokSessionModels> {
     request.signal?.throwIfAborted();
-    const process = new AcpSubprocess({
+    const process = new ACPSubprocess({
       args: ['agent', '--no-leader', 'stdio'],
       command: request.command,
       cwd: request.cwd,
       env: request.env,
     });
-    let transport: AcpJsonRpcTransport | undefined;
+    let transport: ACPJSONRPCTransport | undefined;
     try {
       process.start();
-      transport = new AcpJsonRpcTransport({
+      transport = new ACPJSONRPCTransport({
         input: process.stdout,
         onClose: listener => process.onClose(listener),
         output: process.stdin,
@@ -51,7 +51,12 @@ export class GrokModelCatalogProbe implements GrokModelCatalogProbeLike {
       // xAI wraps the model state inside an extension result within the JSON-RPC result.
       const models = response?.error == null ? parseGrokModelUpdateState(response?.result) : null;
       if (!models) throw new Error('Grok returned malformed model metadata.');
-      return normalizeGrokSessionModelMetadata({ models });
+      const catalog = normalizeGrokSessionModelMetadata({ models });
+      // The catalog is a complete capability snapshot; session updates may be partial.
+      return {
+        ...catalog,
+        models: catalog.models.map(model => ({ ...model, reasoningMetadataResolved: true })),
+      };
     } finally {
       transport?.dispose();
       await process.shutdown();

@@ -8,22 +8,15 @@ import { grokSettingsTabRenderer } from '@/providers/grok/ui/GrokSettingsTab';
 
 const mockGetHostnameKey = jest.fn(() => 'device:current');
 const mockRenderEnvironmentSettingsSection = jest.fn();
-const mockRenderProviderModelPicker = jest.fn();
-const mockCliResolverReset = jest.fn();
+const mockCLIResolverReset = jest.fn();
 const mockRefreshModelCatalog = jest.fn().mockResolvedValue({ changed: false });
 const mockGetServices = jest.fn(() => ({
-  cliResolver: { reset: mockCliResolverReset },
+  cliResolver: { reset: mockCLIResolverReset },
   modelCatalog: { refresh: mockRefreshModelCatalog, markStale: jest.fn() },
 }));
 
 jest.mock('node:fs');
 jest.mock('obsidian', () => {
-  class MockNotice {
-    constructor(message: string) {
-      notices.push(message);
-    }
-  }
-
   class MockSetting {
     public name = '';
     public desc = '';
@@ -65,7 +58,7 @@ jest.mock('obsidian', () => {
     }
   }
 
-  return { Notice: MockNotice, Setting: MockSetting };
+  return { Setting: MockSetting };
 });
 jest.mock('@/core/providers/ProviderSettingsCoordinator', () => ({
   ProviderSettingsCoordinator: {
@@ -84,17 +77,6 @@ jest.mock('@/core/providers/ProviderWorkspaceRegistry', () => ({
 jest.mock('@/shared/settings/EnvironmentSettingsSection', () => ({
   renderEnvironmentSettingsSection: (...args: unknown[]) => mockRenderEnvironmentSettingsSection(...args),
 }));
-jest.mock('@/shared/settings/ProviderModelPicker', () => ({
-  renderProviderModelPicker: (...args: unknown[]) => {
-    mockRenderProviderModelPicker(...args);
-    return { refresh: jest.fn() };
-  },
-}));
-jest.mock('@/utils/env', () => ({
-  ...jest.requireActual('@/utils/env'),
-  getHostnameKey: () => mockGetHostnameKey(),
-}));
-
 interface MockTextComponent {
   inputEl: {
     [key: string]: unknown;
@@ -139,8 +121,6 @@ interface MockElement {
 }
 
 const createdSettings: MockSetting[] = [];
-const createdElements: MockElement[] = [];
-const notices: string[] = [];
 
 function createTextComponent(): MockTextComponent {
   const component: MockTextComponent = {
@@ -216,7 +196,6 @@ function createElement(
     },
     toggleClass: jest.fn(),
   };
-  createdElements.push(element);
   return element;
 }
 
@@ -254,6 +233,7 @@ function makeCatalog() {
 
 function createPlugin(): any {
   const plugin: any = {
+    storage: { installationKey: mockGetHostnameKey() },
     getEnvironmentVariablesForScope: jest.fn(() => ''),
     mutateSettings: jest.fn(async (mutation: (settings: Record<string, unknown>) => void | Promise<void>) => {
       await mutation(plugin.settings);
@@ -304,6 +284,11 @@ function findSetting(name: string): MockSetting {
   return setting;
 }
 
+jest.mock('@/core/device/InstallationKey', () => ({
+  ...jest.requireActual('@/core/device/InstallationKey'),
+  getInstallationKey: () => mockGetHostnameKey(),
+}));
+
 describe('GrokSettingsTab', () => {
   const mockedExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>;
   const mockedStatSync = fs.statSync as jest.MockedFunction<typeof fs.statSync>;
@@ -311,11 +296,9 @@ describe('GrokSettingsTab', () => {
 
   beforeEach(() => {
     createdSettings.length = 0;
-    createdElements.length = 0;
-    notices.length = 0;
     jest.clearAllMocks();
     mockGetServices.mockReturnValue({
-      cliResolver: { reset: mockCliResolverReset },
+      cliResolver: { reset: mockCLIResolverReset },
       modelCatalog: { refresh: mockRefreshModelCatalog, markStale: jest.fn() },
     });
     mockRefreshModelCatalog.mockResolvedValue({ changed: false });
@@ -458,7 +441,7 @@ describe('GrokSettingsTab', () => {
   it('keeps a committed CLI path after recycle failure and allows reverting it', async () => {
     const plugin = createPlugin();
     const recycleError = new Error('recycle failed');
-    mockCliResolverReset.mockImplementationOnce(() => {
+    mockCLIResolverReset.mockImplementationOnce(() => {
       throw recycleError;
     });
     grokSettingsTabRenderer.render(createContainer(), createContext(plugin));
@@ -477,7 +460,7 @@ describe('GrokSettingsTab', () => {
 
     expect(plugin.runProviderExecutionTransition).toHaveBeenCalledTimes(2);
     expect(plugin.mutateSettings).toHaveBeenCalledTimes(2);
-    expect(mockCliResolverReset).toHaveBeenCalledTimes(2);
+    expect(mockCLIResolverReset).toHaveBeenCalledTimes(2);
     expect(getGrokProviderSettings(plugin.settings).cliPathsByHost).toEqual({});
   });
 
@@ -516,7 +499,7 @@ describe('GrokSettingsTab', () => {
     await applyTextInput(findSetting('CLI path').textComponents[0], '/opt/grok');
 
     expect(getGrokProviderSettings(plugin.settings).currentCatalog?.models).toHaveLength(2);
-    expect(mockCliResolverReset).toHaveBeenCalledTimes(1);
+    expect(mockCLIResolverReset).toHaveBeenCalledTimes(1);
     expect(plugin.runProviderExecutionTransition).toHaveBeenCalledWith(
       ['grok'],
       expect.any(Function),
@@ -526,22 +509,6 @@ describe('GrokSettingsTab', () => {
       expect.any(Function),
       expect.any(Function),
     );
-  });
-
-  it('omits authentication and BYOK documentation sections', () => {
-    const plugin = createPlugin();
-    grokSettingsTabRenderer.render(createContainer(), createContext(plugin));
-
-    expect(createdSettings.map(setting => setting.name)).not.toEqual(expect.arrayContaining([
-      'Authentication',
-      'Grok account',
-      'Bring your own model',
-      'Grok-native custom models',
-    ]));
-    expect(mockRenderEnvironmentSettingsSection).toHaveBeenCalledWith(expect.objectContaining({
-      heading: 'Environment',
-      scope: 'provider:grok',
-    }));
   });
 
   it('renders only native skills, hidden runtime commands, and the Grok environment scope', () => {
@@ -560,14 +527,20 @@ describe('GrokSettingsTab', () => {
       expect.objectContaining({ name: 'Hidden Grok commands' }),
     );
     expect(mockRenderEnvironmentSettingsSection).toHaveBeenCalledWith(expect.objectContaining({
+      heading: 'Environment',
       plugin,
       scope: 'provider:grok',
     }));
-    expect(createdSettings.map(setting => setting.name)).not.toEqual(expect.arrayContaining([
+    const forbiddenSections = [
+      'Authentication',
+      'Grok account',
+      'Bring your own model',
+      'Grok-native custom models',
       'Agents',
-      'Skills',
       'Subagents',
-    ]));
+    ];
+    expect(createdSettings.map(setting => setting.name).filter(name => forbiddenSections.includes(name))).toEqual([]);
+    expect(createdSettings.filter(setting => setting.name === 'Skills')).toHaveLength(1);
   });
 });
 

@@ -3,10 +3,8 @@ import type {
   ProviderModelCatalogRefreshResult,
   ProviderTransitionOwnerContext,
 } from '../../../core/providers/types';
-import { toError } from '../../../utils/error';
 import { computeGrokEnvironmentHash } from '../env/GrokSettingsReconciler';
 import {
-  clearGrokReasoningMetadata,
   type GrokDiscoveredModel,
   mergeGrokDiscoveredModels,
   normalizeGrokDiscoveredModels,
@@ -21,8 +19,6 @@ import type {
   GrokModelCatalogDiscoveryResult,
   GrokModelCatalogServiceLike,
 } from './GrokModelCatalogService';
-
-export type GrokCatalogState = 'failed' | 'idle' | 'ready' | 'refreshing';
 
 export interface GrokCatalogResult {
   catalog: GrokCatalogSnapshot | null;
@@ -53,7 +49,6 @@ export class GrokModelCatalogCoordinator {
   private liveRevision = 0;
   private readonly pendingLiveRevisions = new Set<number>();
   private refreshGeneration = 0;
-  private state: GrokCatalogState = 'idle';
   private transitionActive = false;
   private readonly transitionWaiters = new Set<() => void>();
 
@@ -64,10 +59,6 @@ export class GrokModelCatalogCoordinator {
 
   getCachedCatalog(): GrokCatalogSnapshot | null {
     return getCurrentGrokCatalog(this.plugin.settings);
-  }
-
-  getState(): GrokCatalogState {
-    return this.state;
   }
 
   refresh(context?: ProviderTransitionOwnerContext, signal?: AbortSignal): Promise<GrokCatalogResult> {
@@ -143,14 +134,7 @@ export class GrokModelCatalogCoordinator {
       return { changed: false };
     }
     this.#prepareLiveContext(contextKey);
-    const settings = getGrokProviderSettings(this.plugin.settings);
-    const enabledModelIds = new Set(settings.visibleModels ?? []);
-    const normalizedLiveModels = normalizeGrokDiscoveredModels(liveModels)
-      .map(model => (
-        settings.visibleModels === null || enabledModelIds.has(model.rawId)
-          ? model
-          : clearGrokReasoningMetadata(model)
-      ));
+    const normalizedLiveModels = normalizeGrokDiscoveredModels(liveModels);
     if (normalizedLiveModels.length === 0) {
       return { changed: false };
     }
@@ -211,7 +195,6 @@ export class GrokModelCatalogCoordinator {
     this.abortController?.abort();
     this.abortController = null;
     this.inFlightRefresh = null;
-    this.state = 'idle';
   }
 
   beginEnvironmentTransition(): void {
@@ -232,7 +215,6 @@ export class GrokModelCatalogCoordinator {
     this.liveDefaultRevision = 0;
     this.liveModelsById.clear();
     this.pendingLiveRevisions.clear();
-    this.state = 'idle';
   }
 
   dispose(): Promise<void> {
@@ -256,12 +238,7 @@ export class GrokModelCatalogCoordinator {
         this.runMetadataOperation(operation, transitionOwner, disposedResult));
     }
 
-    let promise: Promise<T>;
-    try {
-      promise = operation();
-    } catch (error) {
-      promise = Promise.reject(toError(error, 'Grok metadata operation failed'));
-    }
+    const promise = operation();
     this.activeMetadataOperations.add(promise);
     void promise.then(
       () => this.activeMetadataOperations.delete(promise),
@@ -291,7 +268,6 @@ export class GrokModelCatalogCoordinator {
     this.abortController?.abort();
     const abortController = new AbortController();
     this.abortController = abortController;
-    this.state = 'refreshing';
     const refreshStartRevision = this.liveRevision;
     const pendingLiveRevisionsAtStart = new Set(this.pendingLiveRevisions);
 
@@ -301,19 +277,15 @@ export class GrokModelCatalogCoordinator {
         context,
       );
       if (!this.#isCurrentRefresh(generation)) {
-        if (this.disposed) this.state = 'idle';
         return this.#skippedResult();
       }
       if (contextKey !== this.#getContextKey()) {
-        if (this.abortController === abortController) this.state = 'idle';
         return this.#skippedResult();
       }
       if (discovery.kind === 'skipped') {
-        this.state = this.getCachedCatalog() ? 'ready' : 'idle';
         return this.#skippedResult();
       }
       if (discovery.diagnostics) {
-        this.state = 'failed';
         return {
           ...this.#completedResult(),
           diagnostics: discovery.diagnostics ?? 'Grok models returned no available models',
@@ -328,10 +300,8 @@ export class GrokModelCatalogCoordinator {
         generation,
       );
       if (!this.#isCurrentRefresh(generation)) {
-        if (this.disposed) this.state = 'idle';
         return this.#skippedResult();
       }
-      this.state = 'ready';
       if (persisted.changed) {
         this.plugin.notifyProviderChatOptionsChanged('grok');
       }
@@ -342,10 +312,8 @@ export class GrokModelCatalogCoordinator {
       };
     } catch {
       if (!this.#isCurrentRefresh(generation)) {
-        if (this.disposed) this.state = 'idle';
         return this.#skippedResult();
       }
-      this.state = 'failed';
       return {
         ...this.#completedResult(),
         diagnostics: 'Grok model catalog refresh failed',
@@ -430,19 +398,7 @@ export class GrokModelCatalogCoordinator {
         return false;
       }
       const current = getCurrentGrokCatalog(settings);
-      const builtSnapshot = buildSnapshot(current);
-      const visibleModels = getGrokProviderSettings(settings).visibleModels;
-      const enabledModelIds = new Set(visibleModels ?? []);
-      const snapshot = visibleModels === null
-        ? builtSnapshot
-        : {
-          ...builtSnapshot,
-          models: builtSnapshot.models.map(model => (
-            enabledModelIds.has(model.rawId)
-              ? model
-              : clearGrokReasoningMetadata(model)
-          )),
-        };
+      const snapshot = buildSnapshot(current);
       const changed = !sameCatalogContent(current, snapshot);
       const persistedSettingsChanged = !sameValue(current, snapshot);
       if (persistedSettingsChanged) {

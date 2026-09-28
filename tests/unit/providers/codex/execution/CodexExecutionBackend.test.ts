@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 import pair from '@test/fixtures/providers/codex/turn-stats-pair.json';
 import { TEST_CODEX_MODEL } from '@test/helpers/codexModels';
 
@@ -10,6 +13,8 @@ import type {
 } from '@/core/execution';
 import { isSteerableExecutionSession } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
+import type { ClaudianSettings } from '@/core/types';
+type MutableTestHost = ProviderHost & { settings: ClaudianSettings };
 
 const mockTransportRequest = jest.fn();
 const mockTransportNotify = jest.fn();
@@ -19,11 +24,11 @@ const mockTransportDispose = jest.fn();
 const mockTransportStart = jest.fn();
 const mockResolveLaunchSpec = jest.fn();
 
-jest.mock('@/providers/codex/runtime/CodexRpcTransport', () => {
-  const actual = jest.requireActual('@/providers/codex/runtime/CodexRpcTransport');
+jest.mock('@/providers/codex/runtime/CodexRPCTransport', () => {
+  const actual = jest.requireActual('@/providers/codex/runtime/CodexRPCTransport');
   return {
     ...actual,
-    CodexRpcTransport: jest.fn().mockImplementation(() => ({
+    CodexRPCTransport: jest.fn().mockImplementation(() => ({
       request: mockTransportRequest,
       notify: mockTransportNotify,
       onNotification: mockTransportOnNotification,
@@ -60,7 +65,7 @@ jest.mock('@/providers/codex/runtime/codexAppServerSupport', () => {
 
 import { CodexExecutionBackend } from '@/providers/codex/execution/CodexExecutionBackend';
 import { parseCodexSessionContent } from '@/providers/codex/history/CodexHistoryStore';
-import { CodexRpcResponseError } from '@/providers/codex/runtime/CodexRpcTransport';
+import { CodexRPCResponseError } from '@/providers/codex/runtime/CodexRPCTransport';
 import { updateCodexProviderSettings } from '@/providers/codex/settings';
 
 type NotificationHandler = (params: unknown) => void;
@@ -169,7 +174,7 @@ function createTurnResult(turnId: string) {
   };
 }
 
-function createPlugin(): ProviderHost {
+function createPlugin(): MutableTestHost {
   return {
     settings: {
       model: TEST_CODEX_MODEL,
@@ -226,7 +231,7 @@ function createPlugin(): ProviderHost {
       truncated: false,
       warnings: [],
     }),
-  } as unknown as ProviderHost;
+  } as unknown as MutableTestHost;
 }
 
 function createInteractionPort(): ProviderInteractionPort {
@@ -348,6 +353,18 @@ async function collectEvents(
   return result;
 }
 
+function createImageRequest(): ProviderExecutionRequest {
+  return createRequest(undefined, {
+    input: [{
+      type: 'image',
+      image: {
+        id: 'image-1', name: 'pasted.png', mediaType: 'image/png',
+        data: 'aGVsbG8=', size: 5, source: 'paste',
+      },
+    }],
+  });
+}
+
 async function collectUntil(
   events: AsyncIterable<ProviderExecutionEvent>,
   predicate: (event: ProviderExecutionEvent) => boolean,
@@ -441,6 +458,141 @@ describe('CodexExecutionBackend', () => {
         canRepresentHostPath: () => true,
       },
     });
+  });
+
+  it('publishes native subagent completion after the parent settles and through later follow-ups', async () => {
+    configureSteerTransport('parent', 'parent-turn', () => ({}));
+    const baseRequest = mockTransportRequest.getMockImplementation()!;
+    let answer = 'Ready.';
+    mockTransportRequest.mockImplementation((method: string, ...args: unknown[]) => {
+      if (method === 'thread/read') return Promise.resolve({ thread: {
+        ...createThreadResult('child', [{ id: 'child-turn', items: [
+          { type: 'agentMessage', id: 'answer', phase: 'final_answer', text: answer },
+        ] }]).thread,
+        agentNickname: 'Bohr', model: TEST_CODEX_MODEL, reasoningEffort: 'high',
+      } });
+      return baseRequest(method, ...args);
+    });
+    const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+    const updates: ProviderSessionEvent[] = [];
+    session.onEvent(event => updates.push(event));
+    try {
+      const run = session.execute(createRequest());
+      const output = collectEvents(run.events);
+      await waitForCondition(() => mockTransportRequest.mock.calls.some(([method]) => method === 'turn/start'));
+      const activity = (id: string, kind: string) => emitNotification('item/completed', {
+        threadId: 'parent', turnId: 'parent-turn',
+        item: { type: 'subAgentActivity', id, kind, agentThreadId: 'child', agentPath: '/root/ui_test_helper' },
+      });
+      activity('spawn', 'started');
+      completeTurn('parent', 'parent-turn');
+      await output;
+      emitNotification('turn/started', { threadId: 'child', turn: { id: 'child-turn', status: 'inProgress', items: [], error: null } });
+      emitNotification('rawResponseItem/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'custom_tool_call', call_id: 'clock-call', name: 'exec', input: 'const t = await tools.clock__curr_time({}); text(t.current_time);',
+      } });
+      expect((updates.at(-1) as any).subagent.toolCalls).toEqual([expect.objectContaining({ id: 'clock-call', status: 'running' })]);
+      emitNotification('rawResponseItem/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'custom_tool_call_output', call_id: 'clock-call', output: [{ type: 'input_text', text: 'Clock result' }],
+      } });
+      expect((updates.at(-1) as any).subagent.toolCalls).toEqual([expect.objectContaining({ id: 'clock-call', status: 'completed', result: 'Clock result' })]);
+      // A later canonical projection must update the already visible raw row.
+      emitNotification('item/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'dynamicToolCall', id: 'canonical-clock', tool: 'clock__curr_time', arguments: {},
+        status: 'completed', success: true, contentItems: [{ type: 'inputText', text: 'Clock result' }],
+      } });
+      expect((updates.at(-1) as any).subagent.toolCalls).toEqual([expect.objectContaining({ id: 'clock-call', status: 'completed', result: 'Clock result' })]);
+      emitNotification('rawResponseItem/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'function_call', call_id: 'command-call', name: 'exec_command', arguments: JSON.stringify({ cmd: 'echo child' }),
+      } });
+      emitNotification('item/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'commandExecution', id: 'canonical-command', command: 'echo child', cwd: '/vault',
+        status: 'completed', commandActions: [{ type: 'unknown', command: 'echo child' }], aggregatedOutput: 'child', exitCode: 0, durationMs: 10,
+      } });
+      emitNotification('rawResponseItem/completed', { threadId: 'child', turnId: 'child-turn', item: {
+        type: 'function_call_output', call_id: 'command-call', output: 'child',
+      } });
+      emitNotification('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed', items: [], error: null } });
+      expect(updates.at(-1)).toEqual(expect.objectContaining({ subagent: expect.objectContaining({
+        toolCalls: expect.arrayContaining([
+          expect.objectContaining({ id: 'clock-call', status: 'completed', result: expect.stringContaining('Clock result') }),
+          expect.objectContaining({ id: 'command-call', status: 'completed', result: 'child' }),
+        ]),
+      }) }));
+      expect((updates.at(-1) as any).subagent.toolCalls).toHaveLength(2);
+      activity('child-completed-1', 'completed');
+      await waitForCondition(() => updates.some(event => (event as any).subagent?.result === 'Ready.'));
+      expect(updates).toContainEqual(expect.objectContaining({
+        type: 'subagent_updated', scope: expect.objectContaining({ kind: 'session' }),
+        subagent: expect.objectContaining({ id: 'spawn', agentId: 'child', status: 'completed', result: 'Ready.' }),
+      }));
+      answer = 'Two.';
+      activity('followup', 'interacted');
+      activity('child-completed-2', 'completed');
+      await waitForCondition(() => updates.some(event => (event as any).subagent?.result === 'Two.'));
+      expect(updates.at(-1)).toEqual(expect.objectContaining({ subagent: expect.objectContaining({ id: 'spawn', status: 'completed', result: 'Two.' }) }));
+    } finally { await session.dispose(); }
+  });
+
+  it.each(['completion', 'failure', 'cancellation', 'disposal'] as const)(
+    'sends image bytes through a temporary file and removes it on %s',
+    async outcome => {
+      const startResult = createDeferred<ReturnType<typeof createTurnResult>>();
+      configureSteerTransport('thread-image', 'turn-image', () => ({}));
+      const transport = mockTransportRequest.getMockImplementation()!;
+      mockTransportRequest.mockImplementation((method: string, ...args: unknown[]) => (
+        method === 'turn/start' ? startResult.promise : transport(method, ...args)
+      ));
+      const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+      try {
+        const run = session.execute(createImageRequest());
+        const events = collectEvents(run.events);
+        await waitForCondition(() => mockTransportRequest.mock.calls.some(([method]) => method === 'turn/start'));
+        const input = mockTransportRequest.mock.calls.find(([method]) => method === 'turn/start')![1].input;
+        expect(input).toEqual([{ type: 'localImage', path: expect.any(String) }]);
+        const filePath = input[0].path;
+        expect(readFileSync(filePath)).toEqual(Buffer.from('hello'));
+
+        if (outcome === 'failure') {
+          startResult.reject(new Error('Native turn rejected'));
+        } else {
+          startResult.resolve(createTurnResult('turn-image'));
+        }
+        await flushMicrotasks();
+        expect(existsSync(filePath)).toBe(outcome !== 'failure');
+        if (outcome === 'completion') completeTurn('thread-image', 'turn-image');
+        else if (outcome === 'cancellation') run.cancel();
+        else if (outcome === 'disposal') await session.dispose();
+        expect((await events).at(-1)?.type).toBe(
+          outcome === 'completion' ? 'turn_completed' : outcome === 'failure' ? 'execution_error' : 'cancelled',
+        );
+        expect(existsSync(dirname(filePath))).toBe(false);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+
+  it.each([true, false])('retains steering image bytes until native acknowledgement (accepted: %s)', async accepted => {
+    const steerResult = createDeferred<{ turnId: string }>();
+    configureSteerTransport('thread-image', 'turn-image', () => steerResult.promise);
+    const { run, session } = await createActiveSteerSession();
+    try {
+      const steering = session.steer(createImageRequest());
+      await waitForCondition(() => mockTransportRequest.mock.calls.some(([method]) => method === 'turn/steer'));
+      const input = mockTransportRequest.mock.calls.find(([method]) => method === 'turn/steer')![1].input;
+      expect(input).toEqual([{ type: 'localImage', path: expect.any(String) }]);
+      const filePath = input[0].path;
+      expect(readFileSync(filePath)).toEqual(Buffer.from('hello'));
+      if (accepted) steerResult.resolve({ turnId: 'turn-image' });
+      else steerResult.reject(new CodexRPCResponseError({ code: -32602, message: 'Rejected image' }));
+      await expect(steering).resolves.toBe(accepted);
+      expect(existsSync(dirname(filePath))).toBe(false);
+    } finally {
+      run.cancel();
+      await collectEvents(run.events);
+      await session.dispose();
+    }
   });
 
   it('matches live TurnStats to the rollout from a captured native Codex turn', async () => {
@@ -658,7 +810,7 @@ describe('CodexExecutionBackend', () => {
     await collectEvents(session.execute(createRequest(undefined, {
       configuration: {
         systemInstructions: {
-          dynamicSections: ['## Collab Mode\nRuntime guidance.'],
+          dynamicSections: ['## Additional context\nRuntime guidance.'],
           kind: 'provider-default',
         },
         model: TEST_CODEX_MODEL,
@@ -672,8 +824,8 @@ describe('CodexExecutionBackend', () => {
       ([method]) => method === 'thread/start',
     )?.[1] as { baseInstructions?: string } | undefined;
     expect(threadStart?.baseInstructions).toContain('## Runtime Context');
-    expect(threadStart?.baseInstructions).toContain('## Collab Mode\nRuntime guidance.');
-    expect(threadStart?.baseInstructions?.match(/## Collab Mode/g)).toHaveLength(1);
+    expect(threadStart?.baseInstructions).toContain('## Additional context\nRuntime guidance.');
+    expect(threadStart?.baseInstructions?.match(/## Additional context/g)).toHaveLength(1);
     await session.dispose();
   });
 
@@ -1655,6 +1807,40 @@ describe('CodexExecutionBackend', () => {
     expect(turnRequests[1]).not.toContain('cancel prior question');
 
     await replacement.dispose();
+  });
+
+  it('cancels the run when the consumer stops iterating while it is still open', async () => {
+    const turnStart = createDeferred<ReturnType<typeof createTurnResult>>();
+    mockTransportRequest.mockImplementation(async (method: string) => {
+      if (method === 'initialize') {
+        return {
+          userAgent: 'test',
+          codexHome: '/tmp/.codex',
+          platformFamily: 'unix',
+          platformOs: 'macos',
+        };
+      }
+      if (method === 'thread/start') {
+        return createThreadResult('thread-early-return');
+      }
+      if (method === 'turn/start') return turnStart.promise;
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const session = new CodexExecutionBackend(createPlugin())
+      .createSession(createSessionConfig());
+    const run = session.execute(createRequest());
+    await waitForCondition(() => mockTransportRequest.mock.calls.some(
+      ([method]) => method === 'turn/start',
+    ));
+    expect(session.getSnapshot().status).toBe('executing');
+
+    await run.events[Symbol.asyncIterator]().return?.();
+    await flushMicrotasks();
+
+    expect(session.getSnapshot().status).toBe('idle');
+    turnStart.resolve(createTurnResult('turn-early-return'));
+    await flushMicrotasks();
+    await session.dispose();
   });
 
   it('publishes a late turn-start acknowledgement without resurrecting cancelled status', async () => {
@@ -2722,10 +2908,8 @@ describe('CodexExecutionBackend', () => {
       }),
       expect.objectContaining({ type: 'turn_completed' }),
     ]));
-    expect(secondEvents).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ nativeTurnId: 'turn-old' }),
-      expect.objectContaining({ text: 'late old output' }),
-    ]));
+    expect(secondEvents).not.toContainEqual(expect.objectContaining({ nativeTurnId: 'turn-old' }));
+    expect(secondEvents).not.toContainEqual(expect.objectContaining({ text: 'late old output' }));
     expect(mockProcessStart).toHaveBeenCalledTimes(2);
 
     await session.dispose();
@@ -2998,7 +3182,7 @@ describe('CodexExecutionBackend', () => {
     }
   });
 
-  it('normalizes process death into a terminal execution error and fences late output', async () => {
+  it('normalizes process death into a terminal execution error', async () => {
     mockTransportRequest.mockImplementation(async (method: string) => {
       if (method === 'initialize') {
         return {
@@ -3023,13 +3207,6 @@ describe('CodexExecutionBackend', () => {
       type: 'execution_error',
       category: 'process-exited',
     }));
-    emitNotification('item/agentMessage/delta', {
-      threadId: 'thread-death',
-      turnId: 'turn-death',
-      itemId: 'late',
-      delta: 'late',
-    });
-    expect(events.some(event => event.type === 'text_delta' && event.text === 'late')).toBe(false);
 
     await session.dispose();
   });
@@ -3098,6 +3275,41 @@ describe('CodexExecutionBackend', () => {
       sandboxPolicy: { type: 'dangerFullAccess' },
     }));
 
+    await session.dispose();
+  });
+
+  it('rejects explicit High when the selected model does not advertise it', async () => {
+    const plugin = createPlugin();
+    const model = (plugin.settings.providerConfigs.codex!.discoveredModels as any[])[0];
+    model.supportedReasoningEfforts = [{ value: 'medium', description: '' }];
+    const session = new CodexExecutionBackend(plugin).createSession(createSessionConfig());
+    const request = createRequest();
+    const events = await collectEvents(session.execute({
+      ...request, configuration: { ...request.configuration, reasoning: 'high' },
+    }).events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+    expect(mockTransportRequest.mock.calls.some(call => call[0] === 'turn/start')).toBe(false);
+    await session.dispose();
+  });
+
+  it.each([null, 'low'])('preserves the explicit toolbar reasoning %s over saved defaults', async reasoning => {
+    mockTransportRequest.mockImplementation(async (method: string) => {
+      if (method === 'initialize') return { userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos' };
+      if (method === 'thread/start') return createThreadResult('thread-toolbar');
+      if (method === 'turn/start') {
+        queueMicrotask(() => completeTurn('thread-toolbar', 'turn-toolbar'));
+        return createTurnResult('turn-toolbar');
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const plugin = createPlugin();
+    plugin.settings.savedProviderEffort = { codex: 'high' };
+    const session = new CodexExecutionBackend(plugin).createSession(createSessionConfig());
+    const request = createRequest();
+    await collectEvents(session.execute({ ...request, configuration: { ...request.configuration, reasoning } }).events);
+    const turn = mockTransportRequest.mock.calls.find(call => call[0] === 'turn/start')?.[1];
+    expect(turn).toMatchObject({ model: TEST_CODEX_MODEL, effort: reasoning,
+      collaborationMode: { settings: { reasoning_effort: reasoning } } });
     await session.dispose();
   });
 
@@ -3180,9 +3392,9 @@ describe('CodexExecutionBackend', () => {
     }));
     expect(turnParams[1]).toEqual(expect.objectContaining({
       model: 'gpt-5.6-luna',
-      effort: 'medium',
+      effort: 'high',
       collaborationMode: expect.objectContaining({
-        settings: expect.objectContaining({ reasoning_effort: 'medium' }),
+        settings: expect.objectContaining({ reasoning_effort: 'high' }),
       }),
     }));
 
@@ -3411,14 +3623,14 @@ describe('CodexExecutionBackend', () => {
     );
     const { run, session } = await createActiveSteerSession();
 
-    const steering = session.steer(createRequest(
-      new AbortController().signal,
-      { input: [{ type: 'text', text: 'redirect' }] },
-    ));
+    const steering = session.steer(createImageRequest());
     await waitForCondition(() => mockTransportRequest.mock.calls.some(
       ([method]) => method === 'turn/steer',
     ));
+    const filePath = mockTransportRequest.mock.calls.find(([method]) => method === 'turn/steer')![1].input[0].path;
+    expect(readFileSync(filePath)).toEqual(Buffer.from('hello'));
     const disposing = session.dispose();
+    expect(existsSync(dirname(filePath))).toBe(false);
     steerResult.reject(new Error('Transport disposed after steer handoff'));
 
     await expect(steering).rejects.toThrow(
@@ -3478,7 +3690,7 @@ describe('CodexExecutionBackend', () => {
 
   it('returns false for an explicit native steer rejection', async () => {
     configureSteerTransport('thread-steer-reject', 'turn-steer-reject', () => {
-      throw new CodexRpcResponseError({
+      throw new CodexRPCResponseError({
         code: -32602,
         message: 'Invalid steer parameters',
       });
@@ -3500,7 +3712,7 @@ describe('CodexExecutionBackend', () => {
       'thread-steer-internal-error',
       'turn-steer-internal-error',
       () => {
-        throw new CodexRpcResponseError({
+        throw new CodexRPCResponseError({
           code: -32603,
           message: 'Internal error after steer dispatch',
         });

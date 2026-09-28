@@ -1,3 +1,4 @@
+import type { ProviderCapabilities } from '../providers/types';
 import type { SDKToolUseResult } from './diff';
 import type { ProviderId } from './provider';
 import type { SubagentMode, ToolCallInfo, ToolProviderPayload } from './tools';
@@ -112,13 +113,15 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  /** Display-only content (e.g., "/tests" when content is the expanded prompt). */
+  /** Display-only content; an empty string suppresses a user bubble while retaining its native turn. */
   displayContent?: string;
   timestamp: number;
   /** Assistant completion time; absent until the response finishes. */
   completedAt?: number;
   /** Provider-triggered response without a new user request. */
   isAutomaticResponse?: boolean;
+  /** Previous transcript segment of this response, retained across history copies. */
+  responseContinuationOf?: string;
   toolCalls?: ToolCallInfo[];
   contentBlocks?: ContentBlock[];
   linkedContentPath?: string;
@@ -138,6 +141,8 @@ export interface ChatMessage {
   durationFlavorWord?: string;
   /** Provider-native user message identifier used for rewind. */
   userMessageId?: string;
+  /** Provider-projected sibling prompt IDs, including this prompt, in branch order. */
+  treeBranches?: readonly string[];
   /** Provider-native assistant message identifier used for rewind/fork checkpoints. */
   assistantMessageId?: string;
 }
@@ -176,6 +181,12 @@ export interface Conversation {
   /** Assistant checkpoint identifier for resumeAtMessageId after rewind. */
   resumeAtMessageId?: string;
 }
+
+/** Detached metadata for controls that do not need transcript or native session state. */
+export type ConversationSummary = Readonly<Pick<Conversation, 'id' | 'providerId' | 'title' | 'selectedModel' | 'isPinned'> & {
+  capabilities?: Readonly<ProviderCapabilities>;
+  usage?: Readonly<Pick<UsageInfo, 'model'>>;
+}>;
 
 export type ConversationMutablePatch = Partial<Omit<
   Conversation,
@@ -269,6 +280,7 @@ export type StreamChunk =
       isError?: boolean;
       isBlocked?: boolean;
       toolUseResult?: SDKToolUseResult;
+      providerPayload?: ToolProviderPayload;
     }
   | { type: 'tool_output'; id: string; content: string }
   | {
@@ -282,7 +294,8 @@ export type StreamChunk =
   | { type: 'usage'; usage: UsageInfo; sessionId?: string | null }
   | { type: 'context_compacted' }
   | { type: 'task_notification'; content: string }
-  | { type: 'subagent_tool_use'; subagentId: string; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'subagent_tool_use'; subagentId: string; id: string; name: string; input: Record<string, unknown>; providerPayload?: ToolProviderPayload }
+  | { type: 'subagent_tool_output'; subagentId: string; id: string; content: string }
   | {
       type: 'subagent_tool_result';
       subagentId: string;
@@ -292,6 +305,7 @@ export type StreamChunk =
       isError?: boolean;
       isBlocked?: boolean;
       toolUseResult?: SDKToolUseResult;
+      providerPayload?: ToolProviderPayload;
     };
 
 /**

@@ -2,7 +2,6 @@ import { CODEX_SPARK_MODEL, TEST_CODEX_CATALOG } from '@test/helpers/codexModels
 
 import {
   applyCodexModelDefaults,
-  createCodexVisibleModelFilter,
   DEFAULT_CODEX_PROVIDER_SETTINGS,
   getCodexProviderSettings,
   getEffectiveCodexReasoningSummary,
@@ -17,9 +16,9 @@ import {
 const mockGetHostnameKey = jest.fn(() => 'host-a');
 const originalPlatform = process.platform;
 
-jest.mock('@/utils/env', () => ({
-  ...jest.requireActual('@/utils/env'),
-  getHostnameKey: () => mockGetHostnameKey(),
+jest.mock('@/core/device/InstallationKey', () => ({
+  ...jest.requireActual('@/core/device/InstallationKey'),
+  getInstallationKey: () => mockGetHostnameKey(),
 }));
 
 describe('codex settings', () => {
@@ -128,10 +127,6 @@ describe('codex settings', () => {
       discoveredModels,
     )).toEqual(['gpt-5.4-mini', 'missing-model']);
     expect(normalizeCodexVisibleModels(undefined, discoveredModels)).toBeNull();
-    expect(createCodexVisibleModelFilter(
-      ['gpt-5.5', 'gpt-5.4-mini'],
-      discoveredModels,
-    )).toEqual(['gpt-5.5', 'gpt-5.4-mini']);
   });
 
   it('normalizes model aliases against the discovered catalog', () => {
@@ -489,11 +484,11 @@ describe('codex settings', () => {
         'host-b': 'Debian',
       },
     });
-    expect(result.config).not.toHaveProperty('installationMethod');
-    expect(result.config).not.toHaveProperty('wslDistroOverride');
+    expect(result.config).toHaveProperty('installationMethod');
+    expect(result.config).toHaveProperty('wslDistroOverride');
   });
 
-  it('migrates legacy Windows Codex installation scalars into current host maps', () => {
+  it('does not import retired Windows installation scalars', () => {
     const result = normalizeCodexStoredConfig(
       {
         providerConfigs: {
@@ -509,15 +504,11 @@ describe('codex settings', () => {
       },
     );
 
-    expect(result.changed).toBe(true);
-    expect(result.config.installationMethodsByHost).toEqual({
-      'host-a': 'wsl',
-    });
-    expect(result.config.wslDistroOverridesByHost).toEqual({
-      'host-a': 'Ubuntu',
-    });
-    expect(result.config).not.toHaveProperty('installationMethod');
-    expect(result.config).not.toHaveProperty('wslDistroOverride');
+    expect(result.changed).toBe(false);
+    expect(result.config.installationMethodsByHost).toEqual({});
+    expect(result.config.wslDistroOverridesByHost).toEqual({});
+    expect(result.config).toHaveProperty('installationMethod');
+    expect(result.config).toHaveProperty('wslDistroOverride');
   });
 
   it('forces reasoning summary off for GPT-5.3 Codex Spark', () => {

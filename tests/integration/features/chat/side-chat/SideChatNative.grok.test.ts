@@ -4,12 +4,12 @@ import * as path from 'node:path';
 import initializeFixture from '@test/fixtures/providers/grok/extensions/plan-mode-hook.json';
 
 jest.mock('cross-spawn', () => jest.fn());
+import { createForkTestEnvironment, type ForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
+import { createNativeRPCProcess } from '@test/helpers/providers/NativeRPCTestProcess';
 import spawn from 'cross-spawn';
 
 import { GrokExecutionBackend } from '@/providers/grok/execution/GrokExecutionBackend';
 
-import { createNativeRpcProcess } from '../tabs/NativeRpcTestProcess';
-import { createForkTestEnvironment, type ForkTestEnvironment } from '../tabs/ProviderForkTestHarness';
 import { traceSideChild } from './SideChatNativeTracer';
 
 function createNativeGrok(env: ForkTestEnvironment) {
@@ -19,7 +19,7 @@ function createNativeGrok(env: ForkTestEnvironment) {
   const directory = (id: string) => path.join(env.root, 'grok', 'sessions', encodeURIComponent(env.root), id);
   const sourceFile = path.join(directory('grok-source'), 'updates.jsonl');
   let ordinal = 0;
-  jest.mocked(spawn).mockImplementation(() => createNativeRpcProcess(async (method, params, notify) => {
+  jest.mocked(spawn).mockImplementation(() => createNativeRPCProcess(async (method, params, notify) => {
     operations.push({ method, params });
     if (method === 'initialize') return initializeFixture.initializeResult;
     if (method === 'session/new') {

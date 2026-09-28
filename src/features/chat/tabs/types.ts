@@ -64,6 +64,7 @@ export interface TabManagerInterface {
 
   /** Gets all tabs. */
   getAllTabs(): AssembledTabRuntime[];
+  getTabIdentities(): readonly TabProviderCatalogContext[];
 
   /** Reports aggregate user-visible work for a runtime tab. */
   isTabWorking(tabId: TabId): boolean;
@@ -189,7 +190,7 @@ export interface AssembledTabRuntime {
   readonly id: TabId;
 
   /** Explicit lifecycle state. */
-  lifecycleState: TabLifecycleState;
+  readonly lifecycleState: TabLifecycleState;
 
   /** State of loading the provider-owned conversation into the tab UI. */
   hydrationState: TabHydrationState;
@@ -198,13 +199,13 @@ export interface AssembledTabRuntime {
    * Draft model selected in a blank tab (before first send).
    * Used to derive provider on first send. Null after binding.
    */
-  draftModel: string | null;
+  readonly draftModel: string | null;
 
   /** Active provider for this tab's current conversation/runtime. */
-  providerId: ProviderId | null;
+  readonly providerId: ProviderId | null;
 
   /** Conversation ID bound to this tab (null for new/empty tabs). */
-  conversationId: string | null;
+  readonly conversationId: string | null;
 
   /** Per-tab owner of provider execution and session lifecycle. */
   readonly executionCoordinator: ChatExecutionCoordinator;

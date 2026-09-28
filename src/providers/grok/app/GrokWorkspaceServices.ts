@@ -2,12 +2,11 @@ import type { ProviderCommandCatalog } from '../../../core/providers/commands/Pr
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
-  ProviderTabWarmupPolicy,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
 import { GrokCommandCatalog } from '../commands/GrokCommandCatalog';
-import { GrokCliResolver } from '../runtime/GrokCliResolver';
+import { GrokCLIResolver } from '../runtime/GrokCLIResolver';
 import { GrokModelCatalogCoordinator } from '../runtime/GrokModelCatalogCoordinator';
 import { GrokModelCatalogService } from '../runtime/GrokModelCatalogService';
 import { createGrokModels } from '../runtime/GrokModels';
@@ -16,7 +15,7 @@ import { GrokCommandLoader } from './GrokCommandLoader';
 import { GrokCommandMetadataProbe } from './GrokCommandMetadataProbe';
 
 export interface GrokWorkspaceServices extends ProviderWorkspaceServices {
-  cliResolver: GrokCliResolver;
+  cliResolver: GrokCLIResolver;
   commandCatalog: ProviderCommandCatalog;
   modelCatalogCoordinator: GrokModelCatalogCoordinator;
   dispose(): Promise<void>;
@@ -25,12 +24,6 @@ export interface GrokWorkspaceServices extends ProviderWorkspaceServices {
 export interface GrokWorkspaceServicesOptions {
   readonly commandMetadataProbe?: GrokCommandMetadataProbe;
 }
-
-const grokTabWarmupPolicy: ProviderTabWarmupPolicy = {
-  resolveMode() {
-    return 'commands';
-  },
-};
 
 export async function createGrokWorkspaceServices(
   plugin: ProviderHost,
@@ -70,12 +63,11 @@ export async function createGrokWorkspaceServices(
     });
 
   return {
-    cliResolver: new GrokCliResolver(),
+    cliResolver: new GrokCLIResolver(),
     commandCatalog: new GrokCommandCatalog(),
     modelCatalogCoordinator,
     commandLoader: new GrokCommandLoader(commandMetadataProbe),
     settingsTabRenderer: grokSettingsTabRenderer,
-    tabWarmupPolicy: grokTabWarmupPolicy,
     modelCatalog,
     async dispose() {
       unregisterTransitionHook();
@@ -89,6 +81,7 @@ export async function createGrokWorkspaceServices(
 }
 
 export const grokWorkspaceRegistration: ProviderWorkspaceRegistration<GrokWorkspaceServices> = {
+  consumesAgentSkills: true,
   initialize: async ({ plugin }) => createGrokWorkspaceServices(plugin),
 };
 

@@ -1,12 +1,12 @@
 import * as fs from 'fs';
 import { Setting } from 'obsidian';
 
-import { probeCliInstallation } from '@/core/providers/cli/CliInstallationProbe';
+import { probeCLIInstallation } from '@/core/providers/cli/CLIInstallationProbe';
 import type { ProviderVaultEntryRepository } from '@/core/providers/commands/ProviderVaultEntryRepository';
 import { getRuntimeEnvironmentVariables } from '@/core/providers/providerEnvironment';
-import type { ProviderCliResolver } from '@/core/providers/types';
+import type { ProviderCLIResolver } from '@/core/providers/types';
 import { CLAUDE_PROVIDER_ICON } from '@/shared/icons';
-import { renderCliInstallationSetting } from '@/shared/settings/CliInstallationSetting';
+import { renderCLIInstallationSetting } from '@/shared/settings/CLIInstallationSetting';
 
 import type { ProviderModelCatalog } from '../../../core/providers/models/ProviderModelCatalog';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
@@ -16,8 +16,7 @@ import { renderEnvironmentSettingsSection } from '../../../shared/settings/Envir
 import type { ProviderEnablementSettingOptions } from '../../../shared/settings/ProviderEnablementSetting';
 import { renderLastEnabledProviderWarning, renderProviderModelEnablementWarning } from '../../../shared/settings/ProviderModelEnablementWarning';
 import { renderProviderModelsSection } from '../../../shared/settings/ProviderModelsSection';
-import { getHostnameKey } from '../../../utils/env';
-import { normalizeConfiguredCliPath } from '../../../utils/path';
+import { normalizeConfiguredCLIPath } from '../../../utils/path';
 import {
   getClaudeModelOptions,
 } from '../modelOptions';
@@ -30,7 +29,7 @@ import {
 import { SlashCommandSettings } from './SlashCommandSettings';
 
 export function createClaudeSettingsTabRenderer(
-  claudeWorkspace: { cliResolver: Pick<ProviderCliResolver, 'reset'>; vaultCommandRepository: ProviderVaultEntryRepository; modelCatalog: ProviderModelCatalog; },
+  claudeWorkspace: { cliResolver: Pick<ProviderCLIResolver, 'reset'>; vaultCommandRepository: ProviderVaultEntryRepository; modelCatalog: ProviderModelCatalog; },
 ): ProviderSettingsTabRenderer {
   return {
     render(container, context) {
@@ -80,12 +79,12 @@ export function createClaudeSettingsTabRenderer(
         providerName: 'Claude',
       });
 
-      const hostnameKey = getHostnameKey();
+      const hostnameKey = context.plugin.storage.installationKey;
       const validatePath = (value: string): string | null => {
         const trimmed = value.trim();
         if (!trimmed) return null;
 
-        const expandedPath = normalizeConfiguredCliPath(trimmed);
+        const expandedPath = normalizeConfiguredCLIPath(trimmed);
 
         if (!fs.existsSync(expandedPath)) {
           return t('settings.cliPath.validation.notExist');
@@ -97,13 +96,13 @@ export function createClaudeSettingsTabRenderer(
         return null;
       };
 
-      renderCliInstallationSetting({
+      renderCLIInstallationSetting({
         cliName: 'Claude Code',
         icon: CLAUDE_PROVIDER_ICON,
         inspect: async () => {
           const settings = context.plugin.settings as unknown as Record<string, unknown>;
           const config = getClaudeProviderSettings(settings);
-          return probeCliInstallation({
+          return probeCLIInstallation({
             path: await context.plugin.getResolvedProviderCliPath('claude'),
             configuredPath: config.cliPathsByHost[hostnameKey] || config.cliPath,
             args: ['--version'],

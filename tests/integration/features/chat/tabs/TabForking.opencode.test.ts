@@ -6,12 +6,12 @@ import spawn from 'cross-spawn';
 
 jest.mock('cross-spawn', () => jest.fn());
 
+import { createForkTestEnvironment, type ForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
+import { createNativeRPCProcess, createNativeVersionProcess } from '@test/helpers/providers/NativeRPCTestProcess';
+
 import { OpencodeExecutionBackend } from '@/providers/opencode/execution/OpencodeExecutionBackend';
 import { OpencodeConversationHistoryService } from '@/providers/opencode/history/OpencodeConversationHistoryService';
 import { OpencodeServerService } from '@/providers/opencode/http/OpencodeServerService';
-
-import { createNativeRpcProcess, createNativeVersionProcess } from './NativeRpcTestProcess';
-import { createForkTestEnvironment, type ForkTestEnvironment } from './ProviderForkTestHarness';
 
 interface NativeMessage {
   info: { id: string; role: string };
@@ -22,7 +22,7 @@ interface NativeMessage {
 async function createNativeOpencode(env: ForkTestEnvironment) {
   const sessions = new Map<string, NativeMessage[]>([['ses-source', []]]);
   const prompts: Array<{ sessionId: string; context: string[] }> = [];
-  const processes: ReturnType<typeof createNativeRpcProcess>[] = [];
+  const processes: ReturnType<typeof createNativeRPCProcess>[] = [];
   new DatabaseSync(path.join(env.root, 'opencode.db')).close();
   let ordinal = 0;
   let forkOrdinal = 0;
@@ -30,7 +30,7 @@ async function createNativeOpencode(env: ForkTestEnvironment) {
   let supportsFork = true;
   jest.mocked(spawn).mockImplementation((_command, args) => {
     if (args?.includes('--version')) return createNativeVersionProcess('1.18.31');
-    const proc = createNativeRpcProcess((method, params, notify) => {
+    const proc = createNativeRPCProcess((method, params, notify) => {
       if (method === 'initialize') return { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: supportsFork ? { fork: {} } : {} } };
       if (method === 'session/fork') {
         if (rejectFork) throw new Error('Native fork failed');
@@ -106,7 +106,7 @@ describe('OpenCode fork integration', () => {
     const fork = await env.open(native.backend, child!);
     await env.send(fork, 'Continue here');
     expect(native.prompts.at(-1)).toEqual({ sessionId: 'ses-child-1', context: ['Remember apples', 'Reply 1', 'Remember pears', 'Reply 2'] });
-    expect(child!.sessionId).toBe('ses-child-1');
+    expect(env.repository.getSync(child!.id)!.sessionId).toBe('ses-child-1');
     expect(native.sessions.get('ses-source')).toEqual(sourceHistory);
     await env.send(source, 'Keep original going');
     expect(native.prompts.at(-1)?.context).toEqual(['Remember apples', 'Reply 1', 'Remember pears', 'Reply 2']);
@@ -119,7 +119,7 @@ describe('OpenCode fork integration', () => {
     expect(child).toBeDefined();
     const service = new OpencodeConversationHistoryService();
     const restored = { ...child!, providerState: JSON.parse(JSON.stringify(service.buildPersistedProviderState(child!))) };
-    await service.hydrateConversationHistory(restored, env.root);
+    Object.assign(restored, await service.hydrateConversationHistory(restored, env.root));
     expect(restored.messages[1].assistantMessageId).toBe('msg-child-1-1');
     const fork = await env.open(native.backend, restored);
     const nested = await env.fork(fork, restored.messages[1]);

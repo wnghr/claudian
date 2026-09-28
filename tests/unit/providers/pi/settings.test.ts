@@ -1,18 +1,19 @@
 const mockGetHostnameKey = jest.fn(() => 'host-a');
 
-jest.mock('../../../../src/utils/env', () => ({
-  ...jest.requireActual('../../../../src/utils/env'),
-  getHostnameKey: () => mockGetHostnameKey(),
-}));
+import '@/providers';
 
+import { ProviderSettingsCoordinator } from '@/core/providers/ProviderSettingsCoordinator';
 import { piSettingsReconciler } from '@/providers/pi/env/PiSettingsReconciler';
 import {
   getPiProviderSettings,
-  normalizePiModelAliases,
-  normalizePiPreferredThinkingByModel,
   normalizePiVisibleModels,
   updatePiProviderSettings
 } from '@/providers/pi/settings';
+
+jest.mock('@/core/device/InstallationKey', () => ({
+  ...jest.requireActual('@/core/device/InstallationKey'),
+  getInstallationKey: () => mockGetHostnameKey(),
+}));
 
 describe('Pi settings normalization', () => {
   const discoveredModels = [
@@ -81,40 +82,42 @@ describe('Pi settings normalization', () => {
     ], discoveredModels)).toEqual(['pi:anthropic/claude-sonnet-4', 'pi:missing/model']);
   });
 
-  it('normalizes aliases and clamps preferred thinking to model capabilities', () => {
-    expect(normalizePiModelAliases({
-      'pi:anthropic/claude-sonnet-4': '  Sonnet  ',
-      'pi:missing/model': 'Missing',
-    }, discoveredModels)).toEqual({
+  it('normalizes aliases and defaults unsupported preferred thinking to High', () => {
+    const settings = getPiProviderSettings({
+      providerConfigs: {
+        pi: {
+          discoveredModels: [
+            ...discoveredModels,
+            {
+              encodedId: 'pi:anthropic/claude-opus-4-7',
+              id: 'claude-opus-4-7',
+              input: ['text'],
+              label: 'Claude Opus 4.7',
+              provider: 'anthropic',
+              reasoning: true,
+              thinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh'],
+            },
+          ],
+          modelAliases: {
+            'pi:anthropic/claude-sonnet-4': '  Sonnet  ',
+            'pi:missing/model': 'Missing',
+          },
+          preferredThinkingByModel: {
+            'pi:anthropic/claude-opus-4-7': 'max',
+            'pi:anthropic/claude-sonnet-4': 'max',
+            'pi:openai/gpt-5': 'xhigh',
+          },
+        },
+      },
+    });
+
+    expect(settings.modelAliases).toEqual({
       'pi:anthropic/claude-sonnet-4': 'Sonnet',
     });
-    expect(normalizePiPreferredThinkingByModel({
-      'pi:anthropic/claude-sonnet-4': 'max',
-      'pi:openai/gpt-5': 'xhigh',
-    }, discoveredModels)).toEqual({
+    expect(settings.preferredThinkingByModel).toEqual({
+      'pi:anthropic/claude-opus-4-7': 'high',
       'pi:anthropic/claude-sonnet-4': 'high',
-      'pi:openai/gpt-5': 'medium',
-    });
-  });
-
-  it('clamps max preferences to xhigh before high', () => {
-    expect(normalizePiPreferredThinkingByModel({
-      'pi:anthropic/claude-opus-4-7': 'max',
-      'pi:anthropic/claude-sonnet-4': 'max',
-    }, [
-      {
-        encodedId: 'pi:anthropic/claude-opus-4-7',
-        id: 'claude-opus-4-7',
-        input: ['text'],
-        label: 'Claude Opus 4.7',
-        provider: 'anthropic',
-        reasoning: true,
-        thinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh'],
-      },
-      discoveredModels[0],
-    ])).toEqual({
-      'pi:anthropic/claude-opus-4-7': 'xhigh',
-      'pi:anthropic/claude-sonnet-4': 'high',
+      'pi:openai/gpt-5': 'high',
     });
   });
 
@@ -234,34 +237,10 @@ describe('Pi settings normalization', () => {
       },
     };
 
-    expect(piSettingsReconciler.handleEnvironmentChange?.(settings)).toBeUndefined();
+    expect(ProviderSettingsCoordinator.handleEnvironmentChange(settings, ['pi'])).toBe(false);
 
     expect(getPiProviderSettings(settings).discoveredModels).toEqual(discoveredModels);
     expect(getPiProviderSettings(settings).visibleModels).toEqual(['pi:anthropic/claude-sonnet-4']);
   });
 
-  it('normalizes blank Pi effort to a value supported by the selected model', () => {
-    const nonReasoningSettings: Record<string, unknown> = {
-      effortLevel: '',
-      model: 'pi:openai/gpt-5',
-      providerConfigs: {
-        pi: {
-          discoveredModels: [{
-            encodedId: 'pi:openai/gpt-5',
-            id: 'gpt-5',
-            input: ['text'],
-            label: 'GPT-5',
-            provider: 'openai',
-            reasoning: false,
-            thinkingLevels: ['off'],
-          }],
-          visibleModels: ['pi:openai/gpt-5'],
-        },
-      },
-    };
-
-    expect(piSettingsReconciler.normalizeModelVariantSettings(nonReasoningSettings)).toBe(true);
-    expect(nonReasoningSettings.effortLevel).toBe('off');
-
-  });
 });

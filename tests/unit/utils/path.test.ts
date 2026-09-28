@@ -11,7 +11,7 @@ import {
   getVaultPath,
   isPathWithinDirectory,
   isPathWithinVault,
-  normalizeConfiguredCliPath,
+  normalizeConfiguredCLIPath,
   normalizePathForComparison,
   normalizePathForFilesystem,
   normalizePathForVault,
@@ -131,10 +131,6 @@ describe('expandHomePath', () => {
     expect(expandHomePath('%NONEXISTENT_VAR_12345%/bin')).toBe('%NONEXISTENT_VAR_12345%/bin');
   });
 
-  it('returns path unchanged when no special patterns', () => {
-    expect(expandHomePath('/plain/path')).toBe('/plain/path');
-  });
-
   it('expands ~\\ backslash prefix', () => {
     const result = expandHomePath('~\\Documents');
     expect(result).toBe(path.join(os.homedir(), 'Documents'));
@@ -159,25 +155,25 @@ describe('parsePathEntries', () => {
   it('filters out empty segments', () => {
     const sep = isWindows ? ';' : ':';
     const result = parsePathEntries(`${sep}/a${sep}${sep}/b${sep}`);
-    expect(result.every(s => s.length > 0)).toBe(true);
+    expect(result).toEqual(isWindows ? ['A:', 'B:'] : ['/a', '/b']);
   });
 
   it('filters out $PATH placeholder', () => {
     const sep = isWindows ? ';' : ':';
     const result = parsePathEntries(`/a${sep}$PATH${sep}/b`);
-    expect(result).not.toContain('$PATH');
+    expect(result).toEqual(isWindows ? ['A:', 'B:'] : ['/a', '/b']);
   });
 
   it('filters out ${PATH} placeholder', () => {
     const sep = isWindows ? ';' : ':';
     const result = parsePathEntries(`/a${sep}\${PATH}${sep}/b`);
-    expect(result).not.toContain('${PATH}');
+    expect(result).toEqual(isWindows ? ['A:', 'B:'] : ['/a', '/b']);
   });
 
   it('filters out %PATH% placeholder', () => {
     const sep = isWindows ? ';' : ':';
     const result = parsePathEntries(`/a${sep}%PATH%${sep}/b`);
-    expect(result).not.toContain('%PATH%');
+    expect(result).toEqual(isWindows ? ['A:', 'B:'] : ['/a', '/b']);
   });
 
   it('strips surrounding double quotes', () => {
@@ -196,28 +192,6 @@ describe('parsePathEntries', () => {
     const result = parsePathEntries('~/bin');
     expect(result[0]).toBe(path.join(os.homedir(), 'bin'));
   });
-});
-
-describe('translateMsysPath', () => {
-  if (!isWindows) {
-    it('returns value unchanged on non-Windows', () => {
-      expect(translateMsysPath('/c/Users/test')).toBe('/c/Users/test');
-    });
-  }
-
-  if (isWindows) {
-    it('translates /c/ to C:\\ on Windows', () => {
-      expect(translateMsysPath('/c/Users/test')).toBe('C:\\Users\\test');
-    });
-
-    it('translates uppercase drive letter', () => {
-      expect(translateMsysPath('/D/projects')).toBe('D:\\projects');
-    });
-
-    it('returns non-msys path unchanged', () => {
-      expect(translateMsysPath('C:\\Users\\test')).toBe('C:\\Users\\test');
-    });
-  }
 });
 
 describe('normalizePathForFilesystem', () => {
@@ -282,26 +256,20 @@ describe('normalizePathForComparison', () => {
     expect(normalizePathForComparison(undefined as any)).toBe('');
   });
 
-  it('normalizes slashes to forward slash', () => {
-    // On any platform, result should use forward slashes
-    const result = normalizePathForComparison('/usr/local/bin');
-    expect(result).not.toContain('\\');
-  });
-
   it('removes trailing slash', () => {
     const result = normalizePathForComparison('/usr/local/bin/');
-    expect(result).not.toMatch(/\/$/);
+    expect(result).toBe('/usr/local/bin');
   });
 
   it('removes multiple trailing slashes', () => {
     const result = normalizePathForComparison('/usr/local/bin///');
-    expect(result).not.toMatch(/\/$/);
+    expect(result).toBe('/usr/local/bin');
   });
 
   if (isWindows) {
     it('lowercases on Windows for case-insensitive comparison', () => {
       const result = normalizePathForComparison('C:\\Users\\Test');
-      expect(result).toBe(result.toLowerCase());
+      expect(result).toBe('c:/users/test');
     });
   }
 
@@ -371,6 +339,18 @@ describe('isPathWithinDirectory', () => {
 describe('normalizePathForVault', () => {
   const vaultPath = path.resolve('/tmp/test-vault');
 
+  it('normalizes raw backslashes to vault-relative forward slashes', () => {
+    expect(normalizePathForVault('notes\\subfolder\\file.md', vaultPath)).toBe('notes/subfolder/file.md');
+  });
+
+  it('preserves spaces in vault-relative paths', () => {
+    expect(normalizePathForVault(path.join(vaultPath, 'my notes', 'file.md'), vaultPath)).toBe('my notes/file.md');
+  });
+
+  it('returns null when the path is the vault directory', () => {
+    expect(normalizePathForVault(vaultPath, vaultPath)).toBeNull();
+  });
+
   it('returns null for null/undefined input', () => {
     expect(normalizePathForVault(null, vaultPath)).toBeNull();
     expect(normalizePathForVault(undefined, vaultPath)).toBeNull();
@@ -388,18 +368,12 @@ describe('normalizePathForVault', () => {
 
   it('returns normalized path for file outside vault', () => {
     const result = normalizePathForVault('/other/path/file.md', vaultPath);
-    expect(result).toContain('file.md');
-  });
-
-  it('uses forward slashes in result', () => {
-    const fullPath = path.join(vaultPath, 'a', 'b', 'c.md');
-    const result = normalizePathForVault(fullPath, vaultPath);
-    expect(result).not.toContain('\\');
+    expect(result).toBe('/other/path/file.md');
   });
 
   it('handles null vaultPath', () => {
     const result = normalizePathForVault('/some/path.md', null);
-    expect(result).toContain('path.md');
+    expect(result).toBe('/some/path.md');
   });
 });
 
@@ -479,32 +453,32 @@ describe('expandHomePath - Windows environment variable formats', () => {
   });
 });
 
-describe('normalizeConfiguredCliPath', () => {
+describe('normalizeConfiguredCLIPath', () => {
   it('strips surrounding double quotes from a path containing a space', () => {
-    expect(normalizeConfiguredCliPath('"/opt/my cli/claude"')).toBe('/opt/my cli/claude');
+    expect(normalizeConfiguredCLIPath('"/opt/my cli/claude"')).toBe('/opt/my cli/claude');
   });
 
   it('strips surrounding single quotes', () => {
-    expect(normalizeConfiguredCliPath("'/opt/claude'")).toBe('/opt/claude');
+    expect(normalizeConfiguredCLIPath("'/opt/claude'")).toBe('/opt/claude');
   });
 
   it('leaves an unquoted path unchanged', () => {
-    expect(normalizeConfiguredCliPath('/opt/my cli/claude')).toBe('/opt/my cli/claude');
+    expect(normalizeConfiguredCLIPath('/opt/my cli/claude')).toBe('/opt/my cli/claude');
   });
 
   it('leaves a path with only a leading quote unchanged', () => {
-    expect(normalizeConfiguredCliPath('"/opt/claude')).toBe('"/opt/claude');
+    expect(normalizeConfiguredCLIPath('"/opt/claude')).toBe('"/opt/claude');
   });
 
   it('trims surrounding whitespace before unquoting', () => {
-    expect(normalizeConfiguredCliPath('  "/opt/claude"  ')).toBe('/opt/claude');
+    expect(normalizeConfiguredCLIPath('  "/opt/claude"  ')).toBe('/opt/claude');
   });
 
   it('expands environment variables after unquoting', () => {
     const original = process.env.TEST_QUOTED_CLI_DIR;
     process.env.TEST_QUOTED_CLI_DIR = '/opt/tools';
     try {
-      expect(normalizeConfiguredCliPath('"$TEST_QUOTED_CLI_DIR/my cli"')).toBe('/opt/tools/my cli');
+      expect(normalizeConfiguredCLIPath('"$TEST_QUOTED_CLI_DIR/my cli"')).toBe('/opt/tools/my cli');
     } finally {
       if (original === undefined) delete process.env.TEST_QUOTED_CLI_DIR;
       else process.env.TEST_QUOTED_CLI_DIR = original;
@@ -512,12 +486,12 @@ describe('normalizeConfiguredCliPath', () => {
   });
 
   it('expands a home-relative path after unquoting', () => {
-    expect(normalizeConfiguredCliPath('"~/bin/my cli"')).toBe(path.join(os.homedir(), 'bin/my cli'));
+    expect(normalizeConfiguredCLIPath('"~/bin/my cli"')).toBe(path.join(os.homedir(), 'bin/my cli'));
   });
 
   it('returns an empty string for blank or missing input', () => {
-    expect(normalizeConfiguredCliPath('   ')).toBe('');
-    expect(normalizeConfiguredCliPath(undefined)).toBe('');
+    expect(normalizeConfiguredCLIPath('   ')).toBe('');
+    expect(normalizeConfiguredCLIPath(undefined)).toBe('');
   });
 });
 

@@ -1,9 +1,7 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-
 import type { ProviderHistoryPathContext } from '../../../core/providers/types';
 import type { ChatMessage, SubagentInfo, ToolCallInfo } from '../../../core/types';
 import { ClaudeTaskToolNormalizer } from '../normalization/ClaudeTaskToolNormalizer';
+import { ClaudeTaskResultInterpreter } from '../runtime/ClaudeTaskResultInterpreter';
 import { isClaudeSubagentToolName } from '../subagentToolNames';
 import { ClaudeTurnStats } from './ClaudeTurnStats';
 import { buildAsyncSubagentInfo } from './sdkAsyncSubagent';
@@ -13,10 +11,10 @@ import {
   collectAsyncSubagentResults,
   collectStructuredPatchResults,
   collectToolResults,
-  extractXmlTag,
+  extractXMLTag,
   hydrateFallbackAskUserAnswers,
   hydrateStructuredToolResults,
-  isCanonicalSdkUserMessage,
+  isCanonicalSDKUserMessage,
   isSystemInjectedMessage,
   mergeAssistantMessage,
   parseSDKMessageToChat,
@@ -25,14 +23,12 @@ import {
 import {
   encodeVaultPathForSDK,
   getSDKProjectsPath,
-  getSDKSessionAvailability,
   getSDKSessionPath,
   isValidSessionId,
   locateSDKSession,
   locateSDKSessions,
   readSDKSession,
   readSDKSessionFile,
-  sdkSessionExists,
 } from './sdkSessionPaths';
 import {
   isValidAgentId,
@@ -59,10 +55,9 @@ export type {
 export {
   collectAsyncSubagentResults,
   encodeVaultPathForSDK,
-  extractXmlTag,
+  extractXMLTag,
   filterActiveBranch,
   getSDKProjectsPath,
-  getSDKSessionAvailability,
   getSDKSessionPath,
   isValidSessionId,
   loadSubagentFinalResult,
@@ -72,60 +67,11 @@ export {
   parseSDKMessageToChat,
   readSDKSession,
   readSDKSessionFile,
-  sdkSessionExists,
 };
 export {
   extractAgentIdFromToolUseResult,
   resolveToolUseResultStatus,
 } from './sdkAsyncSubagent';
-
-export function parseLegacyConversationSessionId(
-  content: string,
-  conversationId: string,
-): string | null {
-  const firstLine = content.split(/\r?\n/, 1)[0];
-  if (!firstLine) {
-    return null;
-  }
-
-  try {
-    const record = JSON.parse(firstLine) as {
-      type?: unknown;
-      id?: unknown;
-      sessionId?: unknown;
-    };
-    if (
-      record.type !== 'meta'
-      || record.id !== conversationId
-      || typeof record.sessionId !== 'string'
-      || !isValidSessionId(record.sessionId)
-    ) {
-      return null;
-    }
-    return record.sessionId;
-  } catch {
-    return null;
-  }
-}
-
-export async function readLegacyConversationSessionId(
-  vaultPath: string,
-  conversationId: string,
-): Promise<string | null> {
-  if (!isValidSessionId(conversationId)) {
-    return null;
-  }
-
-  try {
-    const content = await fs.readFile(
-      path.join(vaultPath, '.claude', 'sessions', `${conversationId}.jsonl`),
-      'utf8',
-    );
-    return parseLegacyConversationSessionId(content, conversationId);
-  } catch {
-    return null;
-  }
-}
 
 export async function loadSDKSessionMessages(
   vaultPath: string,
@@ -234,7 +180,7 @@ export async function loadSDKSessionMessages(
       }
     } else {
       flushPendingAssistant(!chatMsg.isInterrupt);
-      if (isCanonicalSdkUserMessage(sdkMsg)) {
+      if (isCanonicalSDKUserMessage(sdkMsg)) {
         turnStartedAt = parseNativeTimestamp(sdkMsg.timestamp);
       }
       chatMessages.push(chatMsg);
@@ -243,6 +189,20 @@ export async function loadSDKSessionMessages(
 
   flushPendingAssistant(true);
 
+  const taskResults = new ClaudeTaskResultInterpreter();
+  for (const message of chatMessages) {
+    for (const toolCall of message.toolCalls ?? []) {
+      if (!isClaudeSubagentToolName(toolCall.name) || toolCall.input.run_in_background === true
+        || toolCall.result === undefined) continue;
+      const metadata = toolUseResults.get(toolCall.id);
+      const mode = taskResults.describeTask(toolCall.input).mode
+        ?? taskResults.interpretLaunch(toolCall.result, toolCall.status === 'error', metadata).mode;
+      if (mode === 'async') continue;
+      const result = taskResults.interpretResult(toolCall.result, toolCall.status === 'error',
+        { mode: 'sync' }, metadata);
+      toolCall.result = result.result;
+    }
+  }
   hydrateStructuredToolResults(chatMessages, toolUseResults);
   hydrateFallbackAskUserAnswers(chatMessages);
 
@@ -299,7 +259,17 @@ export async function loadSDKSessionMessages(
     }
   }
 
-  chatMessages.sort((a, b) => a.timestamp - b.timestamp);
+  // Notification timestamps record enqueue time, not consumption. Pin their
+  // transcript boundaries while retaining timestamp ordering (e.g. /compact)
+  // within each intervening section.
+  let sectionStart = 0;
+  for (let index = 0; index <= chatMessages.length; index++) {
+    if (index < chatMessages.length
+      && !chatMessages[index].contentBlocks?.some(block => block.type === 'task_notification')) continue;
+    const section = chatMessages.slice(sectionStart, index).sort((a, b) => a.timestamp - b.timestamp);
+    for (let offset = 0; offset < section.length; offset++) chatMessages[sectionStart + offset] = section[offset];
+    sectionStart = index + 1;
+  }
 
   return { messages: chatMessages, skippedLines: result.skippedLines };
 }

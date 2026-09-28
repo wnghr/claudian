@@ -24,6 +24,8 @@ export interface ChatTurnRequest {
 
 /** Queued message waiting to be sent after current streaming completes. */
 export interface QueuedMessage {
+  /** Transient delivery observer; queues never persist callbacks. */
+  onDelivery?: (accepted: boolean) => void;
   content: string;
   images?: ImageAttachment[];
   editorContext: EditorSelectionContext | null;
@@ -125,7 +127,6 @@ export interface ChatStateData {
 
 /** Callbacks for ChatState changes. */
 export interface ChatStateCallbacks {
-  onMessagesChanged?: () => void;
   onStreamingStateChanged?: (isStreaming: boolean) => void;
   onRewindingStateChanged?: (isRewinding: boolean) => void;
   onConversationChanged?: (id: string | null) => void;

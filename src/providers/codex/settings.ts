@@ -1,3 +1,6 @@
+import { getInstallationKey } from '@/core/device/InstallationKey';
+
+import { selectModelMetadata } from '../../core/providers/models/selectedModelMetadata';
 import { getProviderConfig, setProviderConfig } from '../../core/providers/providerConfig';
 import { getProviderEnvironmentVariables } from '../../core/providers/providerEnvironment';
 import { DEFAULT_REASONING_VALUE } from '../../core/providers/reasoning';
@@ -6,8 +9,7 @@ import {
   readStoredBoolean,
   readStoredString,
 } from '../../core/providers/settings/storedSettings';
-import type { HostnameCliPaths } from '../../core/types/settings';
-import { getHostnameKey } from '../../utils/env';
+import type { HostnameCLIPaths } from '../../core/types/settings';
 import {
   type CodexDiscoveredModel,
   findCodexModel,
@@ -31,7 +33,7 @@ export interface CodexProviderConfig {
   enabled: boolean;
   safeMode: CodexSafeMode;
   cliPath: string;
-  cliPathsByHost: HostnameCliPaths;
+  cliPathsByHost: HostnameCLIPaths;
   discoveredModels: CodexDiscoveredModel[];
   modelAliases: Record<string, string>;
   visibleModels: string[] | null;
@@ -43,7 +45,7 @@ export interface CodexProviderConfig {
   catalogTimestamp: number;
   catalogFingerprint: string;
   installationMethodsByHost: HostnameInstallationMethods;
-  wslDistroOverridesByHost: HostnameCliPaths;
+  wslDistroOverridesByHost: HostnameCLIPaths;
 }
 
 export interface NormalizeCodexStoredConfigContext {
@@ -228,13 +230,6 @@ export function normalizeCodexModelAliases(
   return normalized;
 }
 
-export function createCodexVisibleModelFilter(
-  value: unknown,
-  discoveredModels: CodexDiscoveredModel[],
-): string[] | null {
-  return normalizeCodexVisibleModels(value, discoveredModels);
-}
-
 export function getVisibleCodexModelIds(
   visibleModels: string[] | null,
   discoveredModels: CodexDiscoveredModel[],
@@ -292,16 +287,12 @@ function normalizeInstallationMethodsByHost(value: unknown): HostnameInstallatio
   return result;
 }
 
-function hasOwnEntry<T>(entries: Record<string, T>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(entries, key);
-}
-
 function getCodexStoredConfig(
   settings: Record<string, unknown>,
 ): CodexProviderConfig {
   const config = getProviderConfig(settings, 'codex');
   const cliPathsByHost = normalizeHostnameStringMap(
-    config.cliPathsByHost ?? settings.codexCliPathsByHost,
+    config.cliPathsByHost,
   );
   const installationMethodsByHost = normalizeInstallationMethodsByHost(
     config.installationMethodsByHost,
@@ -315,15 +306,15 @@ function getCodexStoredConfig(
   return {
     enabled: readStoredBoolean(
       config.enabled,
-      readStoredBoolean(settings.codexEnabled, DEFAULT_CODEX_PROVIDER_CONFIG.enabled),
+      DEFAULT_CODEX_PROVIDER_CONFIG.enabled,
     ),
     safeMode: readStoredCodexSafeMode(
       config.safeMode,
-      readStoredCodexSafeMode(settings.codexSafeMode, DEFAULT_CODEX_PROVIDER_CONFIG.safeMode),
+      DEFAULT_CODEX_PROVIDER_CONFIG.safeMode,
     ),
     cliPath: readStoredString(
       config.cliPath,
-      readStoredString(settings.codexCliPath, DEFAULT_CODEX_PROVIDER_CONFIG.cliPath),
+      DEFAULT_CODEX_PROVIDER_CONFIG.cliPath,
     ),
     cliPathsByHost,
     discoveredModels,
@@ -336,10 +327,7 @@ function getCodexStoredConfig(
     responseStyle: config.responseStyle === 'friendly' ? 'friendly' : 'pragmatic',
     reasoningSummary: readStoredCodexReasoningSummary(
       config.reasoningSummary,
-      readStoredCodexReasoningSummary(
-        settings.codexReasoningSummary,
-        DEFAULT_CODEX_PROVIDER_CONFIG.reasoningSummary,
-      ),
+      DEFAULT_CODEX_PROVIDER_CONFIG.reasoningSummary,
     ),
     environmentVariables: readStoredString(
       config.environmentVariables,
@@ -348,7 +336,7 @@ function getCodexStoredConfig(
     ),
     environmentHash: readStoredString(
       config.environmentHash,
-      readStoredString(settings.lastCodexEnvHash, DEFAULT_CODEX_PROVIDER_CONFIG.environmentHash),
+      DEFAULT_CODEX_PROVIDER_CONFIG.environmentHash,
     ),
     catalogTimestamp: typeof config.catalogTimestamp === 'number'
       && Number.isFinite(config.catalogTimestamp)
@@ -369,7 +357,7 @@ function getNormalizedCodexStoredConfigContext(
 ): Required<NormalizeCodexStoredConfigContext> {
   return {
     platform: context.platform ?? process.platform,
-    hostnameKey: context.hostnameKey ?? getHostnameKey(),
+    hostnameKey: context.hostnameKey ?? getInstallationKey(),
   };
 }
 
@@ -384,8 +372,6 @@ function projectStoredCodexConfigNormalization(
     }
   }
   delete projected.customModels;
-  delete projected.installationMethod;
-  delete projected.wslDistroOverride;
   return projected;
 }
 
@@ -402,18 +388,7 @@ export function normalizeCodexStoredConfig(
   const installationMethodsByHost = { ...storedConfig.installationMethodsByHost };
   const wslDistroOverridesByHost = { ...storedConfig.wslDistroOverridesByHost };
 
-  if (platform === 'win32') {
-    if (!hasOwnEntry(installationMethodsByHost, hostnameKey) && 'installationMethod' in originalConfig) {
-      installationMethodsByHost[hostnameKey] = normalizeCodexInstallationMethod(originalConfig.installationMethod);
-    }
-
-    if (!hasOwnEntry(wslDistroOverridesByHost, hostnameKey) && 'wslDistroOverride' in originalConfig) {
-      const normalizedDistroOverride = normalizeOptionalString(originalConfig.wslDistroOverride);
-      if (normalizedDistroOverride) {
-        wslDistroOverridesByHost[hostnameKey] = normalizedDistroOverride;
-      }
-    }
-  } else {
+  if (platform !== 'win32') {
     delete installationMethodsByHost[hostnameKey];
     delete wslDistroOverridesByHost[hostnameKey];
   }
@@ -425,8 +400,6 @@ export function normalizeCodexStoredConfig(
     wslDistroOverridesByHost,
   };
   delete normalizedConfig.customModels;
-  delete normalizedConfig.installationMethod;
-  delete normalizedConfig.wslDistroOverride;
 
   const projectedConfig = projectStoredCodexConfigNormalization(originalConfig, normalizedConfig);
   return {
@@ -438,28 +411,14 @@ export function normalizeCodexStoredConfig(
 export function getCodexProviderSettings(
   settings: Record<string, unknown>,
 ): CodexProviderSettings {
-  const config = getProviderConfig(settings, 'codex');
-  const hostnameKey = getHostnameKey();
+  const hostnameKey = getInstallationKey();
   const storedConfig = getCodexStoredConfig(settings);
-  const hasHostScopedInstallationMethods = Object.keys(storedConfig.installationMethodsByHost).length > 0;
-  const hasHostScopedWslDistroOverrides = Object.keys(storedConfig.wslDistroOverridesByHost).length > 0;
-  const legacyInstallationMethod = normalizeCodexInstallationMethod(config.installationMethod);
-  const legacyWslDistroOverride = normalizeOptionalString(config.wslDistroOverride);
-
   return {
     ...storedConfig,
     installationMethod: storedConfig.installationMethodsByHost[hostnameKey]
-      ?? (
-        hasHostScopedInstallationMethods
-          ? DEFAULT_CODEX_PROVIDER_SETTINGS.installationMethod
-          : legacyInstallationMethod
-      ),
+      ?? DEFAULT_CODEX_PROVIDER_SETTINGS.installationMethod,
     wslDistroOverride: storedConfig.wslDistroOverridesByHost[hostnameKey]
-      ?? (
-        hasHostScopedWslDistroOverrides
-          ? DEFAULT_CODEX_PROVIDER_SETTINGS.wslDistroOverride
-          : legacyWslDistroOverride
-      ),
+      ?? DEFAULT_CODEX_PROVIDER_SETTINGS.wslDistroOverride,
   };
 }
 
@@ -468,7 +427,7 @@ export function updateCodexProviderSettings(
   updates: Partial<CodexProviderSettings>,
 ): CodexProviderSettings {
   const current = getCodexProviderSettings(settings);
-  const hostnameKey = getHostnameKey();
+  const hostnameKey = getInstallationKey();
   const persistInstallationSettings = shouldPersistCodexInstallationSettings();
   const updatedInstallationMethodsByHost = 'installationMethodsByHost' in updates
     ? normalizeInstallationMethodsByHost(updates.installationMethodsByHost)
@@ -493,22 +452,6 @@ export function updateCodexProviderSettings(
     normalizeCodexModelAliases(updates.modelAliases ?? current.modelAliases, discoveredModels),
     getCodexAliasModelIds(visibleModels, discoveredModels),
   );
-
-  if (
-    persistInstallationSettings
-    && Object.keys(installationMethodsByHost).length === 0
-    && current.installationMethod !== DEFAULT_CODEX_PROVIDER_SETTINGS.installationMethod
-  ) {
-    installationMethodsByHost[hostnameKey] = current.installationMethod;
-  }
-
-  if (
-    persistInstallationSettings
-    && Object.keys(wslDistroOverridesByHost).length === 0
-    && current.wslDistroOverride
-  ) {
-    wslDistroOverridesByHost[hostnameKey] = current.wslDistroOverride;
-  }
 
   if (persistInstallationSettings && 'installationMethod' in updates) {
     installationMethodsByHost[hostnameKey] = normalizeCodexInstallationMethod(updates.installationMethod);
@@ -564,7 +507,12 @@ export function projectCodexModelSettings(settings: Record<string, unknown>): Re
   const current = getCodexProviderSettings(settings);
   const visibleModels = getVisibleCodexModelIds(current.visibleModels, current.discoveredModels);
   const selected = new Set(visibleModels);
-  const config = { ...getProviderConfig(settings, 'codex'), visibleModels, selectedModels: current.discoveredModels.filter(model => selected.has(model.model)) };
+  const config = {
+    ...getProviderConfig(settings, 'codex'),
+    visibleModels,
+    modelAliases: selectModelMetadata(current.modelAliases, selected),
+    selectedModels: current.discoveredModels.filter(model => selected.has(model.model)),
+  };
   for (const key of ['discoveredModels', 'catalogTimestamp', 'catalogFingerprint', 'availableModes', 'customModels']) delete (config as Record<string, unknown>)[key];
   return config;
 }

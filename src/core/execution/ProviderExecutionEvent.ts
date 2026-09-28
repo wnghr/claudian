@@ -3,6 +3,8 @@ import type {
   ImageAttachment,
   PermissionMode,
   SDKToolUseResult,
+  SubagentInfo,
+  SubagentProgress,
   ToolProviderPayload,
   TurnStats,
   UsageInfo,
@@ -211,6 +213,8 @@ export type ProviderTurnCompletedEvent = ProviderEventBase<
   ProviderRequestedEventScope
 > &
   ProviderOpaqueEventPayload & {
+    /** Native identity of the final user message in this turn, including late correlation. */
+    readonly nativeUserMessageId?: string;
     readonly nativeAssistantId?: string;
     readonly nativeCheckpointId?: string;
     readonly turnStats?: TurnStats;
@@ -300,6 +304,18 @@ export type ProviderAsyncSubagentCompletedEvent = ProviderEventBase<
     readonly snapshotRevision?: number;
   };
 
+export type ProviderSubagentUpdatedEvent = ProviderEventBase<
+  'subagent_updated', ProviderSessionEventScope
+> & { readonly subagent: SubagentInfo };
+
+export type ProviderSubagentProgressEvent = ProviderEventBase<
+  'subagent_progress',
+  ProviderSessionEventScope
+> &
+  ProviderOpaqueEventPayload & {
+    readonly progress: SubagentProgress;
+  };
+
 export type ProviderTaskNotificationEvent = ProviderEventBase<
   'task_notification',
   ProviderExecutionEventScope
@@ -348,6 +364,8 @@ export type ProviderSessionEvent =
   | ProviderBackgroundOutputEvent
   | ProviderBackgroundTurnCompletedEvent
   | ProviderAsyncSubagentCompletedEvent
+  | ProviderSubagentUpdatedEvent
+  | ProviderSubagentProgressEvent
   | (ProviderSessionStateChangedEvent & { readonly scope: ProviderSessionEventScope })
   | (ProviderPermissionModeChangedEvent & { readonly scope: ProviderSessionEventScope })
   | ProviderSessionErrorEvent;

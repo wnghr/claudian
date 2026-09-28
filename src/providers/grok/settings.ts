@@ -1,11 +1,11 @@
+import { getInstallationKey } from '@/core/device/InstallationKey';
+
+import { selectModelMetadata } from '../../core/providers/models/selectedModelMetadata';
 import { getProviderConfig, setProviderConfig } from '../../core/providers/providerConfig';
 import { getProviderEnvironmentVariables } from '../../core/providers/providerEnvironment';
-import { STANDARD_REASONING_VALUES } from '../../core/providers/reasoning';
 import { normalizeHostnameStringMap } from '../../core/providers/settings/HostnameStringMap';
-import type { HostnameCliPaths } from '../../core/types/settings';
-import { getHostnameKey } from '../../utils/env';
+import type { HostnameCLIPaths } from '../../core/types/settings';
 import {
-  clearGrokReasoningMetadata,
   decodeGrokModelId,
   getGrokAvailableReasoningEfforts,
   type GrokDiscoveredModel,
@@ -22,7 +22,7 @@ export interface GrokCatalogSnapshot {
 export interface PersistedGrokProviderSettings {
   enabled: boolean;
   cliPath: string;
-  cliPathsByHost: HostnameCliPaths;
+  cliPathsByHost: HostnameCLIPaths;
   catalogsByHost: Record<string, GrokCatalogSnapshot>;
   environmentVariables: string;
   environmentHash: string;
@@ -91,7 +91,7 @@ export function getGrokProviderSettings(
   settings: Record<string, unknown>,
 ): GrokProviderSettings {
   const config = getProviderConfig(settings, 'grok');
-  const currentHostKey = getHostnameKey();
+  const currentHostKey = getInstallationKey();
   const cliPathsByHost = normalizeHostnameStringMap(config.cliPathsByHost);
   const catalogsByHost = normalizeGrokCatalogsByHost(config.catalogsByHost ?? config.selectedModelsByHost);
   const currentCatalog = catalogsByHost[currentHostKey] ?? null;
@@ -146,7 +146,7 @@ export function updateGrokProviderSettings(
   updates: Partial<PersistedGrokProviderSettings>,
 ): GrokProviderSettings {
   const current = getGrokProviderSettings(settings);
-  const currentHostKey = getHostnameKey();
+  const currentHostKey = getInstallationKey();
   const cliPathsByHost = updates.cliPathsByHost !== undefined
     ? normalizeHostnameStringMap(updates.cliPathsByHost)
     : { ...current.cliPathsByHost };
@@ -211,41 +211,6 @@ export function updateGrokProviderSettings(
   return { ...next, currentCatalog };
 }
 
-export function updateGrokVisibleModels(
-  settings: Record<string, unknown>,
-  visibleModels: string[] | null,
-): GrokProviderSettings {
-  const current = getGrokProviderSettings(settings);
-  const normalizedVisibleModels = normalizeGrokVisibleModels(
-    visibleModels,
-    new Set(current.currentCatalog?.models.map(model => model.rawId) ?? []),
-    Boolean(current.currentCatalog?.models.length),
-  );
-  const enabledModelIds = new Set(
-    normalizedVisibleModels
-      ?? current.currentCatalog?.models.map(model => model.rawId)
-      ?? [],
-  );
-  const catalogsByHost = Object.fromEntries(
-    Object.entries(current.catalogsByHost).map(([hostKey, catalog]) => [
-      hostKey,
-      {
-        ...catalog,
-        models: catalog.models.map(model => (
-          normalizedVisibleModels === null || enabledModelIds.has(model.rawId)
-            ? model
-            : clearGrokReasoningMetadata(model)
-        )),
-      },
-    ]),
-  );
-  return updateGrokProviderSettings(settings, {
-    catalogsByHost,
-    preferredReasoningByModel: current.preferredReasoningByModel,
-    visibleModels: normalizedVisibleModels,
-  });
-}
-
 export function getCurrentGrokCatalog(
   settings: Record<string, unknown>,
 ): GrokCatalogSnapshot | null {
@@ -264,23 +229,10 @@ export function updateCurrentGrokCatalog(
   updateGrokProviderSettings(settings, {
     catalogsByHost: {
       ...current.catalogsByHost,
-      [getHostnameKey()]: normalized,
+      [getInstallationKey()]: normalized,
     },
   });
   return normalized;
-}
-
-export function clearCurrentGrokCatalog(settings: Record<string, unknown>): boolean {
-  const current = getGrokProviderSettings(settings);
-  const currentHostKey = getHostnameKey();
-  if (!current.catalogsByHost[currentHostKey]) {
-    return false;
-  }
-
-  const catalogsByHost = { ...current.catalogsByHost };
-  delete catalogsByHost[currentHostKey];
-  updateGrokProviderSettings(settings, { catalogsByHost });
-  return true;
 }
 
 export function normalizeGrokVisibleModels(
@@ -360,10 +312,8 @@ export function normalizeGrokPreferredReasoningByModel(
     }
 
     const catalogModel = catalogById.get(rawModelId);
-    const supportedEfforts = new Set(catalogModel
-      ? getGrokAvailableReasoningEfforts(catalogModel).map(option => option.value)
-      : STANDARD_REASONING_VALUES);
-    if (!supportedEfforts.has(effort)) {
+    if (catalogModel?.reasoningMetadataResolved === true
+      && !getGrokAvailableReasoningEfforts(catalogModel).some(option => option.value === effort)) {
       continue;
     }
     normalized[rawModelId] = effort;
@@ -438,7 +388,13 @@ export function projectGrokModelSettings(settings: Record<string, unknown>): Rec
     models: catalog.models.filter(model => selected.has(model.rawId)),
     defaultModelId: catalog.defaultModelId && selected.has(catalog.defaultModelId) ? catalog.defaultModelId : null,
   }]));
-  const config: Record<string, unknown> = { ...getProviderConfig(settings, 'grok'), visibleModels, selectedModelsByHost };
+  const config: Record<string, unknown> = {
+    ...getProviderConfig(settings, 'grok'),
+    visibleModels,
+    selectedModelsByHost,
+    modelAliases: selectModelMetadata(current.modelAliases, selected),
+    preferredReasoningByModel: selectModelMetadata(current.preferredReasoningByModel, selected),
+  };
   delete config.catalogsByHost;
   delete config.currentCatalog;
   return config;

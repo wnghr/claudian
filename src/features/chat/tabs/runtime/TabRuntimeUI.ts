@@ -13,6 +13,7 @@ import type {
   ProviderChatUIConfig,
   ProviderId,
 } from '../../../../core/providers/types';
+import { getChatSettingsSnapshot } from '../../ChatSettings';
 import { MainChatComposerDropdown } from '../../composer/MainChatComposerDropdown';
 import { LinkedContentController } from '../../linked-content';
 import type { SideChatController } from '../../side-chat/SideChatController';
@@ -32,7 +33,6 @@ import {
   getTabCapabilities,
   getTabChatUIConfig,
   getTabHiddenCommands,
-  getTabSelectedModel,
   getTabSettingsSnapshot,
   refreshTabProviderUI,
   syncComposerDropdownForProvider,
@@ -40,6 +40,7 @@ import {
   type TabProviderSettings,
   updateTabPermissionMode,
   updateTabProviderSettings,
+  updateTabReasoning,
   updateTabServiceTier,
 } from '../TabProviderState';
 import type {
@@ -108,7 +109,6 @@ function buildComposerDropdown(
     dom.inputEl,
     fileContextManager,
     {
-      collabReferences: options.plugin.collabComposerReferences,
       providerId,
       hiddenCommands: getHiddenCommands?.() ?? new Set(),
       providerConfig: catalogInfo?.config,
@@ -150,18 +150,16 @@ function buildInputToolbar(
       model: shell.draftModel,
     }),
     applyModel: (model) => {
-      shell.draftModel = model;
+      shell.session.selectDraft(shell.providerId, model);
     },
     applyProviderTarget: ({ providerId, model }) => {
-      shell.draftModel = model;
-      shell.providerId = providerId;
+      shell.session.selectDraft(providerId, model);
       syncTabProviderServices(shell, services);
       runtimeRef.requirePublished().ui.composerDropdown.clearProviderCatalog();
     },
     restoreDraft: ({ providerId, model }) => {
       const tab = runtimeRef.requirePublished();
-      shell.draftModel = model;
-      shell.providerId = providerId;
+      shell.session.selectDraft(providerId, model);
       syncTabProviderServices(shell, services);
       syncComposerDropdownForProvider(tab, plugin, shell.providerCatalogResolver);
       refreshTabProviderUI(tab);
@@ -207,17 +205,7 @@ function buildInputToolbar(
       const base = getTabSettingsSnapshot(shell, plugin);
       const sideSettings = getSelectedSideChat()?.runtime?.settings;
       if (!sideSettings) return base;
-      return {
-        ...base,
-        ...(sideSettings.model ? { model: sideSettings.model } : {}),
-        ...(sideSettings.permissionMode
-          ? { permissionMode: sideSettings.permissionMode }
-          : {}),
-        ...(sideSettings.reasoning
-          ? { effortLevel: sideSettings.reasoning, thinkingBudget: sideSettings.reasoning }
-          : {}),
-        ...(sideSettings.serviceTier ? { serviceTier: sideSettings.serviceTier } : {}),
-      };
+      return { ...base, ...sideSettings };
     },
     getEnvironmentVariables: () => plugin.getActiveEnvironmentVariables(),
     onModelChange: async (model: string) => {
@@ -231,7 +219,8 @@ function buildInputToolbar(
           tab.ui.modelSelector.updateDisplay();
           return;
         }
-        applySideSetting({ model });
+        const next = getChatSettingsSnapshot(plugin.settings, sideChat.runtime.providerId, model);
+        applySideSetting({ model: next.model, reasoning: next.reasoning });
         return;
       }
       if (tab.conversationId === null) {
@@ -305,7 +294,7 @@ function buildInputToolbar(
         plugin.settings,
         model,
       ) ?? model;
-      const providerSettings = getProviderSettingsSnapshotWithModel(
+      const providerSettings = getChatSettingsSnapshot(
         plugin.settings,
         boundProvider,
         normalizedModel,
@@ -370,21 +359,13 @@ function buildInputToolbar(
     onThinkingBudgetChange: async (budget: string) => {
       if (applySideSetting({ reasoning: budget })) return;
       const tab = runtimeRef.requirePublished();
-      await updateTabProviderSettings(tab, plugin, (settings) => {
-        const model = getTabSelectedModel(tab, plugin) ?? settings.model;
-        settings.thinkingBudget = budget;
-        getTabChatUIConfig(tab, plugin).applyReasoningSelection?.(model, budget, settings);
-      });
+      await updateTabReasoning(tab, plugin, budget);
       onUserModified();
     },
     onEffortLevelChange: async (effort: string) => {
       if (applySideSetting({ reasoning: effort })) return;
       const tab = runtimeRef.requirePublished();
-      await updateTabProviderSettings(tab, plugin, (settings) => {
-        const model = getTabSelectedModel(tab, plugin) ?? settings.model;
-        settings.effortLevel = effort;
-        getTabChatUIConfig(tab, plugin).applyReasoningSelection?.(model, effort, settings);
-      });
+      await updateTabReasoning(tab, plugin, effort);
       onUserModified();
     },
     onServiceTierChange: async (serviceTier: string) => {

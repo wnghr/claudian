@@ -1,4 +1,4 @@
-import { FakeAuxiliaryBackend, waitFor } from '@test/unit/core/auxiliary/AuxiliaryExecutionTestHarness';
+import { FakeAuxiliaryBackend, waitFor } from '@test/helpers/core/auxiliary/AuxiliaryExecutionTestHarness';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -13,7 +13,7 @@ function createReadyService() {
   ProviderWorkspaceRegistry.setServices('claude', {});
   ProviderRegistry.register('claude', {
     isEnabled: () => true,
-    chatUIConfig: { getModelOptions: () => [{ value: 'test-title', label: 'Test title' }] },
+    modelPolicy: { getModelOptions: () => [{ value: 'test-title', label: 'Test title' }] },
     capabilities: { supportsEphemeralSessions: true },
     createExecutionBackend: () => backend,
   } as unknown as ProviderRegistration);
@@ -41,7 +41,7 @@ it('does not submit a title request after cancellation during provider initializ
   });
   ProviderRegistry.register('claude', {
     isEnabled: () => true,
-    chatUIConfig: { getModelOptions: () => [{ value: 'test-title', label: 'Test title' }] },
+    modelPolicy: { getModelOptions: () => [{ value: 'test-title', label: 'Test title' }] },
     capabilities: { supportsEphemeralSessions: true },
     createExecutionBackend: () => backend,
   } as unknown as ProviderRegistration);

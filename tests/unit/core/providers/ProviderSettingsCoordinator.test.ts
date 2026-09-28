@@ -11,6 +11,24 @@ import type { Conversation } from '@/core/types';
 import { DEFAULT_CLAUDE_PROVIDER_SETTINGS } from '@/providers/claude/settings';
 
 describe('ProviderSettingsCoordinator', () => {
+  it('commits only the target provider preferences without changing its selected model', () => {
+    const settings: Record<string, unknown> = {
+      settingsProvider: 'claude', model: 'opus', effortLevel: 'high', permissionMode: 'normal',
+      savedProviderModel: { claude: 'opus', codex: TEST_CODEX_MODEL },
+      savedProviderEffort: { claude: 'high', codex: 'low' },
+      providerConfigs: { claude: claudeCatalogFixture(), codex: { enabled: true, discoveredModels: TEST_CODEX_CATALOG } },
+      locale: 'en',
+    };
+    const before = getProviderSettingsSnapshotWithModel(settings, 'codex', TEST_CODEX_MODEL);
+    const after = structuredClone(before);
+    after.effortLevel = 'high';
+    after.locale = 'fr';
+    (after.savedProviderModel as Record<string, string>).claude = 'wrong';
+    const original = structuredClone(settings);
+    ProviderSettingsCoordinator.commitProviderSettingsChange(settings, 'codex', before, after);
+    expect(settings).toEqual({ ...original, savedProviderEffort: { claude: 'high', codex: 'high' } });
+  });
+
   describe('conversation model projection', () => {
     it('preserves a valid explicit reasoning choice when reading an existing conversation', () => {
       const settings: Record<string, unknown> = {
@@ -168,7 +186,7 @@ describe('ProviderSettingsCoordinator', () => {
     });
   });
 
-  describe('applyModelSelection', () => {
+  describe('selected model snapshot', () => {
     it('clamps reasoning and service tier values to the selected model metadata', () => {
       const settings: Record<string, unknown> = {
         model: TEST_CODEX_MODEL,
@@ -182,29 +200,14 @@ describe('ProviderSettingsCoordinator', () => {
         },
       };
 
-      ProviderSettingsCoordinator.applyModelSelection(settings, 'codex', 'gpt-5.4-mini');
+      const snapshot = getProviderSettingsSnapshotWithModel(settings, 'codex', 'gpt-5.4-mini');
 
-      expect(settings.model).toBe('gpt-5.4-mini');
-      expect(settings.effortLevel).toBe('medium');
-      expect(settings.serviceTier).toBe('default');
-    });
-
-    it('applies high as the default when switching to a Codex model that supports it', () => {
-      const settings: Record<string, unknown> = {
-        model: 'gpt-5.4-mini',
-        effortLevel: 'low',
-        serviceTier: 'default',
-        providerConfigs: {
-          codex: {
-            enabled: true,
-            discoveredModels: TEST_CODEX_CATALOG,
-          },
-        },
-      };
-
-      ProviderSettingsCoordinator.applyModelSelection(settings, 'codex', TEST_CODEX_MODEL);
-
-      expect(settings.effortLevel).toBe('high');
+      expect(snapshot.model).toBe('openai-codex/gpt-5.4-mini');
+      expect(snapshot.effortLevel).toBe('high');
+      expect(snapshot.serviceTier).toBe('default');
+      expect(settings.model).toBe(TEST_CODEX_MODEL);
+      expect(settings.effortLevel).toBe('unsupported');
+      expect(settings.serviceTier).toBe('priority');
     });
   });
 
@@ -347,7 +350,7 @@ describe('ProviderSettingsCoordinator', () => {
     });
   });
 
-  describe('reconcileAllProviders', () => {
+  describe('reconcileProviders', () => {
     it('filters conversations per provider', () => {
       const reconcileSpy = jest.spyOn(
         ProviderRegistry.getSettingsReconciler('claude'),
@@ -358,7 +361,9 @@ describe('ProviderSettingsCoordinator', () => {
       const otherConv = { providerId: 'codex', messages: [] } as unknown as Conversation;
       const settings: Record<string, unknown> = { model: 'haiku' };
 
-      ProviderSettingsCoordinator.reconcileAllProviders(settings, [claudeConv, otherConv]);
+      ProviderSettingsCoordinator.reconcileProviders(
+        settings, [claudeConv, otherConv], ProviderRegistry.getRegisteredProviderIds(),
+      );
 
       // Claude reconciler should only receive claude conversations
       expect(reconcileSpy).toHaveBeenCalledWith(
@@ -390,7 +395,7 @@ describe('ProviderSettingsCoordinator', () => {
       const originalGetSettingsReconciler = ProviderRegistry.getSettingsReconciler.bind(
         ProviderRegistry,
       );
-      const originalGetChatUIConfig = ProviderRegistry.getChatUIConfig.bind(ProviderRegistry);
+      const originalGetChatUIConfig = ProviderRegistry.getModelPolicy.bind(ProviderRegistry);
       const reconcilerSpy = jest.spyOn(ProviderRegistry, 'getSettingsReconciler')
         .mockImplementation((providerId) => {
           if (providerId === 'fake-invalidate') return defaultReconciler;
@@ -399,7 +404,7 @@ describe('ProviderSettingsCoordinator', () => {
         });
       const settingsProviderSpy = jest.spyOn(ProviderRegistry, 'resolveSettingsProviderId')
         .mockReturnValue('fake-invalidate');
-      const uiConfigSpy = jest.spyOn(ProviderRegistry, 'getChatUIConfig')
+      const uiConfigSpy = jest.spyOn(ProviderRegistry, 'getModelPolicy')
         .mockImplementation((providerId) => (
           providerId === 'fake-invalidate' || providerId === 'fake-reload'
             ? originalGetChatUIConfig('claude')
@@ -594,40 +599,6 @@ describe('ProviderSettingsCoordinator', () => {
 
       expect(settings.savedProviderModel).toMatchObject({
         claude: 'claude-code/fable-v1',
-      });
-    });
-
-    it('keeps the saved inactive model instead of remapping it from environment', () => {
-      const settings: Record<string, unknown> = {
-        settingsProvider: 'codex',
-        model: TEST_CODEX_MODEL,
-        effortLevel: 'high',
-        serviceTier: 'default',
-        thinkingBudget: 'off',
-        savedProviderModel: {
-          claude: 'claude-code/fable-old',
-          codex: TEST_CODEX_MODEL,
-        },
-        providerConfigs: {
-          claude: {
-            ...DEFAULT_CLAUDE_PROVIDER_SETTINGS,
-            environmentVariables: [
-              'ANTHROPIC_DEFAULT_HAIKU_MODEL=haiku-new',
-              'ANTHROPIC_DEFAULT_FABLE_MODEL=fable-new',
-            ].join('\n'),
-            environmentHash: 'ANTHROPIC_DEFAULT_FABLE_MODEL=fable-old',
-          },
-          codex: {
-            enabled: true,
-            discoveredModels: TEST_CODEX_CATALOG,
-          },
-        },
-      };
-
-      ProviderSettingsCoordinator.reconcileProviders(settings, [], ['claude']);
-
-      expect(settings.savedProviderModel).toMatchObject({
-        claude: 'claude-code/fable-old',
       });
     });
 
@@ -840,7 +811,6 @@ describe('ProviderSettingsCoordinator', () => {
       expect(settings.model).toBe('claude-code/claude-sonnet-4-5');
       expect(settings.effortLevel).toBe('high');
     });
-
   });
 
   describe('persistProjectedProviderState', () => {
@@ -881,7 +851,6 @@ describe('ProviderSettingsCoordinator', () => {
         codex: 'normal',
       });
     });
-
   });
 
   describe('projectProviderState', () => {
@@ -970,7 +939,7 @@ describe('ProviderSettingsCoordinator', () => {
         providerConfigs: {
           opencode: {
             enabled: true,
-            selectedMode: 'build',
+            selectedMode: 'claudian-yolo',
           },
         },
         model: 'haiku',
@@ -1017,7 +986,9 @@ describe('ProviderSettingsCoordinator', () => {
         savedProviderThinkingBudget: { claude: 'off', codex: 'off' },
       };
 
-      const result = ProviderSettingsCoordinator.reconcileAllProviders(settings, [codexConv]);
+      const result = ProviderSettingsCoordinator.reconcileProviders(
+        settings, [codexConv], ProviderRegistry.getRegisteredProviderIds(),
+      );
 
       expect(result.changed).toBe(true);
       expect(codexConv.sessionId).toBeNull();

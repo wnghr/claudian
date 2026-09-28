@@ -12,7 +12,6 @@ import {
 } from '../../../core/commands/builtInCommands';
 import type { ProviderExecutionEvent } from '../../../core/execution';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
-import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import {
   DEFAULT_CHAT_PROVIDER_ID,
   type ProviderCapabilities,
@@ -21,9 +20,11 @@ import {
 } from '../../../core/providers/types';
 import {
   type ApprovalDecision,
+  type AskUserAnswers,
   type ChatMessage,
   isCanonicalUserMessage,
   type StreamChunk,
+  type ToolCallInfo,
 } from '../../../core/types';
 import { t } from '../../../i18n/i18n';
 import { ResumeSessionDropdown } from '../../../shared/components/ResumeSessionDropdown';
@@ -32,8 +33,9 @@ import type { CanvasSelectionContext } from '../../../utils/canvas';
 import { extractUserDisplayContent } from '../../../utils/context';
 import type { EditorSelectionContext } from '../../../utils/editor';
 import { toError } from '../../../utils/error';
-import { appendMarkdownSnippet } from '../../../utils/markdown';
-import type { FeatureHost } from '../../FeatureHost';
+import type { ChatFeatureHost } from '../ChatFeatureHost';
+import type { ChatSettings } from '../ChatSettings';
+import type { ComposerDraftController } from '../composer/ComposerDraftController';
 import {
   type ChatExecutionCoordinator,
   ChatExecutionPreHandoffError,
@@ -44,6 +46,7 @@ import type {
   LinkedContentSubmissionToken,
 } from '../linked-content';
 import type { PaperContentResult } from '../linked-content/PaperContentResolver';
+import { AsyncQuestionPrompts } from '../rendering/AsyncQuestionPrompts';
 import {
   type InlineApprovalOptions,
   InlineInteractionPrompts,
@@ -54,7 +57,6 @@ import type { SubagentManager } from '../services/SubagentManager';
 import type { SideChatController } from '../side-chat/SideChatController';
 import type { ChatState } from '../state/ChatState';
 import type { ChatTurnRequest, QueuedMessage, TabReviewOutcome } from '../state/types';
-import type { ImageContextManager } from '../ui/ImageContext';
 import type { BrowserSelectionController } from './BrowserSelectionController';
 import type { CanvasSelectionController } from './CanvasSelectionController';
 import type { ConversationController } from './ConversationController';
@@ -63,13 +65,12 @@ import {
   providerOutputEventToStreamChunk,
   type StreamController,
 } from './StreamController';
-import type { ActiveTurnOwner } from './TurnCoordinator';
 import { TurnCoordinator } from './TurnCoordinator';
 
 type ApprovalCallbackOptions = InlineApprovalOptions;
 
 export interface InputControllerDeps {
-  plugin: FeatureHost;
+  plugin: ChatFeatureHost;
   state: ChatState;
   renderer: MessageRenderer;
   streamController: StreamController;
@@ -77,16 +78,16 @@ export interface InputControllerDeps {
   browserSelectionController?: BrowserSelectionController;
   canvasSelectionController: CanvasSelectionController;
   conversationController: ConversationController;
+  drafts: ComposerDraftController;
   getInputEl: () => ComposerInputElement;
   getWelcomeEl: () => HTMLElement | null;
   getMessagesEl: () => HTMLElement;
   getLinkedContentController: () => LinkedContentController;
   resolvePaperContent?: (path: string) => Promise<PaperContentResult>;
-  getImageContextManager: () => ImageContextManager | null;
   getTitleGenerationService: () => TitleGenerationService | null;
   getInputContainerEl: () => HTMLElement;
   generateId: () => string;
-  getAuxiliaryModel?: () => string | null;
+  getSettings: () => Readonly<ChatSettings>;
   getExecutionCoordinator: () => ChatExecutionCoordinator | null;
   getSubagentManager: () => SubagentManager;
   /** Authoritative tab/conversation provider, independent of runtime lifecycle. */
@@ -102,12 +103,14 @@ export interface InputControllerDeps {
   /** Captures a review reporter when a terminal provider turn becomes visible. */
   captureReviewableSettlement?: (outcome: TabReviewOutcome) => () => void;
   canStartTurn?: () => boolean;
-  turnOwner?: ActiveTurnOwner;
+  isClosing?: () => boolean;
+  turnOwner?: TurnCoordinator;
   /** Destination seam for the shared composer; absent means main-only. */
   getSideChatController?: () => SideChatController | null;
 }
 
 export interface SendMessageOptions {
+  onDelivery?: (accepted: boolean) => void;
   /** Retained main input must not follow later composer destination changes. */
   destination?: 'main';
   editorContextOverride?: EditorSelectionContext | null;
@@ -146,8 +149,10 @@ interface PendingSteerState {
 
 export class InputController {
   private deps: InputControllerDeps;
+  private activeDelivery: SendMessageOptions['onDelivery'];
   private activeResumeDropdown: ResumeSessionDropdown | null = null;
   private readonly inlinePrompts: InlineInteractionPrompts;
+  private readonly asyncQuestions: AsyncQuestionPrompts;
   private readonly pendingSteersByConversation = new Map<string, PendingSteerState>();
   private activeStreamingAssistantMessage: ChatMessage | null = null;
   private pendingProviderUserMessages: PendingProviderUserMessage[] = [];
@@ -157,7 +162,7 @@ export class InputController {
     conversationId: string | null;
     report: () => void;
   } | null = null;
-  private readonly turnCoordinator: TurnCoordinator<SendMessageOptions>;
+  private readonly turnCoordinator: TurnCoordinator;
 
   constructor(deps: InputControllerDeps) {
     this.deps = deps;
@@ -166,18 +171,19 @@ export class InputController {
       getSuppressedEl: () => this.deps.getInputContainerEl(),
       onBeforeShow: () => this.deps.streamController.hideThinkingIndicator(),
     });
-    this.turnCoordinator = new TurnCoordinator(
-      (options) => this.#executeSendMessage(options),
-      deps.turnOwner,
-    );
+    this.asyncQuestions = new AsyncQuestionPrompts({
+      prompts: this.inlinePrompts,
+      answer: (tool, answers) => this.answerQuestion(tool, answers, this.deps.state.currentConversationId),
+      onChange: tool => this.deps.renderer.updateQuestionTool(tool),
+      onPendingChange: (id, pending) => pending
+        ? this.deps.state.beginActionRequired(id)
+        : this.deps.state.endActionRequired(id),
+    });
+    this.turnCoordinator = deps.turnOwner ?? new TurnCoordinator();
   }
 
   #getExecutionCoordinator(): ChatExecutionCoordinator | null {
     return this.deps.getExecutionCoordinator();
-  }
-
-  #getAuxiliaryModel(): string | null {
-    return this.deps.getAuxiliaryModel?.() ?? null;
   }
 
   #getActiveProviderId(): ProviderId {
@@ -192,7 +198,7 @@ export class InputController {
       return DEFAULT_CHAT_PROVIDER_ID;
     }
 
-    return this.deps.plugin.getConversationSync(conversationId)?.providerId ?? DEFAULT_CHAT_PROVIDER_ID;
+    return this.deps.plugin.getConversationSummary(conversationId)?.providerId ?? DEFAULT_CHAT_PROVIDER_ID;
   }
 
   #getActiveCapabilities(): ProviderCapabilities {
@@ -213,12 +219,43 @@ export class InputController {
   // ============================================
 
   async sendMessage(options?: SendMessageOptions): Promise<void> {
-    if (this.deps.canStartTurn?.() === false) return;
-    if (this.deps.getTabProviderId?.() === null) {
-      new Notice(t('chat.selectAvailableModel'));
-      return;
+    let queued = false;
+    try {
+      if (this.deps.canStartTurn?.() === false) return;
+      if (this.deps.getTabProviderId?.() === null) {
+        new Notice(t('chat.selectAvailableModel'));
+        return;
+      }
+      queued = await this.#dispatchMessage(options) === true;
+    } finally {
+      if (!queued) options?.onDelivery?.(false);
     }
-    await this.turnCoordinator.run(options);
+  }
+
+  setPromptActive(active: boolean): void {
+    this.inlinePrompts.setActive(active);
+  }
+
+  updateAsyncQuestion(tool: ToolCallInfo): void {
+    this.asyncQuestions.update(tool);
+  }
+
+  async answerQuestion(tool: ToolCallInfo, answers: AskUserAnswers, conversationId: string | null): Promise<void> {
+    const { state } = this.deps;
+    if (state.currentConversationId !== conversationId || !state.messages.some(message => message.toolCalls?.includes(tool))) {
+      throw new Error('This question belongs to a different conversation.');
+    }
+    const reply = ProviderRegistry.formatQuestionReply(this.#getActiveProviderId(), tool, answers);
+    if (!reply) throw new Error('This question cannot accept that reply.');
+    const { turnRequest } = this.#buildTurnSubmission({
+      content: reply.content, images: [], editorContextOverride: null, browserContextOverride: null, canvasContextOverride: null,
+    });
+    await new Promise<void>((resolve, reject) => {
+      void this.sendMessage({
+        destination: 'main', content: reply.displayContent, images: [], turnRequestOverride: turnRequest,
+        onDelivery: accepted => accepted ? resolve() : reject(new Error('The answer was not sent. Please try again.')),
+      }).catch(reject);
+    });
   }
 
   resumeQueuedTurnAfterIntentAdmission(): void {
@@ -228,6 +265,7 @@ export class InputController {
   }
 
   async handleExecutionEvent(event: ProviderExecutionEvent): Promise<void> {
+    if (event.type === 'turn_started' && event.accepted) this.activeDelivery?.(true);
     const assistant = this.activeStreamingAssistantMessage;
     if (!assistant) return;
     if (event.type === 'turn_completed') {
@@ -263,16 +301,12 @@ export class InputController {
     }
   }
 
-  async #executeSendMessage(options?: SendMessageOptions): Promise<void> {
+  async #dispatchMessage(options?: SendMessageOptions): Promise<boolean | void> {
     const {
-      plugin,
       state,
-      renderer,
-      streamController,
       selectionController,
       browserSelectionController,
       canvasSelectionController,
-      conversationController
     } = this.deps;
     this.#discardDeferredReviewForDifferentConversation();
 
@@ -282,17 +316,17 @@ export class InputController {
       return;
     }
 
-    const inputEl = this.deps.getInputEl();
-    const imageContextManager = this.deps.getImageContextManager();
+    const destination = options?.destination ?? this.deps.drafts.destination;
+    const composerDraft = this.deps.drafts.capture(destination);
 
     const contentOverride = options?.content;
     const shouldUseInput = contentOverride === undefined;
-    const content = (contentOverride ?? inputEl.value).trim();
+    const content = (contentOverride ?? composerDraft.content).trim();
     const imageOverride = options?.images;
     const hasImages = imageOverride !== undefined
       ? imageOverride.length > 0
-      : (imageContextManager?.hasImages() ?? false);
-    if (!content && !hasImages) {
+      : (composerDraft.images.length > 0);
+    if (!content && !hasImages && !options?.turnRequestOverride?.text.trim()) {
       this.#reportDeferredReviewableSettlement();
       return;
     }
@@ -304,10 +338,9 @@ export class InputController {
     }
 
     const sideChat = this.deps.getSideChatController?.() ?? null;
-    const destination = options?.destination ?? sideChat?.destination ?? 'main';
 
     // Reserved side-chat aliases never reach provider chat as ordinary text.
-    const sideCommand = detectSideChatCommand(content);
+    const sideCommand = options?.turnRequestOverride ? null : detectSideChatCommand(content);
     if (sideCommand) {
       this.#reportDeferredReviewableSettlement();
       if (!sideChat || !isSideChatCommandSupported(this.#getActiveCapabilities())) {
@@ -315,7 +348,7 @@ export class InputController {
         return;
       }
       const images = hasImages
-        ? [...(imageOverride ?? imageContextManager?.getAttachedImages() ?? [])]
+        ? [...(imageOverride ?? composerDraft.images)]
         : [];
       // The side controller owns composer clearing so a rejected command keeps the draft.
       await sideChat.handleCommandSubmission(sideCommand.argument, images, this.#buildSideContext());
@@ -330,28 +363,21 @@ export class InputController {
         return;
       }
       const images = hasImages
-        ? [...(imageOverride ?? imageContextManager?.getAttachedImages() ?? [])]
+        ? [...(imageOverride ?? composerDraft.images)]
         : [];
       const context = this.#buildSideContext();
-      const previousValue = inputEl.value;
-      if (shouldUseInput) {
-        inputEl.value = '';
-        imageContextManager?.clearImages();
-      }
+      const previousDraft = shouldUseInput ? this.deps.drafts.consume('side') : null;
       const accepted = await sideChat.submitToSide(
         content,
         images,
         context,
       );
-      if (!accepted && shouldUseInput) {
-        inputEl.value = previousValue;
-        imageContextManager?.setImages(images);
-      }
+      if (!accepted && previousDraft) this.deps.drafts.restore('side', previousDraft, { merge: true });
       return;
     }
 
     // Check for built-in commands first (e.g., /clear, /new)
-    const builtInCmd = detectBuiltInCommand(content, this.#getActiveProviderId());
+    const builtInCmd = options?.turnRequestOverride ? null : detectBuiltInCommand(content, this.#getActiveProviderId());
     if (builtInCmd) {
       if (builtInCmd.command.action === 'clear') {
         this.#clearDeferredReviewableSettlement();
@@ -359,7 +385,7 @@ export class InputController {
         this.#reportDeferredReviewableSettlement();
       }
       if (shouldUseInput) {
-        inputEl.value = '';
+        this.deps.drafts.restore(destination, { content: '', images: composerDraft.images });
       }
       await this.#executeBuiltInCommand(builtInCmd.command);
       return;
@@ -380,33 +406,71 @@ export class InputController {
     }
 
     // If agent is working, queue the message instead of dropping it
-    if (state.isStreaming) {
+    if (state.isStreaming || this.turnCoordinator.isActive) {
       const images = hasImages
-        ? [...(imageOverride ?? imageContextManager?.getAttachedImages() ?? [])]
+        ? [...(imageOverride ?? composerDraft.images)]
         : undefined;
       const editorContext = selectionController.getContext();
       const browserContext = browserSelectionController?.getContext() ?? null;
       const canvasContext = canvasSelectionController.getContext();
-      const { displayContent, turnRequest } = this.#buildTurnSubmission({
-        content,
-        images,
-        editorContextOverride: editorContext,
-        browserContextOverride: browserContext,
-        canvasContextOverride: canvasContext,
-      });
+      const { displayContent, turnRequest } = options?.turnRequestOverride
+        ? { displayContent: content, turnRequest: cloneChatTurnRequest(options.turnRequestOverride) }
+        : this.#buildTurnSubmission({
+          content,
+          images,
+          editorContextOverride: editorContext,
+          browserContextOverride: browserContext,
+          canvasContextOverride: canvasContext,
+        });
       state.queuedMessage = this.#mergeQueuedMessages(
         state.queuedMessage,
-        this.#createQueuedMessage(displayContent, turnRequest),
+        { ...this.#createQueuedMessage(displayContent, turnRequest), onDelivery: options?.onDelivery },
       );
 
-      if (shouldUseInput) {
-        inputEl.value = '';
-      }
-      if (shouldUseInput) {
-        imageContextManager?.clearImages();
-      }
+      if (shouldUseInput) this.deps.drafts.consume(destination);
       this.updateQueueIndicator();
-      return;
+      return true;
+    }
+
+    if (!shouldUseInput) this.deps.conversationController.cancelBranchDraft();
+    await this.turnCoordinator.run(signal => this.#executeMainTurn(content, signal, options));
+  }
+
+  async #executeMainTurn(content: string, signal: AbortSignal, options?: SendMessageOptions): Promise<void> {
+    const { plugin, state, renderer, streamController, conversationController } = this.deps;
+    const composerDraft = this.deps.drafts.capture('main');
+    const imageOverride = options?.images;
+    const shouldUseInput = options?.content === undefined;
+    // Slash commands are passed directly to SDK for handling
+    // SDK handles expansion, $ARGUMENTS, @file references, and frontmatter options
+    const images = imageOverride ?? composerDraft.images;
+    const imagesForMessage = images.length > 0 ? [...images] : undefined;
+    const isCompact = /^\/compact(\s|$)/i.test(options?.turnRequestOverride?.text ?? content);
+
+    const turnSubmission = options?.turnRequestOverride
+      ? {
+        displayContent: content,
+        turnRequest: cloneChatTurnRequest(options.turnRequestOverride),
+      }
+      : this.#buildTurnSubmission({
+        content,
+        images: imagesForMessage,
+        editorContextOverride: options?.editorContextOverride,
+        browserContextOverride: options?.browserContextOverride,
+        canvasContextOverride: options?.canvasContextOverride,
+      });
+    const { displayContent, turnRequest } = turnSubmission;
+    // Capture and consume the main submission before native navigation can yield
+    // and the shared composer can switch to another destination.
+    if (shouldUseInput) {
+      this.deps.drafts.consume('main');
+      if (conversationController.hasBranchDraft) {
+        const committed = await conversationController.commitBranchDraft(signal);
+        if (committed.status !== 'committed' || signal.aborted || this.deps.canStartTurn?.() === false) {
+          this.#restoreMessageToInput(this.#createQueuedMessage(displayContent, turnRequest), { mergeWithComposer: true });
+          return;
+        }
+      }
     }
 
     state.acknowledgeReview();
@@ -414,9 +478,6 @@ export class InputController {
     let turnConversationId = state.currentConversationId;
     this.#delegatePendingSteerCorrelationToHistory(turnConversationId);
 
-    if (shouldUseInput) {
-      inputEl.value = '';
-    }
     state.isStreaming = true;
     state.cancelRequested = false;
     state.ignoreUsageUpdates = false; // Allow usage updates for new query
@@ -435,30 +496,6 @@ export class InputController {
       ? null
       : linkedContentController.beginSubmission();
 
-    // Slash commands are passed directly to SDK for handling
-    // SDK handles expansion, $ARGUMENTS, @file references, and frontmatter options
-    const images = imageOverride ?? imageContextManager?.getAttachedImages() ?? [];
-    const imagesForMessage = images.length > 0 ? [...images] : undefined;
-    const isCompact = /^\/compact(\s|$)/i.test(content);
-
-    // Only clear images if we consumed user input (not for programmatic content override)
-    if (shouldUseInput) {
-      imageContextManager?.clearImages();
-    }
-
-    const turnSubmission = options?.turnRequestOverride
-      ? {
-        displayContent: content,
-        turnRequest: cloneChatTurnRequest(options.turnRequestOverride),
-      }
-      : this.#buildTurnSubmission({
-        content,
-        images: imagesForMessage,
-        editorContextOverride: options?.editorContextOverride,
-        browserContextOverride: options?.browserContextOverride,
-        canvasContextOverride: options?.canvasContextOverride,
-      });
-    const { displayContent, turnRequest } = turnSubmission;
     const messagesBeforeTurn = state.messages;
     const hadPendingConversationSave = state.hasPendingConversationSave;
 
@@ -491,12 +528,24 @@ export class InputController {
       isCompact,
     );
     let linkedContentBody: string | undefined;
+    const restoreCancelledInput = (): boolean => {
+      if (!signal.aborted) return false;
+      this.#restoreMessageToInput(this.#createQueuedMessage(displayContent, turnRequest), { mergeWithComposer: true });
+      this.#rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
+      this.activeStreamingAssistantMessage = null;
+      this.#resetProviderMessageBoundaryState();
+      this.#reportDeferredReviewableSettlement();
+      return true;
+    };
+
     try {
       linkedContentBody = await this.#resolvePaperContent(
         admittedTurnRequest.linkedContentPath,
       );
       await this.#ensureConversationShell(linkedContentSubmission);
+      if (this.#retainUnsentTurnOnClose(signal) || restoreCancelledInput()) return;
       await this.#triggerTitleGeneration();
+      if (this.#retainUnsentTurnOnClose(signal) || restoreCancelledInput()) return;
     } catch (error) {
       if (linkedContentSubmission && !state.currentConversationId) {
         linkedContentController.rollbackSubmission(linkedContentSubmission);
@@ -546,7 +595,9 @@ export class InputController {
     // Lazy initialization: bind and prepare execution on the first provider action.
     if (this.deps.ensureExecutionInitialized) {
       const ready = await this.deps.ensureExecutionInitialized();
+      if (this.#retainUnsentTurnOnClose(signal, assistantMsg.id) || restoreCancelledInput()) return;
       if (!ready) {
+        if (this.#retainUnsentTurnOnClose(signal, assistantMsg.id)) return;
         new Notice('Failed to initialize agent execution. Please try again.');
         this.#restoreMessageToInput(
           this.#createQueuedMessage(displayContent, admittedTurnRequest),
@@ -575,9 +626,12 @@ export class InputController {
     }
 
     const dynamicSystemPromptSections = await this.#resolveMainAgentDynamicSystemPromptSections();
+    if (this.#retainUnsentTurnOnClose(signal, assistantMsg.id) || restoreCancelledInput()) return;
 
     try {
       userMsg.content = admittedTurnRequest.text;
+      userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
+      this.activeDelivery = options?.onDelivery;
       const result = await coordinator.execute(this.#createExecutionSubmission(
         displayContent,
         admittedTurnRequest,
@@ -585,7 +639,7 @@ export class InputController {
         assistantMsg,
         dynamicSystemPromptSections,
         linkedContentBody,
-      ));
+      ), signal);
       if (result.status === 'completed') {
         const checkpoint = result.nativeAssistantMessageId ?? result.nativeCheckpointId;
         const finalAssistant = this.activeStreamingAssistantMessage ?? assistantMsg;
@@ -599,6 +653,7 @@ export class InputController {
         }
       }
       didEnqueueToSdk = result.accepted;
+      if (result.accepted) options?.onDelivery?.(true);
       shouldReportReviewableSettlement = result.status === 'completed'
         || (result.status === 'error' && result.accepted);
       if (shouldReportReviewableSettlement) {
@@ -609,6 +664,7 @@ export class InputController {
       if (result.status === 'cancelled') {
         wasInterrupted = true;
       } else if (result.status === 'invalidated') {
+        this.asyncQuestions.expireAll();
         wasInvalidated = true;
       } else if (result.status === 'missing-session') {
         const retryMessage = result.accepted
@@ -648,13 +704,14 @@ export class InputController {
       }
     } catch (error) {
       if (error instanceof ChatExecutionPreHandoffError) {
+        if (this.#retainUnsentTurnOnClose(signal, assistantMsg.id)) return;
         this.#restoreMessageToInput(
           this.#createQueuedMessage(displayContent, admittedTurnRequest),
           { mergeWithComposer: true },
         );
         this.#rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
         didRollbackUnsentTurn = true;
-        new Notice('Message was not sent. Please try again.');
+        if (!signal.aborted) new Notice('Message was not sent. Please try again.');
         this.#reportDeferredReviewableSettlement();
       } else {
         hadExecutionError = true;
@@ -665,6 +722,7 @@ export class InputController {
           this.deps.captureReviewableSettlement?.('error') ?? null;
       }
     } finally {
+      this.activeDelivery = undefined;
       const finalAssistantMsg = this.activeStreamingAssistantMessage ?? assistantMsg;
 
       // ALWAYS clear the timer interval, even on stream invalidation (prevents memory leaks)
@@ -815,6 +873,7 @@ export class InputController {
 
   clearQueuedMessage(): void {
     const { state } = this.deps;
+    state.queuedMessage?.onDelivery?.(false);
     state.queuedMessage = null;
     this.updateQueueIndicator();
   }
@@ -829,68 +888,22 @@ export class InputController {
     this.updateQueueIndicator();
   }
 
-  restoreRewoundMessageToComposer(
-    message: Pick<ChatMessage, 'content' | 'images'>,
-  ): void {
-    this.#restoreMessageToInput({
-      canvasContext: null,
-      content: message.content,
-      editorContext: null,
-      images: message.images,
-    });
-    const inputEl = this.deps.getInputEl();
-    const EventConstructor = inputEl.ownerDocument?.defaultView?.Event ?? Event;
-    inputEl.dispatchEvent(new EventConstructor('input', { bubbles: true }));
-  }
-
   #restoreMessageToInput(
     message: QueuedMessage | null,
     options: { mergeWithComposer?: boolean } = {},
   ): void {
     if (!message) return;
+    message.onDelivery?.(false);
 
-    const { content, images } = message;
-    const inputEl = this.deps.getInputEl();
-    const sideChat = this.deps.getSideChatController?.() ?? null;
-    const mainDraft = sideChat?.destination === 'side' ? sideChat.getMainDraft() : null;
-    const currentContent = options.mergeWithComposer
-      ? (mainDraft?.content ?? inputEl.value).trim()
-      : '';
-    const restoredContent = currentContent
-      ? appendMarkdownSnippet(content, currentContent)
-      : content;
-
-    const imageContextManager = this.deps.getImageContextManager();
-    const currentImages = options.mergeWithComposer
-      ? (mainDraft?.images ?? imageContextManager?.getAttachedImages() ?? [])
-      : [];
-    const restoredImages = [...(images ?? []), ...currentImages];
-    if (mainDraft && sideChat) {
-      sideChat.restoreMainDraft({ content: restoredContent, images: restoredImages });
-      return;
-    }
-    inputEl.value = restoredContent;
-    if (imageContextManager && (!options.mergeWithComposer || restoredImages.length > 0)) {
-      imageContextManager.setImages(restoredImages);
-    }
-    inputEl.focus();
+    this.deps.drafts.restore('main', message, {
+      merge: options.mergeWithComposer, focus: true,
+    });
   }
 
   #captureComposerDraft(): QueuedMessage | null {
-    const sideChat = this.deps.getSideChatController?.() ?? null;
-    const mainDraft = sideChat?.destination === 'side' ? sideChat.getMainDraft() : null;
-    const content = mainDraft?.content ?? this.deps.getInputEl().value;
-    const attachedImages = mainDraft?.images
-      ?? this.deps.getImageContextManager()?.getAttachedImages() ?? [];
-    const images = attachedImages.length > 0 ? [...attachedImages] : undefined;
-    if (!content.trim() && !images) {
-      return null;
-    }
-
-    return this.#createQueuedMessage(content, {
-      text: content,
-      images,
-    });
+    const { content, images } = this.deps.drafts.capture('main');
+    if (!content.trim() && !images.length) return null;
+    return this.#createQueuedMessage(content, { text: content, images });
   }
 
   #restoreQueuedMessageToInput(): void {
@@ -925,6 +938,7 @@ export class InputController {
           content: queuedMessage.content,
           images: queuedMessage.images ?? [],
           turnRequestOverride: this.#toQueuedChatTurn(queuedMessage).request,
+          onDelivery: queuedMessage.onDelivery,
         }).catch(() => this.#reportDeferredReviewableSettlement());
       },
       0
@@ -1074,33 +1088,16 @@ export class InputController {
     dynamicSystemPromptSections: readonly string[] = [],
     linkedContentBody?: string,
   ): ChatTurnSubmission {
-    const providerId = this.#getActiveProviderId();
-    const settings = ProviderSettingsCoordinator.getProviderSettingsSnapshot(
-      this.deps.plugin.settings,
-      providerId,
-    );
-    const reasoning = typeof settings.effortLevel === 'string'
-      ? settings.effortLevel
-      : typeof settings.thinkingBudget === 'string'
-        ? settings.thinkingBudget
-        : undefined;
-    const permissionMode = typeof settings.permissionMode === 'string'
-      ? settings.permissionMode
-      : undefined;
-    const serviceTier = typeof settings.serviceTier === 'string'
-      ? settings.serviceTier
-      : undefined;
+    const settings = this.deps.getSettings();
     const images = [...(request.images ?? [])];
 
     return {
       canonicalText: request.text,
       configuration: {
-        ...(this.#getAuxiliaryModel()
-          ? { model: this.#getAuxiliaryModel() ?? undefined }
-          : {}),
-        ...(permissionMode ? { permissionMode } : {}),
-        ...(reasoning ? { reasoning } : {}),
-        ...(serviceTier ? { serviceTier } : {}),
+        model: settings.model,
+        reasoning: settings.reasoning,
+        permissionMode: settings.permissionMode,
+        serviceTier: settings.serviceTier,
         systemInstructions: dynamicSystemPromptSections.length > 0
           ? {
               dynamicSections: [...dynamicSystemPromptSections],
@@ -1185,7 +1182,6 @@ export class InputController {
       cls: 'claudian-queue-indicator-icon-action',
       attr: {
         'aria-label': label,
-        title: label,
         type: 'button',
       },
     });
@@ -1368,7 +1364,13 @@ export class InputController {
       this.#toQueuedChatTurn(existing),
       this.#toQueuedChatTurn(incoming),
     );
-    return this.#createQueuedMessage(mergedTurn.displayContent, mergedTurn.request);
+    return {
+      ...this.#createQueuedMessage(mergedTurn.displayContent, mergedTurn.request),
+      onDelivery: accepted => {
+        existing.onDelivery?.(accepted);
+        incoming.onDelivery?.(accepted);
+      },
+    };
   }
 
   private async steerQueuedMessage(): Promise<void> {
@@ -1421,6 +1423,7 @@ export class InputController {
         return;
       }
 
+      pending.message.onDelivery?.(true);
       pending.providerDisposition = 'accepted-awaiting-correlation';
       this.#clearPendingSteerUi(pending);
       if (pending.correlationState !== 'pending') {
@@ -1498,6 +1501,7 @@ export class InputController {
       : this.pendingProviderUserMessages.shift();
     let acceptanceError: unknown;
     if (pendingSteer?.correlationState === 'pending') {
+      pendingSteer.message.onDelivery?.(true);
       pendingSteer.providerDisposition = 'accepted-awaiting-correlation';
       pendingSteer.correlationState = 'settled';
       this.#clearPendingSteerUi(pendingSteer);
@@ -1526,7 +1530,7 @@ export class InputController {
     const displayContent = expected?.displayContent ?? chunk.content;
     const persistedContent = expected?.persistedContent ?? displayContent;
     const images = expected?.images;
-    if (displayContent || (images?.length ?? 0) > 0) {
+    if (displayContent || expected?.persistedContent || (images?.length ?? 0) > 0) {
       const userMessage: ChatMessage = {
         id: this.deps.generateId(),
         role: 'user',
@@ -1600,6 +1604,17 @@ export class InputController {
       && !message.content.trim()
       && (message.toolCalls?.length ?? 0) === 0
       && (message.contentBlocks?.length ?? 0) === 0;
+  }
+
+  #retainUnsentTurnOnClose(signal: AbortSignal, assistantMessageId?: string): boolean {
+    if (!this.deps.isClosing?.() && signal.reason !== 'shutdown') return false;
+    // Teardown retains submitted input in the in-memory conversation projection.
+    // The closing composer cannot receive a retry; native history remains provider-owned.
+    if (assistantMessageId) this.#discardStreamingAssistantMessage(assistantMessageId);
+    this.activeStreamingAssistantMessage = null;
+    this.#resetProviderMessageBoundaryState();
+    this.#resetTurnStreamingState();
+    return true;
   }
 
   #discardStreamingAssistantMessage(messageId: string): void {
@@ -1737,7 +1752,7 @@ export class InputController {
       throw new Error('Missing Linked content submission for new Conversation');
     }
 
-    const selectedModel = this.#getAuxiliaryModel() ?? undefined;
+    const selectedModel = this.deps.getSettings().model || undefined;
     const conversation = await plugin.createConversation({
       providerId: this.#getActiveProviderId(),
       ...(selectedModel ? { selectedModel } : {}),
@@ -1773,6 +1788,7 @@ export class InputController {
     const { state, streamController } = this.deps;
     if (!state.isStreaming) return;
     state.cancelRequested = true;
+    this.turnCoordinator.cancel();
     this.#restoreQueuedMessageToInput();
     this.#clearCurrentPendingSteerUi();
     this.#getExecutionCoordinator()?.cancel();
@@ -1781,7 +1797,7 @@ export class InputController {
 
   /** Cancels the active turn and waits for its cleanup and conversation persistence. */
   async cancelStreamingAndWait(): Promise<void> {
-    const activeTurn = this.turnCoordinator.current;
+    const activeTurn = this.turnCoordinator.drain();
     this.cancelStreaming();
     await activeTurn;
   }
@@ -1805,35 +1821,37 @@ export class InputController {
   // ============================================
 
   handleApprovalRequest(
+    interactionId: string,
     toolName: string,
     input: Record<string, unknown>,
     description: string,
     approvalOptions?: ApprovalCallbackOptions,
+    signal?: AbortSignal,
   ): Promise<ApprovalDecision> {
     return this.inlinePrompts.requestApproval(
+      interactionId,
       toolName,
       input,
       description,
       approvalOptions,
+      signal,
     );
   }
 
   handleAskUserQuestion(
+    interactionId: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<Record<string, string | string[]> | null> {
-    return this.inlinePrompts.askUserQuestion(input, signal);
+    return this.inlinePrompts.askUserQuestion(interactionId, input, signal);
   }
 
-  dismissPendingApprovalPrompt(): void {
-    this.inlinePrompts.dismissApproval();
-  }
-
-  dismissProviderInteraction(kind: 'approval' | 'question'): void {
-    this.inlinePrompts.dismiss(kind);
+  dismissProviderInteraction(interactionId: string): void {
+    this.inlinePrompts.dismiss(interactionId);
   }
 
   dismissPendingApproval(): void {
+    this.asyncQuestions.expireAll();
     this.inlinePrompts.dismissAll();
   }
 

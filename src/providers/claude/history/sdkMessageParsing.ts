@@ -13,12 +13,15 @@ import {
   parseImageDataUri,
 } from '../../../utils/imageAttachment';
 import { isCompactionCanceledStderr, isInterruptSignalText } from '../../../utils/interrupt';
+import { extractXMLTag, parseClaudeTaskNotification } from '../normalization/claudeTaskNotification';
 import { extractToolResultContent, extractToolResultImages } from '../sdk/toolResultContent';
 import type {
   AsyncSubagentResult,
   SDKNativeContentBlock,
   SDKNativeMessage,
 } from './sdkHistoryTypes';
+
+export { extractXMLTag } from '../normalization/claudeTaskNotification';
 
 function extractTextContent(content: string | SDKNativeContentBlock[] | undefined): string {
   if (!content) {
@@ -307,9 +310,9 @@ export function collectAsyncSubagentResults(
       continue;
     }
 
-    const taskId = extractXmlTag(sdkMsg.content, 'task-id');
-    const status = extractXmlTag(sdkMsg.content, 'status');
-    const result = extractXmlTag(sdkMsg.content, 'result');
+    const taskId = extractXMLTag(sdkMsg.content, 'task-id');
+    const status = extractXMLTag(sdkMsg.content, 'status');
+    const result = extractXMLTag(sdkMsg.content, 'result');
     if (!taskId || !result) {
       continue;
     }
@@ -323,18 +326,7 @@ export function collectAsyncSubagentResults(
   return results;
 }
 
-export function extractXmlTag(content: string, tagName: string): string | null {
-  const regex = new RegExp(`<${tagName}>\\s*([\\s\\S]*?)\\s*</${tagName}>`, 'i');
-  const match = content.match(regex);
-  if (!match || !match[1]) {
-    return null;
-  }
-
-  const trimmed = match[1].trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-export function isCanonicalSdkUserMessage(record: SDKNativeMessage): boolean {
+export function isCanonicalSDKUserMessage(record: SDKNativeMessage): boolean {
   const queuedPrompt = record.type === 'attachment'
     && record.attachment?.type === 'queued_command' && record.attachment.commandMode === 'prompt';
   if ((!queuedPrompt && record.type !== 'user') || isSystemInjectedMessage(record)) return false;
@@ -392,14 +384,7 @@ export function parseTaskNotification(sdkMsg: SDKNativeMessage): string | null {
       && attachment.commandMode === 'task-notification'
       ? attachment.prompt
       : undefined;
-  const text = extractTextContent(content);
-  if (!text?.trimStart().startsWith('<task-notification>')) return null;
-  if (!extractXmlTag(text, 'task-id')) return null;
-  const status = extractXmlTag(text, 'status');
-  if (!status) return null;
-  return extractXmlTag(text, 'result')
-    ?? extractXmlTag(text, 'summary')
-    ?? `Background task ${status}.`;
+  return parseClaudeTaskNotification(content)?.content ?? null;
 }
 
 export function mergeAssistantMessage(target: ChatMessage, source: ChatMessage): void {

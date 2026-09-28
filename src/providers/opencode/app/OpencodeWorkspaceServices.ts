@@ -2,14 +2,13 @@ import type { ProviderCommandCatalog } from '../../../core/providers/commands/Pr
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
-  ProviderTabWarmupPolicy,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
 import { OpencodeCommandCatalog } from '../commands/OpencodeCommandCatalog';
 import { OpencodeServerService } from '../http/OpencodeServerService';
 import { OpencodeMetadataService } from '../metadata/OpencodeMetadataService';
-import { OpencodeCliResolver } from '../runtime/OpencodeCliResolver';
+import { OpencodeCLIResolver } from '../runtime/OpencodeCLIResolver';
 import { createOpencodeModels } from '../runtime/OpencodeModels';
 import { createOpencodeSettingsTabRenderer } from '../ui/OpencodeSettingsTab';
 import { OpencodeCommandLoader } from './OpencodeCommandLoader';
@@ -19,12 +18,6 @@ export interface OpencodeWorkspaceServices extends ProviderWorkspaceServices {
   metadataService: OpencodeMetadataService;
   serverService: OpencodeServerService;
 }
-
-const opencodeTabWarmupPolicy: ProviderTabWarmupPolicy = {
-  resolveMode() {
-    return 'commands';
-  },
-};
 
 export async function createOpencodeWorkspaceServices(
   plugin: ProviderHost,
@@ -39,7 +32,7 @@ export async function createOpencodeWorkspaceServices(
 
   const modelCatalog = createOpencodeModels(plugin, metadataService);
   const unregisterModels = plugin.executionLifecycleRegistry.registerTransitionHook('opencode', { beforeTransition: () => modelCatalog.beginTransition(), afterTransition: () => modelCatalog.endTransition() });
-  const cliResolver = new OpencodeCliResolver();
+  const cliResolver = new OpencodeCLIResolver();
   return {
     commandCatalog,
     modelCatalog,
@@ -48,7 +41,6 @@ export async function createOpencodeWorkspaceServices(
     serverService,
     commandLoader: new OpencodeCommandLoader(metadataService),
     settingsTabRenderer: createOpencodeSettingsTabRenderer({ cliResolver, metadataService, modelCatalog }),
-    tabWarmupPolicy: opencodeTabWarmupPolicy,
     dispose: async () => {
       unregister();
       unregisterModels();
@@ -58,6 +50,7 @@ export async function createOpencodeWorkspaceServices(
 }
 
 export const opencodeWorkspaceRegistration: ProviderWorkspaceRegistration<OpencodeWorkspaceServices> = {
+  consumesAgentSkills: true,
   initialize: async ({ plugin }) => (
     createOpencodeWorkspaceServices(plugin)
   ),

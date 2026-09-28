@@ -1,20 +1,21 @@
 import '@/providers';
 
 import { claudeCatalogFixture } from '@test/helpers/claudeModels';
+import { createConversationPorts } from '@test/helpers/ConversationPorts';
 import { createMockEl } from '@test/helpers/MockElement';
 import { Menu, Notice, setIcon } from 'obsidian';
 
 import type { TitleGenerationService } from '@/core/providers/types';
+import type { ClaudianSettings } from '@/core/types';
 import { ConversationController, type ConversationControllerDeps } from '@/features/chat/controllers/ConversationController';
 import { SessionBrowser } from '@/features/chat/session-manager/SessionBrowser';
 import { ChatState } from '@/features/chat/state/ChatState';
-import { OPENAI_PROVIDER_ICON } from '@/shared/icons';
 
 jest.mock('@/shared/modals/ConfirmModal', () => ({
   confirm: jest.fn().mockResolvedValue(true),
 }));
 
-function createMockDeps(overrides: Record<string, unknown> = {}): ConversationControllerDeps & { getHistoryDropdown: () => HTMLElement; getTitleGenerationService: () => TitleGenerationService | null } {
+function createMockDeps(overrides: Record<string, unknown> = {}): ConversationControllerDeps & { plugin: ConversationControllerDeps['plugin'] & { settings: ClaudianSettings }; getHistoryDropdown: () => HTMLElement; getTitleGenerationService: () => TitleGenerationService | null } {
   const state = new ChatState();
   const inputEl = { value: '', focus: jest.fn() } as unknown as HTMLTextAreaElement;
   const historyDropdown = createMockEl();
@@ -26,7 +27,7 @@ function createMockDeps(overrides: Record<string, unknown> = {}): ConversationCo
     lock: jest.fn(),
   };
 
-  return {
+  const deps = {
     plugin: {
       createConversation: jest.fn().mockResolvedValue({
         id: 'new-conv',
@@ -45,9 +46,9 @@ function createMockDeps(overrides: Record<string, unknown> = {}): ConversationCo
         lastActivityAt: Date.now(),
       }),
       getConversationById: jest.fn().mockResolvedValue(null),
+      getConversationSummary(id: string) { return this.getConversationSync(id); },
       getConversationSync: jest.fn().mockReturnValue(null),
       getConversationList: jest.fn().mockReturnValue([]),
-      findEmptyConversation: jest.fn().mockResolvedValue(null),
       updateConversation: jest.fn().mockResolvedValue(undefined),
       renameConversation: jest.fn().mockResolvedValue(undefined),
       deleteConversation: jest.fn().mockResolvedValue(undefined),
@@ -84,7 +85,8 @@ function createMockDeps(overrides: Record<string, unknown> = {}): ConversationCo
     getTitleGenerationService: () => null,
     getExecutionCoordinator: () => null,
     ...overrides,
-  } as ReturnType<typeof createMockDeps>;
+  } as unknown as ReturnType<typeof createMockDeps>;
+  return Object.assign(deps, createConversationPorts(deps as any));
 }
 
 function createBrowser(deps: ReturnType<typeof createMockDeps>): SessionBrowser {
@@ -149,27 +151,15 @@ describe('SessionBrowser', () => {
     });
 
     describe('updateHistoryDropdown with conversations', () => {
-      it('should render conversation items when conversations exist', () => {
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'First Conversation', createdAt: 1000, lastActivityAt: 3000 },
-          { id: 'conv-2', title: 'Second Conversation', createdAt: 2000, lastActivityAt: 2000 },
-        ]);
-
-        renderDropdown(controller, deps);
-
-        expect(dropdown.children.length).toBe(2);
-        const list = dropdown.children[1];
-        expect(list.hasClass('claudian-history-list')).toBe(true);
-        expect(list.children.length).toBe(2);
-      });
-
       it('should show "No conversations" when list is empty', () => {
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([]);
 
         renderDropdown(controller, deps);
 
+        expect(dropdown.children[0].children[0].textContent).toBe('Sessions');
         const list = dropdown.children[1];
         expect(list.children[0].hasClass('claudian-history-empty')).toBe(true);
+        expect(list.children[0].textContent).toBe('No conversations');
       });
 
       it('should sort conversations by lastActivityAt descending', () => {
@@ -181,53 +171,13 @@ describe('SessionBrowser', () => {
 
         renderDropdown(controller, deps);
 
+        expect(dropdown.children.length).toBe(2);
         const list = dropdown.children[1];
-        const firstTitle = list.children[0].querySelector('.claudian-history-item-title');
-        expect(firstTitle?.textContent).toBe('New');
-      });
-
-      it('uses the same activity ordering in the single-mode history surface', () => {
-        const container = createMockEl();
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          {
-            id: 'metadata-newer',
-            title: 'Metadata newer',
-            createdAt: 1,
-            lastActivityAt: 100,
-          },
-          {
-            id: 'response-newer',
-            title: 'Response newer',
-            createdAt: 2,
-            lastActivityAt: 200,
-          },
-        ]);
-
-        controller.renderHistoryDropdown(container, {
-          onSelectConversation: jest.fn(),
-        });
-
-        const titles = container.querySelectorAll('.claudian-history-item-title');
-        expect(titles.map((title: { textContent: string }) => title.textContent)).toEqual([
-          'Response newer',
-          'Metadata newer',
-        ]);
-      });
-
-      it('should mark current conversation as active', () => {
-        deps.state.currentConversationId = 'conv-1';
-
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'Current', createdAt: 1000, lastActivityAt: 1000 },
-          { id: 'conv-2', title: 'Other', createdAt: 2000, lastActivityAt: 2000 },
-        ]);
-
-        renderDropdown(controller, deps);
-
-        const list = dropdown.children[1];
-        const items = list.children;
-        const activeItem = items.find((item: any) => item.hasClass('active'));
-        expect(activeItem).toBeDefined();
+        expect(list.hasClass('claudian-history-list')).toBe(true);
+        expect(list.children.length).toBe(3);
+        expect(list.querySelectorAll('.claudian-history-item-title')
+          .map((title: { textContent: string }) => title.textContent))
+          .toEqual(['New', 'Mid', 'Old']);
       });
 
       it('should show loading indicator for pending title generation', () => {
@@ -241,56 +191,6 @@ describe('SessionBrowser', () => {
         const item = list.children[0];
         const loadingEl = item.querySelector('.claudian-action-loading');
         expect(loadingEl).toBeTruthy();
-      });
-
-      it('should show regenerate button for failed title generation', () => {
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'Fallback Title', createdAt: 1000, lastActivityAt: 1000, titleGenerationStatus: 'failed' },
-        ]);
-
-        renderDropdown(controller, deps);
-
-        const list = dropdown.children[1];
-        const item = list.children[0];
-        const actions = item.querySelector('.claudian-history-item-actions');
-        expect(actions).toBeTruthy();
-        // regenerate button + rename button + delete button = 3 children
-        expect(actions!.children.length).toBe(3);
-      });
-
-      it('should not show select click handler on current conversation', () => {
-        deps.state.currentConversationId = 'conv-1';
-
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'Current', createdAt: 1000, lastActivityAt: 1000 },
-        ]);
-
-        renderDropdown(controller, deps);
-
-        const list = dropdown.children[1];
-        const item = list.children[0];
-        const content = item.querySelector('.claudian-history-item-content');
-        const listeners = content?._eventListeners?.get('click');
-        expect(listeners).toBeUndefined();
-      });
-
-      it('should attach select click handler on non-current conversations', () => {
-        deps.state.currentConversationId = 'conv-1';
-
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'Current', createdAt: 1000, lastActivityAt: 2000 },
-          { id: 'conv-2', title: 'Other', createdAt: 2000, lastActivityAt: 1000 },
-        ]);
-
-        renderDropdown(controller, deps);
-
-        const list = dropdown.children[1];
-        // conv-2 is the non-current one (sorted second by lastActivityAt)
-        const otherItem = list.children[1];
-        const content = otherItem.querySelector('.claudian-history-item-content');
-        const listeners = content?._eventListeners?.get('click');
-        expect(listeners).toBeDefined();
-        expect(listeners!.length).toBe(1);
       });
 
       it('should not delete while streaming', async () => {
@@ -316,29 +216,6 @@ describe('SessionBrowser', () => {
     });
 
     describe('renderHistoryDropdown', () => {
-      it('labels the conversation selector as Sessions', () => {
-        const container = createMockEl();
-
-        controller.renderHistoryDropdown(container, {
-          onSelectConversation: jest.fn(),
-        });
-
-        expect(container.children[0].children[0].textContent).toBe('Sessions');
-      });
-
-      it('should render history items to provided container', () => {
-        const container = createMockEl();
-        const onSelectConversation = jest.fn();
-
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
-          { id: 'conv-1', title: 'Test', createdAt: 1000, lastActivityAt: 1000 },
-        ]);
-
-        controller.renderHistoryDropdown(container, { onSelectConversation });
-
-        expect(container.children.length).toBe(2); // header + list
-      });
-
       it('partitions pinned sessions into a dedicated dual-mode section', () => {
         const container = createMockEl();
         (deps.plugin.getConversationList as jest.Mock).mockReturnValue([
@@ -605,86 +482,6 @@ describe('SessionBrowser', () => {
         expect(menu.items[1].clickHandler).toBeNull();
       });
 
-      it('renders dual-mode sessions on one row with metadata in a hover card', () => {
-        const container = createMockEl();
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([{
-          id: 'session-1',
-          providerId: 'codex',
-          selectedModel: 'gpt-5.1-codex',
-          title: 'Review architecture',
-          createdAt: 1_000,
-          lastActivityAt: 2_000,
-          linkedContentPath: 'Projects/Architecture.md',
-        }]);
-        jest.spyOn(controller, 'formatMetadataDate').mockReturnValue('Aug 3, 2026');
-        jest.spyOn(controller, 'formatMetadataDateTime').mockReturnValue('Aug 5, 2026, 14:28');
-
-        controller.renderHistoryDropdown(container, {
-          onSelectConversation: jest.fn(),
-          showMetadataPopover: true,
-          getProviderIcon: () => OPENAI_PROVIDER_ICON,
-          getModelLabel: () => 'GPT-5.1 Codex',
-        });
-
-        const item = container.querySelector('.claudian-history-item')!;
-        item.getBoundingClientRect = jest.fn().mockReturnValue({
-          top: 120,
-          left: 20,
-          width: 200,
-          height: 28,
-          right: 220,
-          bottom: 148,
-          x: 20,
-          y: 120,
-          toJSON: jest.fn(),
-        });
-        const body = createMockEl();
-        Object.defineProperty(item.ownerDocument, 'body', {
-          configurable: true,
-          value: body,
-        });
-        const content = item.querySelector('.claudian-history-item-content')!;
-        expect(item.getAttribute('tabindex')).toBeNull();
-        expect(item.getAttribute('role')).toBeNull();
-        expect(content.getAttribute('tabindex')).toBe('0');
-        expect(content.getAttribute('role')).toBe('button');
-        expect(item.querySelector('.claudian-history-item-date')).toBeNull();
-
-        item.dispatchEvent({ type: 'mouseenter' });
-
-        const popover = body.querySelector('.claudian-session-metadata-popover')!;
-        expect(popover.getAttribute('role')).toBe('tooltip');
-        expect(popover.querySelectorAll('.claudian-session-metadata-label')
-          .map((label: { textContent: string }) => label.textContent))
-          .toEqual(['Created', 'Last active']);
-        expect(popover.querySelectorAll('.claudian-session-metadata-value')
-          .map((value: { textContent: string }) => value.textContent))
-          .toEqual([
-            'Architecture',
-            'GPT-5.1 Codex',
-            'Aug 3, 2026',
-            'Aug 5, 2026, 14:28',
-          ]);
-        expect(popover.querySelector('.claudian-session-metadata-provider-icon'))
-          .not.toBeNull();
-        expect(popover.style.top).toBe('120px');
-        const contentValue = popover.querySelector(
-          '.claudian-session-metadata-value--content',
-        )!;
-        expect(contentValue.getAttribute('title')).toBe('Projects/Architecture.md');
-
-        content.dispatchEvent({
-          type: 'keydown',
-          key: 'Escape',
-          stopPropagation: jest.fn(),
-        });
-        expect(popover.hasClass('claudian-hidden')).toBe(true);
-
-        content.dispatchEvent({ type: 'focusin' });
-        expect(body.querySelectorAll('.claudian-session-metadata-popover'))
-          .toHaveLength(2);
-      });
-
       it.each(['Enter', ' '])('opens a focusable dual-mode session with %s', async (key) => {
         const container = createMockEl();
         const onSelectConversation = jest.fn().mockResolvedValue(undefined);
@@ -721,42 +518,6 @@ describe('SessionBrowser', () => {
         expect(preventDefault).toHaveBeenCalledTimes(1);
         expect(stopPropagation).toHaveBeenCalledTimes(1);
         expect(onSelectConversation).toHaveBeenCalledWith('session-1');
-      });
-
-      it('omits the note metadata row for unlinked sessions', () => {
-        const container = createMockEl();
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([{
-          id: 'session-1',
-          providerId: 'codex',
-          selectedModel: 'gpt-5.1-codex',
-          title: 'Review architecture',
-          createdAt: 1_000,
-          lastActivityAt: 2_000,
-        }]);
-        jest.spyOn(controller, 'formatMetadataDate').mockReturnValue('Aug 3, 2026');
-        jest.spyOn(controller, 'formatMetadataDateTime').mockReturnValue('Aug 5, 2026, 14:28');
-
-        controller.renderHistoryDropdown(container, {
-          onSelectConversation: jest.fn(),
-          showMetadataPopover: true,
-          getProviderIcon: () => OPENAI_PROVIDER_ICON,
-          getModelLabel: () => 'GPT-5.1 Codex',
-        });
-
-        const item = container.querySelector('.claudian-history-item')!;
-        const body = createMockEl();
-        Object.defineProperty(item.ownerDocument, 'body', {
-          configurable: true,
-          value: body,
-        });
-
-        item.dispatchEvent({ type: 'mouseenter' });
-
-        const popover = body.querySelector('.claudian-session-metadata-popover')!;
-        expect(popover.querySelectorAll('.claudian-session-metadata-row')).toHaveLength(3);
-        expect(popover.querySelectorAll('.claudian-session-metadata-value')
-          .map((value: { textContent: string }) => value.textContent))
-          .toEqual(['GPT-5.1 Codex', 'Aug 3, 2026', 'Aug 5, 2026, 14:28']);
       });
 
       it('hides the pinned section when no sessions are pinned', () => {
@@ -838,16 +599,17 @@ describe('SessionBrowser', () => {
 
         controller.renderHistoryDropdown(container, {
           getConversationStatus: () => ({
-            attention: { kind: 'action-required', since: 1 },
+            attention: { kind: 'review', outcome: 'completed', since: 1 },
             isRunning: false,
             openState: 'open',
           }),
           onSelectConversation: jest.fn(),
           sessionScope: 'archived',
           showArchivedSection: true,
-          showAttentionState: false,
+          showAttentionState: true,
         });
 
+        expect(container.querySelectorAll('.claudian-history-item')).toHaveLength(1);
         expect(container.querySelector('.claudian-history-item--attention')).toBeNull();
       });
 
@@ -1134,39 +896,6 @@ describe('SessionBrowser', () => {
         expect(container.querySelector('.claudian-session-group-status')?.textContent)
           .toBe('Missing');
         expect(container.querySelector('.claudian-session-group-new-action')).toBeNull();
-      });
-
-      it('shows metadata for an existing directory with a provisional Note name', () => {
-        const container = createMockEl();
-        (deps.plugin.getConversationList as jest.Mock).mockReturnValue([{
-          id: 'untitled-folder',
-          providerId: 'claude',
-          title: 'Untitled folder chat',
-          createdAt: 1,
-          lastActivityAt: 1,
-          linkedContentPath: 'Projects/Untitled',
-        }]);
-
-        controller.renderHistoryDropdown(container, {
-          onSelectConversation: jest.fn(),
-          organization: 'linked-content',
-          sort: 'created',
-          language: 'en',
-          contentExists: () => true,
-          contentIsNote: () => false,
-          showMetadataPopover: true,
-        });
-
-        const item = container.querySelector('.claudian-history-item')!;
-        const body = createMockEl();
-        Object.defineProperty(item.ownerDocument, 'body', {
-          configurable: true,
-          value: body,
-        });
-        item.dispatchEvent({ type: 'mouseenter' });
-
-        expect(body.querySelector('.claudian-session-metadata-value--content')?.textContent)
-          .toBe('Untitled');
       });
 
       it('delegates rerendering after deletion when the surface owner provides a callback', async () => {
@@ -2511,10 +2240,16 @@ describe('SessionBrowser', () => {
       renderDropdown(controller, deps);
 
       const list = dropdown.children[1];
+      const currentItem = list.children[0];
+      expect(currentItem.hasClass('active')).toBe(true);
+      expect(currentItem.querySelector('.claudian-history-item-content')
+        ?._eventListeners?.get('click')).toBeUndefined();
       const otherItem = list.children[1];
       const content = otherItem.querySelector('.claudian-history-item-content');
       const clickHandlers = content?._eventListeners?.get('click');
+      expect(otherItem.hasClass('active')).toBe(false);
       expect(clickHandlers).toBeDefined();
+      expect(clickHandlers).toHaveLength(1);
 
       await clickHandlers![0]({ stopPropagation: jest.fn() });
       for (let attempt = 0;
@@ -2542,8 +2277,11 @@ describe('SessionBrowser', () => {
       const list = dropdown.children[1];
       const item = list.children[0];
       const actions = item.querySelector('.claudian-history-item-actions');
+      expect(actions).toBeTruthy();
+      expect(actions!.children).toHaveLength(3);
       // First child is the regenerate button
       const regenerateBtn = actions!.children[0];
+      expect(regenerateBtn.getAttribute('aria-label')).toBe('Regenerate title');
       const clickHandlers = regenerateBtn._eventListeners?.get('click');
       expect(clickHandlers).toBeDefined();
 
@@ -2729,6 +2467,8 @@ describe('SessionBrowser', () => {
       await clickHandlers![0]({ stopPropagation: jest.fn() });
 
       expect(deps.plugin.deleteConversation).toHaveBeenCalledWith('conv-1');
+      expect(deps.plugin.getConversationById).toHaveBeenCalledTimes(1);
+      expect(deps.plugin.getConversationById).toHaveBeenCalledWith('conv-1');
     });
 
     it('should delete non-current conversation without calling loadActive', async () => {
@@ -2749,8 +2489,7 @@ describe('SessionBrowser', () => {
       await clickHandlers![0]({ stopPropagation: jest.fn() });
 
       expect(deps.plugin.deleteConversation).toHaveBeenCalledWith('conv-2');
-      // Should not have called switchConversation (which is used in loadActive path)
-      // The key check is that deleteConversation was called with conv-2
+      expect(deps.plugin.getConversationById).not.toHaveBeenCalled();
     });
   });
 
@@ -2837,23 +2576,6 @@ describe('SessionBrowser', () => {
       expect(mockTitleService.generateTitle).not.toHaveBeenCalled();
     });
 
-    it('should set pending status before generating', async () => {
-      (deps.plugin.getConversationById as any) = jest.fn().mockResolvedValue({
-        id: 'conv-1',
-        title: 'Old Title',
-        messages: [
-          { role: 'user', content: 'Hello' },
-          { role: 'assistant', content: 'Hi there!' },
-        ],
-      });
-
-      await controller.regenerateTitle('conv-1');
-
-      expect(deps.plugin.updateConversation).toHaveBeenCalledWith('conv-1', {
-        titleGenerationStatus: 'pending',
-      });
-    });
-
     it('should call titleService.generateTitle with correct params', async () => {
       (deps.plugin.getConversationById as any) = jest.fn().mockResolvedValue({
         id: 'conv-1',
@@ -2862,6 +2584,12 @@ describe('SessionBrowser', () => {
           { role: 'user', content: 'Hello world', displayContent: 'Hello world!' },
           { role: 'assistant', content: 'Hi there!' },
         ],
+      });
+
+      mockTitleService.generateTitle.mockImplementation(async () => {
+        expect(deps.plugin.updateConversation).toHaveBeenCalledWith('conv-1', {
+          titleGenerationStatus: 'pending',
+        });
       });
 
       await controller.regenerateTitle('conv-1');

@@ -1,8 +1,10 @@
+import { getInstallationKey } from '@/core/device/InstallationKey';
+
 import {
-  type CliPathFingerprintInputs,
-  createCliPathFingerprintInputs,
-  hasCliPathFingerprintInputs,
-} from '../../../core/providers/cli/CliPathFingerprintInputs';
+  type CLIPathFingerprintInputs,
+  createCLIPathFingerprintInputs,
+  hasCLIPathFingerprintInputs,
+} from '../../../core/providers/cli/CLIPathFingerprintInputs';
 import { getRuntimeEnvironmentText } from '../../../core/providers/providerEnvironment';
 import {
   createRuntimeInputFingerprint,
@@ -10,20 +12,21 @@ import {
 } from '../../../core/providers/settings/RuntimeInputFingerprint';
 import type { ProviderSettingsReconciler } from '../../../core/providers/types';
 import type { Conversation } from '../../../core/types';
-import { getHostnameKey, parseEnvironmentVariables } from '../../../utils/env';
+import { parseEnvironmentVariables } from '../../../utils/env';
 import { getClaudeProviderSettings, updateClaudeProviderSettings } from '../settings';
 import { clearClaudeResumeState } from '../types/providerState';
 import { CLAUDE_MODEL_ENV_KEYS } from './claudeModelEnv';
 
 const ENV_HASH_PROVIDER_KEYS = ['ANTHROPIC_BASE_URL', 'PATH'];
-const ALL_FINGERPRINT_ENV_KEYS = [...CLAUDE_MODEL_ENV_KEYS, ...ENV_HASH_PROVIDER_KEYS];
+const NATIVE_HOME_ENV_KEYS = ['CLAUDE_CONFIG_DIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'];
+const ALL_FINGERPRINT_ENV_KEYS = [...CLAUDE_MODEL_ENV_KEYS, ...ENV_HASH_PROVIDER_KEYS, ...NATIVE_HOME_ENV_KEYS];
 
-function getConfiguredCliPathInputs(
+function getConfiguredCLIPathInputs(
   settings: Record<string, unknown>,
-): CliPathFingerprintInputs {
+): CLIPathFingerprintInputs {
   const claudeSettings = getClaudeProviderSettings(settings);
-  return createCliPathFingerprintInputs(
-    claudeSettings.cliPathsByHost[getHostnameKey()],
+  return createCLIPathFingerprintInputs(
+    claudeSettings.cliPathsByHost[getInstallationKey()],
     claudeSettings.cliPath,
   );
 }
@@ -32,15 +35,19 @@ function computeRuntimeFingerprint(
   settings: Record<string, unknown>,
   environmentText: string = getRuntimeEnvironmentText(settings, 'claude'),
 ): string {
+  const environment = parseEnvironmentVariables(environmentText);
   return createRuntimeInputFingerprint({
-    additionalInputs: getConfiguredCliPathInputs(settings),
-    environmentKeys: ALL_FINGERPRINT_ENV_KEYS,
+    additionalInputs: getConfiguredCLIPathInputs(settings),
+    // Keep existing default-home fingerprints stable when no override is configured.
+    environmentKeys: ALL_FINGERPRINT_ENV_KEYS.filter(key => (
+      !NATIVE_HOME_ENV_KEYS.includes(key) || Object.prototype.hasOwnProperty.call(environment, key)
+    )),
     environmentText,
   });
 }
 
 function hasFingerprintInputs(settings: Record<string, unknown>, environmentText: string): boolean {
-  if (hasCliPathFingerprintInputs(getConfiguredCliPathInputs(settings))) {
+  if (hasCLIPathFingerprintInputs(getConfiguredCLIPathInputs(settings))) {
     return true;
   }
 
@@ -57,7 +64,7 @@ function isCurrentLegacyFingerprint(
   if (
     !savedFingerprint
     || isVersionedRuntimeInputFingerprint(savedFingerprint)
-    || hasCliPathFingerprintInputs(getConfiguredCliPathInputs(settings))
+    || hasCLIPathFingerprintInputs(getConfiguredCLIPathInputs(settings))
   ) {
     return false;
   }
@@ -77,7 +84,7 @@ function invalidateClaudeConversationSessions(conversations: Conversation[]): Co
   ));
 }
 
-export const claudeSettingsReconciler: ProviderSettingsReconciler = {
+export const claudeSettingsReconciler = {
   invalidateConversationSessions: invalidateClaudeConversationSessions,
 
   reconcileModelWithEnvironment(
@@ -111,4 +118,4 @@ export const claudeSettingsReconciler: ProviderSettingsReconciler = {
     updateClaudeProviderSettings(settings, { environmentHash: computeRuntimeFingerprint(settings, environmentText) });
     return true;
   },
-};
+} satisfies ProviderSettingsReconciler;

@@ -2,13 +2,13 @@ import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 jest.mock('cross-spawn', () => jest.fn());
+import { createForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
+import { createNativeRPCProcess, createNativeVersionProcess } from '@test/helpers/providers/NativeRPCTestProcess';
 import spawn from 'cross-spawn';
 
 import { OpencodeExecutionBackend } from '@/providers/opencode/execution/OpencodeExecutionBackend';
 import { OpencodeServerService } from '@/providers/opencode/http/OpencodeServerService';
 
-import { createNativeRpcProcess, createNativeVersionProcess } from '../tabs/NativeRpcTestProcess';
-import { createForkTestEnvironment } from '../tabs/ProviderForkTestHarness';
 import { traceSideChild } from './SideChatNativeTracer';
 
 it('forks native disk history and resumes the side child independently after cooling', async () => {
@@ -23,7 +23,7 @@ it('forks native disk history and resumes the side child independently after coo
     if (args?.includes('--version')) return createNativeVersionProcess('1.18.31');
     // Disk sessions are shared between native processes; memory sessions are not.
     const localSessions = options?.env?.OPENCODE_DB === ':memory:' ? new Map<string, string[]>() : sessions;
-    return createNativeRpcProcess((method, params, notify) => {
+    return createNativeRPCProcess((method, params, notify) => {
       if (method === 'initialize') return { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { fork: {} } } };
       if (method === 'session/new' || method === 'session/fork') {
         const source = method === 'session/fork' ? localSessions.get(params.sessionId) : [];

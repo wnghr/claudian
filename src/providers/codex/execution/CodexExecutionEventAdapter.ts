@@ -38,12 +38,14 @@ export function adaptCodexStreamChunk(
         input: chunk.input,
         ...(chunk.providerPayload ? { providerPayload: chunk.providerPayload } : {}),
       };
+    case 'subagent_tool_output':
     case 'tool_output':
       return {
         type: 'tool_output',
         scope,
         toolCallId: chunk.id,
-        toolScope: { kind: 'main' },
+        toolScope: chunk.type === 'subagent_tool_output'
+          ? { kind: 'subagent', subagentId: chunk.subagentId } : { kind: 'main' },
         content: chunk.content,
       };
     case 'tool_result':
@@ -56,6 +58,7 @@ export function adaptCodexStreamChunk(
         ...(chunk.images ? { images: chunk.images } : {}),
         ...(chunk.isError !== undefined ? { isError: chunk.isError } : {}),
         ...(chunk.isBlocked !== undefined ? { isBlocked: chunk.isBlocked } : {}),
+        ...(chunk.providerPayload ? { providerPayload: chunk.providerPayload } : {}),
         ...(chunk.toolUseResult ? { toolUseResult: chunk.toolUseResult } : {}),
       };
     case 'usage':
@@ -81,6 +84,7 @@ export function adaptCodexStreamChunk(
         toolScope: { kind: 'subagent', subagentId: chunk.subagentId },
         name: chunk.name,
         input: chunk.input,
+        ...(chunk.providerPayload ? { providerPayload: chunk.providerPayload } : {}),
       };
     case 'subagent_tool_result':
       return {
@@ -92,6 +96,7 @@ export function adaptCodexStreamChunk(
         ...(chunk.images ? { images: chunk.images } : {}),
         ...(chunk.isError !== undefined ? { isError: chunk.isError } : {}),
         ...(chunk.isBlocked !== undefined ? { isBlocked: chunk.isBlocked } : {}),
+        ...(chunk.providerPayload ? { providerPayload: chunk.providerPayload } : {}),
         ...(chunk.toolUseResult ? { toolUseResult: chunk.toolUseResult } : {}),
       };
     case 'error':

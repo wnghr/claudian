@@ -1,3 +1,6 @@
+import { getInstallationKey } from '@/core/device/InstallationKey';
+
+import { selectModelMetadata } from '../../core/providers/models/selectedModelMetadata';
 import { getProviderConfig, setProviderConfig } from '../../core/providers/providerConfig';
 import { getProviderEnvironmentVariables } from '../../core/providers/providerEnvironment';
 import { normalizeHostnameStringMap } from '../../core/providers/settings/HostnameStringMap';
@@ -5,8 +8,7 @@ import {
   readStoredBoolean,
   readStoredString,
 } from '../../core/providers/settings/storedSettings';
-import type { HostnameCliPaths } from '../../core/types/settings';
-import { getHostnameKey } from '../../utils/env';
+import type { HostnameCLIPaths } from '../../core/types/settings';
 import {
   getOpencodeDiscoveryState,
   updateOpencodeDiscoveryState,
@@ -24,7 +26,7 @@ import {
 
 export interface PersistedOpencodeProviderSettings {
   cliPath: string;
-  cliPathsByHost: HostnameCliPaths;
+  cliPathsByHost: HostnameCLIPaths;
   enabled: boolean;
   environmentHash: string;
   environmentVariables: string;
@@ -55,7 +57,6 @@ export const DEFAULT_OPENCODE_PROVIDER_SETTINGS: Readonly<PersistedOpencodeProvi
 
 export function normalizeOpencodeVisibleModels(
   value: unknown,
-  discoveredModels: OpencodeDiscoveredModel[] = [],
 ): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -68,7 +69,7 @@ export function normalizeOpencodeVisibleModels(
       continue;
     }
 
-    const trimmed = resolveOpencodeBaseModelRawId(entry.trim(), discoveredModels);
+    const trimmed = entry.trim();
     if (!trimmed || seen.has(trimmed)) {
       continue;
     }
@@ -82,7 +83,6 @@ export function normalizeOpencodeVisibleModels(
 
 export function normalizeOpencodeModelAliases(
   value: unknown,
-  discoveredModels: OpencodeDiscoveredModel[] = [],
 ): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -94,7 +94,7 @@ export function normalizeOpencodeModelAliases(
       continue;
     }
 
-    const normalizedRawId = resolveOpencodeBaseModelRawId(rawId.trim(), discoveredModels);
+    const normalizedRawId = rawId.trim();
     const normalizedAlias = alias.trim();
     if (!normalizedRawId || !normalizedAlias) {
       continue;
@@ -108,7 +108,6 @@ export function normalizeOpencodeModelAliases(
 
 export function normalizeOpencodePreferredThinkingByModel(
   value: unknown,
-  discoveredModels: OpencodeDiscoveredModel[] = [],
 ): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -120,7 +119,7 @@ export function normalizeOpencodePreferredThinkingByModel(
       continue;
     }
 
-    const normalizedRawId = resolveOpencodeBaseModelRawId(rawId.trim(), discoveredModels);
+    const normalizedRawId = rawId.trim();
     const normalizedThinkingLevel = thinkingLevel.trim();
     if (!normalizedRawId || !normalizedThinkingLevel) {
       continue;
@@ -164,14 +163,13 @@ export function getOpencodeProviderSettings(
       getProviderEnvironmentVariables(settings, 'opencode')
         ?? DEFAULT_OPENCODE_PROVIDER_SETTINGS.environmentVariables,
     ),
-    modelAliases: normalizeOpencodeModelAliases(config.modelAliases, discoveredModels),
+    modelAliases: normalizeOpencodeModelAliases(config.modelAliases),
     preferredThinkingByModel: normalizeOpencodePreferredThinkingByModel(
-      config.preferredThinkingByModel,
-      discoveredModels,
+      config.preferredThinkingByModel
     ),
     selectedMode: normalizeManagedOpencodeSelectedMode(config.selectedMode, availableModes),
     thinkingOptionsByModel,
-    visibleModels: normalizeOpencodeVisibleModels(config.visibleModels, discoveredModels),
+    visibleModels: normalizeOpencodeVisibleModels(config.visibleModels),
   };
 }
 
@@ -180,7 +178,7 @@ export function updateOpencodeProviderSettings(
   updates: Partial<OpencodeProviderSettings>,
 ): OpencodeProviderSettings {
   const current = getOpencodeProviderSettings(settings);
-  const hostnameKey = getHostnameKey();
+  const hostnameKey = getInstallationKey();
   if ('availableModes' in updates || 'discoveredModels' in updates || 'thinkingOptionsByModel' in updates) {
     updateOpencodeDiscoveryState(settings, {
       ...(updates.availableModes !== undefined ? { availableModes: updates.availableModes } : {}),
@@ -204,13 +202,11 @@ export function updateOpencodeProviderSettings(
     nextAvailableModes,
   );
   const nextVisibleModels = normalizeOpencodeVisibleModels(
-    updates.visibleModels ?? current.visibleModels,
-    nextDiscoveredModels,
+    updates.visibleModels ?? current.visibleModels
   );
   const nextModelAliases = pruneModelAliasesToVisible(
     normalizeOpencodeModelAliases(
-      updates.modelAliases ?? current.modelAliases,
-      nextDiscoveredModels,
+      updates.modelAliases ?? current.modelAliases
     ),
     nextVisibleModels,
   );
@@ -244,8 +240,7 @@ export function updateOpencodeProviderSettings(
     discoveredModels: nextDiscoveredModels,
     modelAliases: nextModelAliases,
     preferredThinkingByModel: normalizeOpencodePreferredThinkingByModel(
-      updates.preferredThinkingByModel ?? current.preferredThinkingByModel,
-      nextDiscoveredModels,
+      updates.preferredThinkingByModel ?? current.preferredThinkingByModel
     ),
     selectedMode: nextSelectedMode,
     thinkingOptionsByModel: nextThinkingOptionsByModel,
@@ -296,7 +291,7 @@ function pruneThinkingOptionsToPersistedSelections(
   const pruned: OpencodeThinkingOptionsByModel = {};
   for (const rawId of persistableRawIds) {
     const options = next.thinkingOptionsByModel[rawId];
-    if (options?.length) {
+    if (options) {
       pruned[rawId] = options.map((option) => ({ ...option }));
     }
   }
@@ -307,7 +302,14 @@ export function projectOpencodeModelSettings(settings: Record<string, unknown>):
   const current = getOpencodeProviderSettings(settings);
   const visibleModels = current.visibleModels;
   const selected = new Set(visibleModels);
-  const config = { ...getProviderConfig(settings, 'opencode'), visibleModels, thinkingOptionsByModel: pruneThinkingOptionsToPersistedSelections(current), selectedModels: current.discoveredModels.filter(model => selected.has(resolveOpencodeBaseModelRawId(model.rawId, current.discoveredModels))) };
+  const config = {
+    ...getProviderConfig(settings, 'opencode'),
+    visibleModels,
+    modelAliases: selectModelMetadata(current.modelAliases, selected),
+    preferredThinkingByModel: selectModelMetadata(current.preferredThinkingByModel, selected),
+    thinkingOptionsByModel: pruneThinkingOptionsToPersistedSelections(current),
+    selectedModels: current.discoveredModels.filter(model => selected.has(resolveOpencodeBaseModelRawId(model.rawId, current.discoveredModels))),
+  };
   for (const key of ['discoveredModels', 'catalogTimestamp', 'catalogFingerprint', 'availableModes']) delete (config as Record<string, unknown>)[key];
   return config;
 }

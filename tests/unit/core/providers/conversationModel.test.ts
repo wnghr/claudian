@@ -13,7 +13,7 @@ interface TestProviderConfig {
   variantFallback?: string;
 }
 
-function createUiConfig(config: TestProviderConfig): ProviderChatUIConfig {
+function createUIConfig(config: TestProviderConfig): ProviderChatUIConfig {
   return {
     getModelOptions: () => config.options.map(value => ({ label: value, value })),
     getCustomModelIds: () => new Set(),
@@ -45,8 +45,8 @@ describe('conversation model resolution', () => {
     providers.empty = { defaultModel: null, options: [] };
     jest.spyOn(ProviderRegistry, 'getRegisteredProviderIds')
       .mockReturnValue(Object.keys(providers));
-    jest.spyOn(ProviderRegistry, 'getChatUIConfig')
-      .mockImplementation(providerId => createUiConfig(providers[providerId ?? 'claude']!));
+    jest.spyOn(ProviderRegistry, 'getModelPolicy')
+      .mockImplementation(providerId => createUIConfig(providers[providerId ?? 'claude']!));
     jest.spyOn(ProviderRegistry, 'isEnabled')
       .mockImplementation((providerId, settings) => (
         ((settings.enabledProviders as string[] | undefined) ?? []).includes(providerId)

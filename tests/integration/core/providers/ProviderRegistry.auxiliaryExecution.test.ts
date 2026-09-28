@@ -1,4 +1,4 @@
-import { FakeAuxiliaryBackend, waitFor } from '@test/unit/core/auxiliary/AuxiliaryExecutionTestHarness';
+import { FakeAuxiliaryBackend, waitFor } from '@test/helpers/core/auxiliary/AuxiliaryExecutionTestHarness';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
@@ -13,7 +13,7 @@ it.each([true, false])('selects auxiliary persistence from ephemeral support (%s
     createExecutionBackend: () => backend,
     displayName: 'Claude',
     isEnabled: () => true,
-    chatUIConfig: { getModelOptions: () => [{ value: 'explicit-title-model', label: 'Title' }] },
+    modelPolicy: { getModelOptions: () => [{ value: 'explicit-title-model', label: 'Title' }] },
   } as unknown as ProviderRegistration);
   const host = {
     settings: { titleGenerationModel: 'explicit-title-model' },

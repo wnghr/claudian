@@ -1,24 +1,21 @@
 const mockGetHostnameKey = jest.fn(() => 'device:current');
 
-jest.mock('../../../../src/utils/env', () => ({
-  ...jest.requireActual('../../../../src/utils/env'),
-  getHostnameKey: () => mockGetHostnameKey(),
-}));
-
 import {
-  clearCurrentGrokCatalog,
   getCurrentGrokCatalog,
   getGrokProviderSettings,
   normalizeGrokCatalogSnapshot,
   updateCurrentGrokCatalog,
   updateGrokProviderSettings,
-  updateGrokVisibleModels
 } from '@/providers/grok/settings';
 import {
-  buildGrokProviderState,
   buildPersistedGrokProviderState,
   parseGrokProviderState,
 } from '@/providers/grok/types';
+
+jest.mock('@/core/device/InstallationKey', () => ({
+  ...jest.requireActual('@/core/device/InstallationKey'),
+  getInstallationKey: () => mockGetHostnameKey(),
+}));
 
 describe('Grok settings', () => {
   const currentCatalog = {
@@ -116,10 +113,6 @@ describe('Grok settings', () => {
     expect(updateCurrentGrokCatalog(settings, replacement)).toEqual(replacement);
     expect(getCurrentGrokCatalog(settings)).toEqual(replacement);
     expect(getGrokProviderSettings(settings).catalogsByHost['other-host']).toEqual(otherCatalog);
-    expect(clearCurrentGrokCatalog(settings)).toBe(true);
-    expect(getCurrentGrokCatalog(settings)).toBeNull();
-    expect(getGrokProviderSettings(settings).catalogsByHost['other-host']).toEqual(otherCatalog);
-    expect(clearCurrentGrokCatalog(settings)).toBe(false);
   });
 
   it('whitelists catalog metadata and never persists opaque or secret fields', () => {
@@ -222,6 +215,7 @@ describe('Grok settings', () => {
     expect(settings.preferredReasoningByModel).toEqual({
       'kimi-coding': 'medium',
       'legacy-model': 'low',
+      unknown: 'xhigh',
     });
   });
 
@@ -250,7 +244,7 @@ describe('Grok settings', () => {
     expect((settings.providerConfigs as Record<string, unknown>).codex).toEqual({ enabled: true });
   });
 
-  it('prunes disabled reasoning state from every host catalog', () => {
+  it('prunes disabled preferences while retaining discovered capabilities in memory', () => {
     const settings: Record<string, unknown> = {
       providerConfigs: {
         grok: {
@@ -278,15 +272,15 @@ describe('Grok settings', () => {
       },
     };
 
-    updateGrokVisibleModels(settings, []);
+    updateGrokProviderSettings(settings, { visibleModels: [] });
 
     const grok = getGrokProviderSettings(settings);
     expect(grok.preferredReasoningByModel).toEqual({});
     for (const catalogSnapshot of Object.values(grok.catalogsByHost)) {
       for (const model of catalogSnapshot.models) {
-        expect(model.reasoningEfforts).toEqual([]);
-        expect(model.supportsReasoning).toBe(false);
-        expect(model).not.toHaveProperty('reasoningMetadataResolved');
+        expect(model.reasoningEfforts).toEqual([{ label: 'High', value: 'high' }]);
+        expect(model.supportsReasoning).toBe(true);
+        expect(model.reasoningMetadataResolved).toBe(true);
       }
     }
   });
@@ -314,10 +308,10 @@ describe('Grok provider state', () => {
       sessionDirectory: '/tmp/.grok/sessions/vault/session-id',
     });
     expect(parseGrokProviderState({ sessionDirectory: '../outside' })).toEqual({});
-    expect(buildGrokProviderState('/tmp/.grok/sessions/vault/session-id')).toEqual({
+    expect(buildPersistedGrokProviderState({ sessionDirectory: '/tmp/.grok/sessions/vault/session-id' })).toEqual({
       sessionDirectory: '/tmp/.grok/sessions/vault/session-id',
     });
-    expect(buildGrokProviderState('../outside')).toBeUndefined();
+    expect(buildPersistedGrokProviderState({ sessionDirectory: '../outside' })).toBeUndefined();
   });
 
   it('sanitizes and persists pending native fork state without unrelated fields', () => {

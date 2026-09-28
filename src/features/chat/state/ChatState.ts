@@ -53,17 +53,9 @@ export class ChatState {
   private thinkingIndicatorTimeoutWindow: Window | null = null;
   private flavorTimerIntervalWindow: Window | null = null;
 
-  constructor(callbacks: ChatStateCallbacks = {}) {
+  constructor(callbacks: ChatStateCallbacks = {}, private readonly conversationIdentity?: { get(): string | null; set(id: string | null): void }) {
     this.state = createInitialState();
     this._callbacks = callbacks;
-  }
-
-  get callbacks(): ChatStateCallbacks {
-    return this._callbacks;
-  }
-
-  set callbacks(value: ChatStateCallbacks) {
-    this._callbacks = value;
   }
 
   // ============================================
@@ -76,17 +68,14 @@ export class ChatState {
 
   set messages(value: ChatMessage[]) {
     this.state.messages = value;
-    this._callbacks.onMessagesChanged?.();
   }
 
   addMessage(msg: ChatMessage): void {
     this.state.messages.push(msg);
-    this._callbacks.onMessagesChanged?.();
   }
 
   clearMessages(): void {
     this.state.messages = [];
-    this._callbacks.onMessagesChanged?.();
   }
 
   truncateAt(messageId: string): number {
@@ -94,7 +83,6 @@ export class ChatState {
     if (idx === -1) return 0;
     const removed = this.state.messages.length - idx;
     this.state.messages = this.state.messages.slice(0, idx);
-    this._callbacks.onMessagesChanged?.();
     return removed;
   }
 
@@ -166,11 +154,12 @@ export class ChatState {
   // ============================================
 
   get currentConversationId(): string | null {
-    return this.state.currentConversationId;
+    return this.conversationIdentity ? this.conversationIdentity.get() : this.state.currentConversationId;
   }
 
   set currentConversationId(value: string | null) {
-    this.state.currentConversationId = value;
+    if (this.conversationIdentity) this.conversationIdentity.set(value);
+    else this.state.currentConversationId = value;
     this._callbacks.onConversationChanged?.(value);
   }
 
@@ -240,11 +229,6 @@ export class ChatState {
 
   get thinkingIndicatorTimeout(): number | null {
     return this.state.thinkingIndicatorTimeout;
-  }
-
-  set thinkingIndicatorTimeout(value: number | null) {
-    this.state.thinkingIndicatorTimeout = value;
-    this.thinkingIndicatorTimeoutWindow = value === null ? null : this.#getDefaultTimerWindow();
   }
 
   // ============================================
@@ -350,12 +334,6 @@ export class ChatState {
     }
   }
 
-  clearAttention(): void {
-    this.pendingActionIds.clear();
-    this.pendingReview = null;
-    this.#setAttention(null);
-  }
-
   // ============================================
   // Auto-Scroll Control
   // ============================================
@@ -386,11 +364,6 @@ export class ChatState {
 
   get flavorTimerInterval(): number | null {
     return this.state.flavorTimerInterval;
-  }
-
-  set flavorTimerInterval(value: number | null) {
-    this.state.flavorTimerInterval = value;
-    this.flavorTimerIntervalWindow = value === null ? null : this.#getDefaultTimerWindow();
   }
 
   // ============================================
@@ -425,41 +398,6 @@ export class ChatState {
     }
   }
 
-  resetStreamingState(): void {
-    this.state.currentContentEl = null;
-    this.state.currentTextEl = null;
-    this.state.currentTextContent = '';
-    this.state.currentThinkingState = null;
-    this.state.isStreaming = false;
-    this.state.cancelRequested = false;
-    // Clear thinking indicator timeout
-    this.clearThinkingIndicatorTimeout();
-    // Clear response timer
-    this.clearFlavorTimerInterval();
-    this.state.responseStartTime = null;
-  }
-
-  clearMaps(): void {
-    this.state.toolCallElements.clear();
-    this.state.writeEditStates.clear();
-    this.state.pendingTools.clear();
-  }
-
-  resetForNewConversation(): void {
-    this.clearMessages();
-    this.resetStreamingState();
-    this.clearMaps();
-    this.state.queuedMessage = null;
-    this.usage = null;
-    this.clearAttention();
-    this.autoScrollEnabled = true;
-  }
-
-  getPersistedMessages(): ChatMessage[] {
-    // Return messages as-is - image data is single source of truth
-    return this.state.messages;
-  }
-
   #getDefaultTimerWindow(): Window | null {
     return typeof window === 'undefined' ? null : window;
   }
@@ -483,5 +421,3 @@ export class ChatState {
     this._callbacks.onAttentionChanged?.(attention);
   }
 }
-
-export { createInitialState };

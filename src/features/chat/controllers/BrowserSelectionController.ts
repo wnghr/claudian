@@ -19,8 +19,8 @@ export class BrowserSelectionController {
   private onUserSelectionChanged: (() => void) | null;
   private storedSelection: BrowserSelectionContext | null = null;
   private pollInterval: number | null = null;
-  private pollInFlight = false;
-  private pollEpoch = 0;
+  private pollGeneration = 0;
+  private pollInFlight: number | null = null;
   private explainButton: HTMLButtonElement | null = null;
   private dismissedSelection: BrowserSelectionContext | null = null;
   private popupDocuments: Document[] = [];
@@ -47,16 +47,14 @@ export class BrowserSelectionController {
   }
 
   start(): void {
-    if (this.pollInterval) return;
-    this.pollEpoch++;
+    if (this.pollInterval !== null) return;
     this.pollInterval = window.setInterval(() => {
       void this.#poll();
     }, BROWSER_SELECTION_POLL_INTERVAL);
   }
 
   stop(): void {
-    this.pollEpoch++;
-    if (this.pollInterval) {
+    if (this.pollInterval !== null) {
       window.clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
@@ -67,9 +65,9 @@ export class BrowserSelectionController {
   }
 
   async #poll(): Promise<void> {
-    if (this.pollInFlight) return;
-    this.pollInFlight = true;
-    const epoch = this.pollEpoch;
+    const generation = this.pollGeneration;
+    if (this.pollInFlight === generation) return;
+    this.pollInFlight = generation;
     try {
       const browserView = this.#getActiveBrowserView();
       if (!browserView) {
@@ -79,7 +77,7 @@ export class BrowserSelectionController {
       }
 
       const selectedText = await this.extractSelectedText(browserView.containerEl);
-      if (epoch !== this.pollEpoch || this.#getActiveBrowserView()?.view !== browserView.view) return;
+      if (generation !== this.pollGeneration || this.#getActiveBrowserView()?.view !== browserView.view) return;
       if (selectedText) {
         const nextContext = this.#buildContext(browserView.view, browserView.viewType, browserView.containerEl, selectedText);
         if (!this.#isSameSelection(nextContext, this.storedSelection)) {
@@ -96,7 +94,7 @@ export class BrowserSelectionController {
     } catch {
       // Ignore transient polling errors to keep selection tracking resilient.
     } finally {
-      this.pollInFlight = false;
+      if (this.pollInFlight === generation) this.pollInFlight = null;
     }
   }
 
@@ -164,7 +162,7 @@ export class BrowserSelectionController {
       button.style.setProperty('--claudian-pdf-explain-top', `${Math.max(bounds.top + 8, top - button.offsetHeight - 8)}px`);
       button.onclick = (event) => {
         event.stopPropagation();
-        if (button.hidden || !this.pollInterval) return;
+        if (button.hidden || this.pollInterval === null) return;
         const active = this.#getActiveBrowserView();
         // The reader may change attachments between a poll and the click.
         if (!active || active.view !== browser.view
@@ -184,9 +182,8 @@ export class BrowserSelectionController {
   #getActiveBrowserView(): { view: ItemView; viewType: string; containerEl: HTMLElement } | null {
     const activeLeaf = this.app.workspace.getMostRecentLeaf?.();
     const activeView = activeLeaf?.view as ItemView | undefined;
-    if (!activeView) return null;
-    const containerEl = (activeView as unknown as { containerEl?: HTMLElement }).containerEl;
-    if (!containerEl) return null;
+    const containerEl = (activeView as unknown as { containerEl?: HTMLElement } | undefined)?.containerEl;
+    if (!activeView || !containerEl) return null;
 
     const viewType = activeView.getViewType?.() ?? '';
     if (!this.#isBrowserLikeView(viewType, containerEl)) return null;
@@ -470,6 +467,7 @@ export class BrowserSelectionController {
 
   clear(): void {
     this.hideExplainButton();
+    this.pollGeneration += 1;
     this.storedSelection = null;
     this.updateIndicator();
   }

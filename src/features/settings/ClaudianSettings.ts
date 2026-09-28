@@ -11,6 +11,11 @@ import { ProviderRegistry } from '../../core/providers/ProviderRegistry';
 import { ProviderSettingsCoordinator } from '../../core/providers/ProviderSettingsCoordinator';
 import { ProviderWorkspaceRegistry } from '../../core/providers/ProviderWorkspaceRegistry';
 import type { ProviderId, ProviderSettingsTabRenderHandle } from '../../core/providers/types';
+import {
+  DEFAULT_MAX_WARM_AGENT_PROCESSES,
+  MAX_WARM_AGENT_PROCESSES,
+  MIN_WARM_AGENT_PROCESSES,
+} from '../../core/settings/warmExecutionLimits';
 import { AgentSkillRepository } from '../../core/skills/AgentSkillRepository';
 import type {
   ChatViewPlacement,
@@ -18,21 +23,14 @@ import type {
 } from '../../core/types/settings';
 import { getAvailableLocales, getLocaleDisplayName, setLocale, t } from '../../i18n/i18n';
 import type { Locale, TranslationKey } from '../../i18n/types';
-import { renderCopyableCodeFence } from '../../shared/components/CopyableCodeFence';
 import { renderEnvironmentSettingsSection } from '../../shared/settings/EnvironmentSettingsSection';
 import { formatContextLimit, parseContextLimit, parseEnvironmentVariables } from '../../utils/env';
-import {
-  MAX_WARM_AGENT_PROCESSES,
-  MIN_WARM_AGENT_PROCESSES,
-} from '../chat/execution/WarmExecutionPool';
 import type { FeatureHost } from '../FeatureHost';
 import { AgentSkillManagementCoordinator } from './AgentSkillManagementCoordinator';
 import { AgentSkillSettings } from './AgentSkillSettings';
 import { buildNavMappingText, parseNavMappings } from './keyboardNavigation';
 
-type SettingsTabId = 'general' | 'collab' | 'providers';
-const CLAUDIAN_COLLAB_READ_MORE_URL =
-  'https://claudian.md/docs/collab-mode/';
+type SettingsTabId = 'general' | 'providers';
 type ObsidianHotkey = { modifiers: string[]; key: string };
 type ObsidianHotkeyManager = {
   customKeys?: Record<string, ObsidianHotkey[] | undefined>;
@@ -52,28 +50,6 @@ type AppWithHotkeyInternals = App & {
   hotkeyManager?: ObsidianHotkeyManager;
   setting?: ObsidianSettingsController;
 };
-
-function renderCollabGitInstallationHelp(
-  container: HTMLElement,
-): void {
-  const details = container.createEl('details', {
-    cls: 'claudian-collab-git-installation-help',
-  });
-  details.createEl('summary', {
-    text: t('settings.collabGitInstallation.summary'),
-  });
-  details.createEl('p', {
-    text: [
-      t('settings.collabGitInstallation.requirement'),
-      t('settings.collabGitInstallation.verify'),
-    ].join(' '),
-  });
-  const promptText = t('settings.collabGitInstallation.prompt');
-  const copyLabel = t('collab.gitSetup.copyPrompt');
-  renderCopyableCodeFence(details, promptText, {
-    copyLabel,
-  });
-}
 
 function formatHotkey(hotkey: ObsidianHotkey): string {
   const isMac = Platform.isMacOS;
@@ -183,7 +159,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
     setLocale(this.plugin.settings.locale as Locale);
 
     const providerTabs = ProviderRegistry.getRegisteredProviderIds();
-    const tabIds: SettingsTabId[] = ['general', 'providers', 'collab'];
+    const tabIds: SettingsTabId[] = ['general', 'providers'];
     const preferredProvider = providerTabs.includes(this.plugin.settings.settingsProvider)
       ? this.plugin.settings.settingsProvider
       : providerTabs[0] ?? null;
@@ -207,7 +183,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
     const providerButtons = new Map<ProviderId, HTMLButtonElement>();
     const providerContents = new Map<ProviderId, HTMLDivElement>();
     const renderedProviderIds = new Set<ProviderId>();
-    let activateCollabTab: (() => void) | null = null;
 
     const renderProviderTab = async (providerId: ProviderId): Promise<void> => {
       if (renderedProviderIds.has(providerId)) return;
@@ -279,9 +254,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
         if (id === 'providers' && this.activeProviderTab) {
           void renderProviderTab(this.activeProviderTab);
         }
-        if (id === 'collab') {
-          activateCollabTab?.();
-        }
       });
       tabButtons.set(id, button);
     }
@@ -295,7 +267,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
 
     this.renderGeneralTab(tabContents.get('general')!);
     frameSettingsGroups(tabContents.get('general')!);
-    activateCollabTab = this.renderCollabTab(tabContents.get('collab')!);
 
     for (const providerId of providerTabs) {
       const content = providerContentHost.createDiv({
@@ -325,9 +296,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
 
     if (this.activeTab === 'providers' && this.activeProviderTab) {
       void renderProviderTab(this.activeProviderTab);
-    }
-    if (this.activeTab === 'collab') {
-      activateCollabTab();
     }
 
     return () => {
@@ -394,7 +362,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
             await this.plugin.mutateSettings((settings) => {
               settings.enableDualPane = value;
             });
-            this.refreshDualPaneLayouts();
             this.update();
           })
       );
@@ -412,8 +379,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
               await this.plugin.mutateSettings((settings) => {
                 settings.dualPaneSide = value as DualPaneSide;
               });
-              this.refreshDualPaneLayouts();
-            });
+              });
         });
 
     }
@@ -454,9 +420,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
             await this.plugin.mutateSettings((settings) => {
               settings.showMessageTimestamps = value;
             });
-            for (const view of this.plugin.getAllViews()) {
-              view.refreshMessageTimestamps();
-            }
           })
       );
 
@@ -790,140 +753,15 @@ export class ClaudianSettingTab extends PluginSettingTab {
       .addSlider((slider) => {
         slider
           .setLimits(MIN_WARM_AGENT_PROCESSES, MAX_WARM_AGENT_PROCESSES, 1)
-          .setValue(this.plugin.settings.maxWarmAgentProcesses ?? 5)
+          .setValue(this.plugin.settings.maxWarmAgentProcesses ?? DEFAULT_MAX_WARM_AGENT_PROCESSES)
           .onChange(async (value) => {
             await this.plugin.mutateSettings((settings) => {
               settings.maxWarmAgentProcesses = value;
             });
-            try {
-              const reconciled = await this.plugin.warmExecutionPool.reconcileLimit();
-              if (!reconciled) {
-                new Notice(
-                  'The new concurrent running session limit will apply as busy sessions become idle.',
-                );
-              }
-            } catch (error) {
-              new Notice(
-                error instanceof Error
-                  ? error.message
-                  : 'Failed to release excess warm agent processes.',
-              );
-            }
+
           });
       });
 
-  }
-
-  private renderCollabTab(container: HTMLElement): () => void {
-    const renderGeneration = this.renderGeneration;
-    let requestGeneration = 0;
-    let checkTimer: number | null = null;
-
-    const collabEnabledSetting = new Setting(container)
-      .setName(t('settings.collabEnabled.name'))
-      .setDesc(t('settings.collabEnabled.desc'))
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.collabEnabled)
-        .onChange(async value => {
-          await this.plugin.setCollabEnabled(value);
-        }));
-    collabEnabledSetting.descEl.createEl('br');
-    collabEnabledSetting.descEl.createEl('a', {
-      attr: {
-        href: CLAUDIAN_COLLAB_READ_MORE_URL,
-        rel: 'noopener noreferrer',
-        target: '_blank',
-      },
-      cls: 'claudian-collab-read-more-link',
-      text: t('settings.collabReadMore'),
-    });
-
-    let folderInput: { setValue(value: string): unknown } | null = null;
-    const validation = container.createDiv({
-      cls: 'claudian-setting-validation claudian-setting-validation-error claudian-hidden',
-    });
-    new Setting(container)
-      .setName(t('settings.collabProjectsFolder.name'))
-      .setDesc(t('settings.collabProjectsFolder.desc'))
-      .addText(text => {
-        folderInput = text;
-        text
-          .setPlaceholder(t('settings.collabProjectsFolder.placeholder'))
-          .setValue(this.plugin.settings.collabProjectsFolder)
-          .onChange(async value => {
-            const result = await this.plugin.setCollabProjectsFolder(value);
-            validation.toggleClass('claudian-hidden', result.ok);
-            validation.setText(result.ok ? '' : result.message);
-            if (result.ok && result.value !== value) folderInput?.setValue(result.value);
-          });
-      });
-
-    const gitPathSetting = new Setting(container)
-      .setName(t('settings.collabGitPath.name'))
-      .setDesc(t('settings.collabGitPath.desc'))
-      .addText((text) => {
-        text
-          .setPlaceholder(t('settings.collabGitPath.placeholder'))
-          .setValue(this.plugin.settings.collabGitPath ?? '')
-          .onChange(async (value) => {
-            await this.plugin.mutateSettings((settings) => {
-              settings.collabGitPath = value.trim();
-            });
-            scheduleGitCheck();
-          });
-      });
-
-    const statusEl = gitPathSetting.nameEl.createSpan({
-      cls: 'claudian-collab-git-path-status claudian-collab-git-path-status--checking',
-    });
-    statusEl.setAttribute('role', 'status');
-
-    const setGitStatus = (
-      status: 'available' | 'checking' | 'unavailable',
-    ): void => {
-      const label = t(`settings.collabGitStatus.${status}`);
-      statusEl.className = [
-        'claudian-collab-git-path-status',
-        `claudian-collab-git-path-status--${status}`,
-      ].join(' ');
-      statusEl.setAttribute('aria-label', label);
-      statusEl.title = label;
-    };
-
-    const runGitCheck = async (rescan: boolean): Promise<void> => {
-      const generation = ++requestGeneration;
-      setGitStatus('checking');
-      let status: 'available' | 'unavailable';
-      try {
-        status = await this.plugin.checkCollabGitInstallation(rescan);
-      } catch {
-        status = 'unavailable';
-      }
-      if (
-        renderGeneration !== this.renderGeneration
-        || generation !== requestGeneration
-      ) {
-        return;
-      }
-      setGitStatus(status);
-    };
-
-    const scheduleGitCheck = (): void => {
-      if (checkTimer !== null) window.clearTimeout(checkTimer);
-      setGitStatus('checking');
-      checkTimer = window.setTimeout(() => {
-        checkTimer = null;
-        void runGitCheck(true);
-      }, 300);
-    };
-
-    renderCollabGitInstallationHelp(container);
-
-    return () => {
-      if (checkTimer !== null) window.clearTimeout(checkTimer);
-      checkTimer = null;
-      void runGitCheck(false);
-    };
   }
 
   private disposeProviderSettingsRenders(): void {
@@ -939,12 +777,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
   private notifyProviderModelOptionsChanged(providerId: ProviderId): void {
     this.plugin.notifyProviderChatOptionsChanged(providerId);
     this.refreshTitleModelOptions?.();
-  }
-
-  private refreshDualPaneLayouts(): void {
-    for (const view of this.plugin.getAllViews()) {
-      view.refreshDualPaneLayout();
-    }
   }
 
   private renderHiddenProviderCommandSetting(
@@ -967,7 +799,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
                 [providerId]: normalizeHiddenCommandList(value.split(/\r?\n/)),
               };
             });
-            this.plugin.getView()?.updateHiddenProviderCommands();
           });
         text.inputEl.rows = 4;
         text.inputEl.cols = 30;
@@ -1017,7 +848,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
         value: currentAlias,
       });
       aliasInputEl.setAttribute('aria-label', `Alias for ${modelId}`);
-      aliasInputEl.title = 'Custom label shown in the model selector. Leave empty to use the default.';
+      aliasInputEl.setAttribute('aria-description', 'Custom label shown in the model selector. Leave empty to use the default.');
 
       const inputEl = inputWrapper.createEl('input', {
         type: 'text',
@@ -1030,12 +861,7 @@ export class ClaudianSettingTab extends PluginSettingTab {
       const validationEl = inputWrapper.createDiv({ cls: 'claudian-context-limit-validation claudian-hidden' });
 
       const saveAlias = async (): Promise<void> => {
-        const existing = (modelAliases?.get(this.plugin.settings) ?? {})[modelId] ?? '';
         const trimmed = aliasInputEl.value.trim();
-        if (trimmed === existing) {
-          aliasInputEl.value = existing;
-          return;
-        }
 
         await this.plugin.mutateSettings((settings) => {
           const aliases = (modelAliases?.get(settings) ?? {});
@@ -1075,9 +901,6 @@ export class ClaudianSettingTab extends PluginSettingTab {
             settings.customContextLimits[modelId] = parseContextLimit(trimmed)!;
           }
         });
-        for (const view of this.plugin.getAllViews()) {
-          view.refreshModelSelector(providerId);
-        }
       };
 
       inputEl.addEventListener('input', () => {

@@ -1,4 +1,4 @@
-import { Notice } from 'obsidian';
+import type { ForkTestEnvironment } from '@test/helpers/features/chat/ProviderForkTestHarness';
 
 import type {
   ProviderExecutionBackend,
@@ -9,12 +9,10 @@ import type {
 import type { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
 import type { ChatMessage, ImageAttachment, ProviderId } from '@/core/types';
+import type { ChatFeatureHost } from '@/features/chat/ChatFeatureHost';
 import { SideChatSession } from '@/features/chat/side-chat/SideChatSession';
 import { handleForkRequest } from '@/features/chat/tabs/TabForking';
 import type { AssembledTabRuntime } from '@/features/chat/tabs/types';
-import type { FeatureHost } from '@/features/FeatureHost';
-
-import type { ForkTestEnvironment } from '../tabs/ProviderForkTestHarness';
 
 export const capturedImage: ImageAttachment = {
   id: 'captured-image', name: 'captured.png', mediaType: 'image/png', source: 'paste', size: 68,
@@ -138,8 +136,9 @@ export async function captureSideSource(
   const plugin = {
     app: env.app,
     settings: (env.host as unknown as { settings: unknown }).settings,
+    getConversationSummary(id: string) { return (this as unknown as { getConversationSync: (id: string) => any }).getConversationSync(id); },
     getConversationSync: (id: string) => env.repository.getSync(id),
-  } as unknown as FeatureHost;
+  } as unknown as ChatFeatureHost;
   const tab = {
     conversationId: chat.conversation.id,
     executionCoordinator: chat.coordinator,
@@ -171,17 +170,4 @@ export function rejectingInteractionPort(): ProviderInteractionPort {
     dismissInteraction: () => undefined,
     requestApproval: async () => { throw new Error('Unexpected side approval'); },
   };
-}
-
-/** Collected notices let a test assert an unavailable provider path. */
-export function collectNotices(): { messages: string[] } {
-  const collected: string[] = [];
-  const NoticeMock = Notice as unknown as jest.Mock;
-  if (typeof NoticeMock.mockImplementation === 'function') {
-    NoticeMock.mockImplementation((message: string) => {
-      collected.push(message);
-      return { hide: () => undefined, setMessage: () => undefined };
-    });
-  }
-  return { messages: collected };
 }

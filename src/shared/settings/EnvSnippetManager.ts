@@ -139,7 +139,7 @@ export class EnvSnippetModal extends Modal {
         });
         aliasInput.value = existingAliases[modelId] ?? '';
         aliasInput.setAttribute('aria-label', `Alias for ${modelId}`);
-        aliasInput.title = 'Custom label shown in the model selector. Leave empty to use the default.';
+        aliasInput.setAttribute('aria-description', 'Custom label shown in the model selector. Leave empty to use the default.');
         modelAliasInputs.set(modelId, aliasInput);
 
         const input = row.createEl('input', {
@@ -350,7 +350,6 @@ export class EnvSnippetManager {
       await this.plugin.applyEnvironmentVariablesBatch(updates);
     }
 
-    // Legacy snippets without contextLimits don't modify limits
     await this.plugin.mutateSettings((settings) => {
       if (snippet.contextLimits) {
         settings.customContextLimits = {
@@ -359,8 +358,7 @@ export class EnvSnippetManager {
         };
       }
 
-      // Legacy snippets without modelAliases don't modify aliases. Snippets saved
-      // with alias fields clear aliases for their own model IDs when left empty.
+      // Explicit empty aliases clear the aliases for this snippet's model IDs.
       if (snippet.modelAliases) {
         const modelIds = ProviderRegistry.getCustomModelIds(parseEnvironmentVariables(snippet.envVars));
         const modelAliases = ProviderRegistry.getChatUIConfig('claude').customModelAliases;
