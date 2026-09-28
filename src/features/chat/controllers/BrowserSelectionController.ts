@@ -20,6 +20,16 @@ export class BrowserSelectionController {
   private storedSelection: BrowserSelectionContext | null = null;
   private pollInterval: number | null = null;
   private pollInFlight = false;
+  private pollEpoch = 0;
+  private explainButton: HTMLButtonElement | null = null;
+  private dismissedSelection: BrowserSelectionContext | null = null;
+  private popupDocuments: Document[] = [];
+  private readonly onPopupKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      this.dismissedSelection = this.storedSelection;
+      this.hideExplainButton();
+    }
+  };
 
   constructor(
     app: App,
@@ -27,6 +37,7 @@ export class BrowserSelectionController {
     inputEl: HTMLElement,
     onVisibilityChange?: () => void,
     onUserSelectionChanged?: () => void,
+    private readonly onExplain?: (context: BrowserSelectionContext) => void,
   ) {
     this.app = app;
     this.contextTray = contextTray;
@@ -37,30 +48,38 @@ export class BrowserSelectionController {
 
   start(): void {
     if (this.pollInterval) return;
+    this.pollEpoch++;
     this.pollInterval = window.setInterval(() => {
       void this.#poll();
     }, BROWSER_SELECTION_POLL_INTERVAL);
   }
 
   stop(): void {
+    this.pollEpoch++;
     if (this.pollInterval) {
       window.clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
     this.clear();
+    this.explainButton?.remove();
+    this.explainButton = null;
+    this.setPopupDocuments([]);
   }
 
   async #poll(): Promise<void> {
     if (this.pollInFlight) return;
     this.pollInFlight = true;
+    const epoch = this.pollEpoch;
     try {
       const browserView = this.#getActiveBrowserView();
       if (!browserView) {
+        this.hideExplainButton();
         this.#clearWhenInputIsNotFocused();
         return;
       }
 
       const selectedText = await this.extractSelectedText(browserView.containerEl);
+      if (epoch !== this.pollEpoch || this.#getActiveBrowserView()?.view !== browserView.view) return;
       if (selectedText) {
         const nextContext = this.#buildContext(browserView.view, browserView.viewType, browserView.containerEl, selectedText);
         if (!this.#isSameSelection(nextContext, this.storedSelection)) {
@@ -68,13 +87,97 @@ export class BrowserSelectionController {
           this.updateIndicator();
           this.onUserSelectionChanged?.();
         }
+        this.showExplainButton(browserView, nextContext);
       } else {
+        this.dismissedSelection = null;
+        this.hideExplainButton();
         this.#clearWhenInputIsNotFocused();
       }
     } catch {
       // Ignore transient polling errors to keep selection tracking resilient.
     } finally {
       this.pollInFlight = false;
+    }
+  }
+
+  private setPopupDocuments(documents: Document[]): void {
+    for (const doc of this.popupDocuments) {
+      if (!documents.includes(doc)) doc.removeEventListener('keydown', this.onPopupKeyDown);
+    }
+    for (const doc of documents) {
+      if (!this.popupDocuments.includes(doc)) doc.addEventListener('keydown', this.onPopupKeyDown);
+    }
+    this.popupDocuments = documents;
+  }
+
+  private hideExplainButton(): void {
+    if (this.explainButton) this.explainButton.hidden = true;
+  }
+
+  private showExplainButton(
+    browser: { view: ItemView; viewType: string; containerEl: HTMLElement },
+    context: BrowserSelectionContext,
+  ): void {
+    this.hideExplainButton();
+    if (!this.onExplain || !browser.viewType.startsWith('zotflow-') || !context.pdfPath
+      || this.#isSameSelection(context, this.dismissedSelection)) return;
+    const ownerDoc = browser.containerEl.ownerDocument;
+    const documents = [ownerDoc, ...this.#frameDocuments(browser.containerEl)];
+    this.setPopupDocuments(documents);
+    for (const doc of documents) {
+      const selection = doc.getSelection();
+      if (!selection?.rangeCount || selection.toString().trim() !== context.selectedText) continue;
+      if (doc === ownerDoc && (!selection.anchorNode || !browser.containerEl.contains(selection.anchorNode))) continue;
+      const range = selection.getRangeAt(0);
+      if (typeof range.getBoundingClientRect !== 'function') continue;
+      const rect = range.getBoundingClientRect();
+      if (!rect.width && !rect.height) continue;
+      let left = rect.left;
+      let top = rect.top;
+      let currentDoc = doc;
+      while (currentDoc !== ownerDoc) {
+        const frame = currentDoc.defaultView?.frameElement;
+        if (!frame) return;
+        const frameRect = frame.getBoundingClientRect();
+        left += frameRect.left + frame.clientLeft;
+        top += frameRect.top + frame.clientTop;
+        currentDoc = frame.ownerDocument;
+      }
+      if (this.explainButton?.ownerDocument !== ownerDoc) {
+        this.explainButton?.remove();
+        this.explainButton = null;
+      }
+      if (!this.explainButton) {
+        this.explainButton = ownerDoc.createElement('button');
+        this.explainButton.type = 'button';
+        this.explainButton.className = 'claudian-pdf-explain-button';
+        this.explainButton.textContent = '解释这段';
+        this.explainButton.title = '将选中文字发送到当前 Claudian 对话';
+        this.explainButton.addEventListener('mousedown', event => event.preventDefault());
+        ownerDoc.body.appendChild(this.explainButton);
+      }
+      const button = this.explainButton;
+      button.hidden = false;
+      const bounds = browser.containerEl.getBoundingClientRect();
+      const maxLeft = Math.max(8, (bounds.right || ownerDoc.defaultView!.innerWidth) - button.offsetWidth - 8);
+      button.style.setProperty('--claudian-pdf-explain-left', `${Math.max(8, Math.min(left, maxLeft))}px`);
+      button.style.setProperty('--claudian-pdf-explain-top', `${Math.max(bounds.top + 8, top - button.offsetHeight - 8)}px`);
+      button.onclick = (event) => {
+        event.stopPropagation();
+        if (button.hidden || !this.pollInterval) return;
+        const active = this.#getActiveBrowserView();
+        // The reader may change attachments between a poll and the click.
+        if (!active || active.view !== browser.view
+          || selection.toString().trim() !== context.selectedText
+          || !this.#isSameSelection(context, this.#buildContext(active.view, active.viewType, active.containerEl, context.selectedText))) {
+          this.hideExplainButton();
+          return;
+        }
+        this.dismissedSelection = { ...context };
+        this.hideExplainButton();
+        this.onExplain?.({ ...context });
+      };
+      return;
     }
   }
 
@@ -366,6 +469,7 @@ export class BrowserSelectionController {
   }
 
   clear(): void {
+    this.hideExplainButton();
     this.storedSelection = null;
     this.updateIndicator();
   }

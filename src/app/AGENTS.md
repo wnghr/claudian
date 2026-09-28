@@ -2,7 +2,7 @@
 
 - Cached conversations are projections, not independent mutation authority. Route changes through the repository's application APIs; retain binding/generation fences across hydration, deletion, provider handoff, and snapshot writes.
 - Historical model locators are recovery-only, never resumable bindings. Recovery is best-effort and must not overwrite a newer selection. Persist availability reconciliation before exposing recovered or fallback models; safe model-less shells may remain readable during deferred adoption.
-- Linked content is creation-only conversation identity. Ordinary patches, saves, forks after creation, and deletion cannot replace or clear it. Only explicit Vault-rename reconciliation rewrites it, including folder descendants; deletion preserves identity for Missing content.
+- Linked content changes only through explicit repository APIs: creation, active-paper transitions, and Vault-rename reconciliation. Ordinary patches, saves, forks after creation, and deletion cannot replace or clear it; deletion preserves identity for Missing content.
 - Settings mutations are serialized. Persistence failure restores memory; failure publishing an already committed change must not roll persistence back.
 - Explicit model-picker intent orders future-tab seed commits across the plugin. Revalidate runtime/conversation ownership at the serialized commit, not before an asynchronous provider switch. Automatic fallback/recovery must not seed future tabs.
 

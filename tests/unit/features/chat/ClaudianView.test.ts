@@ -381,7 +381,11 @@ describe('ClaudianView tab controls', () => {
   it('routes active-file changes only to the active tab Linked content owner', () => {
     const handleActiveFileChanged = jest.fn();
     const activeTab = {
-      ui: { linkedContentController: { handleActiveFileChanged } },
+      state: { currentConversationId: null },
+      ui: { linkedContentController: {
+        getSnapshot: () => ({ mode: 'auto-draft', path: null }),
+        handleActiveFileChanged,
+      } },
     };
     const view = Object.create(ClaudianView.prototype) as any;
     attachSessionBrowser(view);
@@ -402,13 +406,41 @@ describe('ClaudianView tab controls', () => {
     const view = Object.create(ClaudianView.prototype) as any;
     view.tabManager = {
       getActiveTab: jest.fn().mockReturnValue({
-        ui: { linkedContentController: { handleActiveLeafChanged } },
+        state: { currentConversationId: null },
+        ui: { linkedContentController: {
+          getSnapshot: () => ({ mode: 'auto-draft', path: null }),
+          handleActiveLeafChanged,
+        } },
       }),
     };
 
     view.handleWorkspaceLayoutChanged();
 
     expect(handleActiveLeafChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists a paper switch in the current conversation', async () => {
+    let path = 'Papers/First.pdf';
+    const setConversationLinkedContentPath = jest.fn().mockResolvedValue(undefined);
+    const view = Object.create(ClaudianView.prototype) as any;
+    view.plugin = { setConversationLinkedContentPath };
+    view.tabManager = {
+      getActiveTab: () => ({
+        state: { currentConversationId: 'conversation-1' },
+        ui: { linkedContentController: {
+          getSnapshot: () => ({ mode: 'locked', path }),
+          handleActiveFileChanged: (file: { path: string }) => { path = file.path; },
+        } },
+      }),
+    };
+
+    view.handleWorkspaceFileOpen({ path: 'Papers/Second.pdf' });
+    await Promise.resolve();
+
+    expect(path).toBe('Papers/Second.pdf');
+    expect(setConversationLinkedContentPath).toHaveBeenCalledWith(
+      'conversation-1', 'Papers/Second.pdf',
+    );
   });
 
   it('fans Vault path events to every tab Linked content owner', () => {

@@ -117,13 +117,14 @@ export function buildTabRuntimeControllers(
       : undefined,
     () => getTabCapabilities(runtimeRef.requirePublished(), plugin),
     async (messageId, markdown) => {
-      const linkedPath = ui.linkedContentController.getSnapshot().path;
-      if (!linkedPath) throw new Error('当前没有关联的 ZotFlow 论文笔记。');
-      const target = await resolvePaperNoteTarget(plugin.app, linkedPath);
-      if (!target) throw new Error('找不到当前论文的 ZotFlow 主笔记，请先打开或导入该论文笔记。');
       const messageIndex = state.messages.findIndex(message => message.id === messageId);
       const userMessage = messageIndex < 0 ? undefined : state.messages.slice(0, messageIndex)
         .reverse().find(message => message.role === 'user' && !message.isRebuiltContext);
+      const linkedPath = userMessage?.linkedContentPath
+        ?? ui.linkedContentController.getSnapshot().path;
+      if (!linkedPath) throw new Error('当前没有关联的 ZotFlow 论文笔记。');
+      const target = await resolvePaperNoteTarget(plugin.app, linkedPath);
+      if (!target) throw new Error('找不到当前论文的 ZotFlow 主笔记，请先打开或导入该论文笔记。');
       const source = userMessage?.executionInput?.context?.browserSelection;
       const pdfPath = source?.pdfPath ?? (linkedPath.startsWith('zotero/') ? linkedPath : null);
       const sourceLine = pdfPath
@@ -174,6 +175,19 @@ export function buildTabRuntimeControllers(
     dom.inputEl,
     undefined,
     () => commitProvisionalTab(runtimeRef.requirePublished()),
+    (context) => {
+      const tab = runtimeRef.requirePublished();
+      if (!isRuntimeLive(tab) || dom.contentEl.hasClass('claudian-hidden')
+        || state.isCreatingConversation || state.isSwitchingConversation) return;
+      commitProvisionalTab(tab);
+      void tab.controllers.inputController.sendMessage({
+        content: '请解释这段选中的内容。先说明核心意思和物理图景，再按需要讲解公式、前提与推导；结合当前对话，聚焦选区。',
+        browserContextOverride: context,
+        editorContextOverride: null,
+        canvasContextOverride: null,
+        images: [],
+      }).catch(error => new Notice(`无法提交选区：${String(error)}`));
+    },
   );
   options.registerCleanup(
     'tab browser selection controller',

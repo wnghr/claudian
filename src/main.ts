@@ -40,6 +40,7 @@ import {
 } from './app/settings/SettingsCoordinator';
 import { SharedStorageService } from './app/storage/SharedStorageService';
 import { TabWorkspaceMigrationCoordinator } from './app/storage/TabWorkspaceMigrationCoordinator';
+import { createVaultTodoService } from './app/todo/VaultTodoStore';
 import type { SessionMetadataReadResult } from './core/bootstrap/SessionStorage';
 import type { SharedAppStorage } from './core/bootstrap/storage';
 import {
@@ -62,6 +63,7 @@ import type {
   PaperNoteWriteRequest,
   PaperNoteWriteResult,
 } from './core/note/PaperNoteWrite';
+import type { TodoChange, TodoPort, TodoQuery, TodoUndo } from './core/note/TodoService';
 import type {
   PaperReadPagePosition,
   PaperReadRequest,
@@ -244,6 +246,7 @@ export default class ClaudianPlugin extends Plugin {
   private zoteroStorageRoot: string | null | undefined;
   private zotFlowStoragePath: Promise<string | null> | undefined;
   private paperSearch: PaperSearchPort | null = null;
+  private todoService: TodoPort | null = null;
   private paperNoteWriter: (PaperNoteWritePort & PaperFieldEditPort) | null = null;
 
   get executionPersistence(): ChatExecutionPersistence {
@@ -437,6 +440,15 @@ export default class ClaudianPlugin extends Plugin {
       && !value.toLocaleLowerCase().startsWith('zotero/')
       && !value.toLocaleLowerCase().startsWith('obsidian://zotflow');
   }
+
+  private getTodoService(): TodoPort {
+    this.todoService ??= createVaultTodoService(this.app);
+    return this.todoService;
+  }
+
+  readTodos(query: TodoQuery) { return this.getTodoService().readTodos(query); }
+  changeTodos(change: TodoChange) { return this.getTodoService().changeTodos(change); }
+  undoTodos(request: TodoUndo) { return this.getTodoService().undoTodos(request); }
 
   appendToNote(request: PaperNoteWriteRequest): Promise<PaperNoteWriteResult> {
     this.paperNoteWriter ??= createVaultPaperNoteWriter({ app: this.app });
@@ -2346,6 +2358,11 @@ export default class ClaudianPlugin extends Plugin {
 
   async updateConversation(id: string, updates: ConversationMutablePatch): Promise<void> {
     await this.conversationRepository.update(id, updates);
+    this.notifyConversationViewsChanged();
+  }
+
+  async setConversationLinkedContentPath(id: string, path: string): Promise<void> {
+    await this.conversationRepository.setLinkedContentPath(id, path);
     this.notifyConversationViewsChanged();
   }
 

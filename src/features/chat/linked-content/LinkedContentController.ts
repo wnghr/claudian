@@ -142,7 +142,12 @@ export class LinkedContentController {
   }
 
   handleActiveFileChanged(file: TFile | null, isActiveOwner: boolean): void {
-    if (this.destroyed || !isActiveOwner || this.mode !== 'auto-draft') return;
+    if (this.destroyed || !isActiveOwner) return;
+    if (this.mode === 'locked') {
+      this.#reconcileOpenedPaper(file ? this.#eligibleActiveFilePath(file) : this.#resolveActiveContentPath());
+      return;
+    }
+    if (this.mode !== 'auto-draft') return;
     this.#reconcileAutoDraftPath(
       file ? this.#eligibleActiveFilePath(file) : this.#resolveActiveContentPath(),
     );
@@ -157,7 +162,12 @@ export class LinkedContentController {
 
   /** Re-evaluates virtual reader views that do not emit Obsidian file-open. */
   handleActiveLeafChanged(): void {
-    if (this.destroyed || this.mode !== 'auto-draft') return;
+    if (this.destroyed) return;
+    if (this.mode === 'locked') {
+      this.#reconcileOpenedPaper(this.#resolveActiveContentPath());
+      return;
+    }
+    if (this.mode !== 'auto-draft') return;
     this.#reconcileAutoDraftPath(this.#resolveActiveContentPath());
   }
 
@@ -351,6 +361,12 @@ export class LinkedContentController {
     const nextPath = path;
     if (nextPath === this.path) return;
     this.path = nextPath;
+    this.publish();
+  }
+
+  #reconcileOpenedPaper(path: string | null): void {
+    if (!path || !path.toLocaleLowerCase().endsWith('.pdf') || path === this.path) return;
+    this.path = path;
     this.publish();
   }
 

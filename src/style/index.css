@@ -68,6 +68,7 @@
 @import "./settings/groups.css";
 
 /* Accessibility */
+@import "./components/pdf-explain.css";
 @import "./accessibility.css";
 
 /* Utilities imported last to preserve cascade priority without importance flags */

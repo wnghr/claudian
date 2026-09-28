@@ -587,6 +587,26 @@ export class ConversationRepository {
     await this.save(conversation);
   }
 
+  async setLinkedContentPath(id: string, path: string): Promise<void> {
+    const normalizedPath = assertLinkedContentPath(path);
+    const conversation = this.getSync(id);
+    if (!conversation) return;
+    const generation = this.#getConversationGeneration(id);
+    await this.#enqueuePersistence(id, async () => {
+      if (!this.#isConversationCurrent(conversation, generation)
+        || !await this.#canWriteConversation(conversation)) return;
+      const previousPath = this.#getAuthoritativeLinkedContentPath(conversation);
+      if (previousPath === normalizedPath) return;
+      this.#setLinkedContentIdentity(conversation, normalizedPath);
+      try {
+        await this.#writeMetadata(conversation);
+      } catch (error) {
+        this.#setLinkedContentIdentity(conversation, previousPath);
+        throw error;
+      }
+    });
+  }
+
   async setPinned(id: string, isPinned: boolean): Promise<void> {
     const conversation = this.getSync(id);
     if (

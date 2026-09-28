@@ -5,6 +5,7 @@ import type { EmbeddingClient } from '../../../core/search/embedding';
 import { decodeVectorBase64, encodeVectorBase64 } from '../../../core/search/embedding';
 import {
   PAPER_SEARCH_DEFAULT_LIMIT,
+  PAPER_SEARCH_MODES,
   type PaperSearchHit,
   type PaperSearchMode,
   type PaperSearchPort,
@@ -321,6 +322,9 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
 
   return {
     async searchPapers(request: PaperSearchRequest): Promise<PaperSearchResult> {
+      if (request.mode && !(PAPER_SEARCH_MODES as readonly string[]).includes(request.mode)) {
+        throw new Error(`mode must be one of ${PAPER_SEARCH_MODES.join(', ')}.`);
+      }
       const mode: PaperSearchMode = request.mode ?? 'hybrid';
       const limit = request.limit ?? PAPER_SEARCH_DEFAULT_LIMIT;
 
@@ -352,7 +356,7 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
         };
       }
 
-      const lexical: readonly ScoredChunk[] = mode === 'semantic'
+      const lexical: readonly ScoredChunk[] = mode === 'local-vector'
         ? []
         : rankByBm25(lexicalIndexFor(corpus), queryTokens);
 
@@ -372,13 +376,13 @@ export function createVaultPaperSearch(options: VaultPaperSearchOptions): PaperS
           embedded = result.embedded;
           degraded = [degraded, result.failure].filter(Boolean).join(' ') || null;
         }
-        if (mode === 'semantic' && semantic.length === 0) {
+        if (mode === 'local-vector' && semantic.length === 0) {
           throw new Error(degraded ?? 'Semantic search produced no usable vectors.');
         }
       }
 
       const fused = fuseByReciprocalRank(
-        mode === 'keyword' ? [lexical] : mode === 'semantic' ? [semantic] : [lexical, semantic],
+        mode === 'keyword' ? [lexical] : mode === 'local-vector' ? [semantic] : [lexical, semantic],
       );
 
       const ordered = [...fused.entries()]

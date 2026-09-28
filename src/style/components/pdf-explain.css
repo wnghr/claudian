@@ -1,0 +1,31 @@
+button.claudian-pdf-explain-button,
+button.claudian-pdf-explain-button:hover,
+button.claudian-pdf-explain-button:focus-visible,
+button.claudian-pdf-explain-button:active {
+  position: fixed;
+  z-index: var(--layer-popover);
+  top: var(--claudian-pdf-explain-top);
+  left: var(--claudian-pdf-explain-left);
+  padding: 6px 12px;
+  height: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: var(--shadow-s);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+
+button.claudian-pdf-explain-button:hover {
+  background: var(--background-modifier-hover);
+}
+
+button.claudian-pdf-explain-button:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+button.claudian-pdf-explain-button[hidden] {
+  display: none;
+}

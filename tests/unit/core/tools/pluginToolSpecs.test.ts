@@ -102,9 +102,12 @@ describe('plugin tool catalog', () => {
     expect(inspectToolSpecs(PLUGIN_TOOL_SPECS)).toEqual([]);
     // An explicit list keeps a capability from being added or dropped silently.
     expect(PLUGIN_TOOL_SPECS.map(tool => tool.qualifiedName)).toEqual([
+      'claudian.change_todos',
       'claudian.read_pdf',
+      'claudian.read_todos',
       'claudian.search',
       'claudian.set_paper_fields',
+      'claudian.undo_todos',
       'claudian.write_note',
       'claudian.write_todo',
     ]);
@@ -139,7 +142,7 @@ describe('plugin tool catalog', () => {
     expect(tool?.capability).toBe('todo.write');
     expect(tool?.instructions).toContain('write_todo');
     expect(tool?.instructions).toContain('only after the user explicitly asks');
-    expect(Object.keys(tool?.jsonSchema.properties ?? {})).toEqual(['content', 'due']);
+    expect(Object.keys(tool?.jsonSchema.properties ?? {})).toEqual(['content', 'due', 'project']);
   });
 
   it('declares set_paper_fields as a whitelisted write capability that requires confirmation', () => {

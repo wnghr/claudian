@@ -7,6 +7,7 @@ import type {
   PaperNoteWriteRequest,
   PaperNoteWriteResult,
 } from '../../core/note/PaperNoteWrite';
+import type { TodoChange, TodoQuery, TodoUndo } from '../../core/note/TodoService';
 import type { PaperReadRequest, PaperReadResult } from '../../core/paper/PaperRead';
 import type { ProviderHost } from '../../core/providers/ProviderHost';
 import type { ProviderCliResolutionContext, ProviderId } from '../../core/providers/types';
@@ -37,6 +38,10 @@ export class ClaudianProviderHost implements ProviderHost {
   get manifest() {
     return this.plugin.manifest;
   }
+
+  readTodos(query: TodoQuery) { return this.plugin.readTodos(query); }
+  changeTodos(change: TodoChange) { return this.plugin.changeTodos(change); }
+  undoTodos(request: TodoUndo) { return this.plugin.undoTodos(request); }
 
   readPaper(request: PaperReadRequest): Promise<PaperReadResult> {
     return this.plugin.readPaper(request);

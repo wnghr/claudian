@@ -211,6 +211,7 @@ export class ClaudeExecutionRequestEncoder {
               reader: this.deps.host,
               search: this.deps.host,
               writer: this.deps.host,
+              todos: this.deps.host,
             }),
           }),
       disallowedTools: [

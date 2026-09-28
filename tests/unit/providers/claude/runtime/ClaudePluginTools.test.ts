@@ -22,6 +22,7 @@ function exposedTools(server: unknown): ExposedTool[] {
 function createContext(): { context: PluginToolContext } {
   return {
     context: {
+      todos: { readTodos: jest.fn(), changeTodos: jest.fn(), undoTodos: jest.fn() },
       confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields: jest.fn() } as unknown as PaperFieldEditPort,
       getLinkedPaperPath: () => null,

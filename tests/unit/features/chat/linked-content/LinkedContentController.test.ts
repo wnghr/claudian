@@ -63,6 +63,41 @@ function createHarness(initialFiles: Array<TFile | TFolder> = []) {
 }
 
 describe('LinkedContentController', () => {
+  it('follows a newly opened paper in an existing conversation', () => {
+    const first = createFile('Papers/First.pdf');
+    const second = createFile('Papers/Second.pdf');
+    const harness = createHarness([first, second]);
+    harness.controller.lock(first.path);
+
+    harness.setActiveFile(second);
+    harness.controller.handleActiveFileChanged(second, true);
+
+    expect(harness.controller.getSnapshot()).toEqual({
+      mode: 'locked',
+      path: second.path,
+    });
+  });
+
+  it('follows a different attachment in the same ZotFlow reader leaf', () => {
+    const harness = createHarness();
+    let itemKey = 'FIRST123';
+    (harness.app.workspace as unknown as { getMostRecentLeaf: jest.Mock }).getMostRecentLeaf = jest.fn(() => ({
+      getViewState: () => ({
+        type: 'zotflow-zotero-reader-view',
+        state: { itemKey },
+      }),
+    }));
+    harness.controller.lock('zotero/FIRST123.pdf');
+
+    itemKey = 'SECOND12';
+    harness.controller.handleActiveLeafChanged();
+
+    expect(harness.controller.getSnapshot()).toEqual({
+      mode: 'locked',
+      path: 'zotero/SECOND12.pdf',
+    });
+  });
+
   it('follows eligible active Notes only in auto-draft and keeps explicit choices sticky', () => {
     const first = createFile('Notes/First.md');
     const second = createFile('Notes/Second.md');

@@ -1,5 +1,6 @@
 import type { PaperFieldEditPort } from '../note/PaperFieldEdit';
 import type { PaperNoteWritePort } from '../note/PaperNoteWrite';
+import type { TodoPort } from '../note/TodoService';
 import type { PaperReadPort } from '../paper/PaperRead';
 import type { PaperSearchPort } from '../search/PaperSearch';
 
@@ -18,6 +19,7 @@ export interface PluginToolConfirmationRequest {
  * an existing tool's dependency.
  */
 export interface PluginToolContext {
+  readonly todos: TodoPort;
   readonly reader: PaperReadPort;
   readonly search: PaperSearchPort;
   readonly writer: PaperNoteWritePort;

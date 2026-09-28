@@ -17,13 +17,13 @@ import {
 } from './PaperSearch';
 
 export const SEARCH_TOOL_NAME = 'search';
-export const SEARCH_TOOL_VERSION = 1;
+export const SEARCH_TOOL_VERSION = 2;
 export const SEARCH_TOOL_CAPABILITY = 'paper.search';
-export const SEARCH_TOOL_ACTION_LABEL = 'Search papers';
+export const SEARCH_TOOL_ACTION_LABEL = 'Search local papers';
 export const SEARCH_TOOL_DESCRIPTION =
-  "Search the Zotero MinerU paper cache and Obsidian research notes for passages that answer a question. Excludes navigation and dashboard pages by default, removes display-only Dataview and Tasks blocks, limits repeated hits from one source, and combines keyword ranking with embedding-based semantic ranking. Every hit includes a source path, heading, and page locator so the answer can be cited. Use it instead of grepping the vault.";
+  "Search local Obsidian notes and the locally configured Zotero MinerU paper cache for passages that answer a question. Excludes navigation and dashboard pages by default, removes display-only Dataview and Tasks blocks, limits repeated hits from one source, and combines keyword ranking with embedding-based ranking. Every hit includes a source path, heading, and page locator so the answer can be cited. This tool does not search online paper databases.";
 export const SEARCH_TOOL_INSTRUCTIONS =
-  'Use the Claudian search tool to locate relevant passages in the paper library before answering a question about the literature. Cite each hit by its path, heading, and page or line locator. Do not grep vault folders for paper content.';
+  'Use Claudian search to locate passages in the local paper cache and Obsidian notes. Cite each hit by its path, heading, and page or line locator. Use the OpenAlex MCP for online paper discovery when papers are not in the local corpus.';
 
 const SEARCH_TOOL_FIELDS: readonly ToolFieldSpec[] = [
   {
@@ -36,8 +36,9 @@ const SEARCH_TOOL_FIELDS: readonly ToolFieldSpec[] = [
     type: 'string',
     optional: true,
     description:
-      'Retrieval mode: hybrid (default), keyword, or semantic. '
-      + 'semantic fails when no embedding endpoint is configured.',
+      'Local retrieval mode: hybrid (default), keyword, or local-vector (vectors only). '
+      + 'local-vector fails when no embedding endpoint is configured. '
+      + 'These modes search the local corpus, not OpenAlex online.',
   },
   {
     name: 'limit',
@@ -135,7 +136,7 @@ export function parseSearchToolInput(value: unknown): SearchToolInput {
 const MODE_LABELS: Readonly<Record<PaperSearchMode, string>> = {
   hybrid: 'keywords + vectors',
   keyword: 'keywords only',
-  semantic: 'vectors only',
+  'local-vector': 'local vectors only',
 };
 
 function formatHit(hit: PaperSearchHit, position: number): readonly string[] {

@@ -6,7 +6,7 @@
  * the corpus comes from; the tool only shapes the request and the answer.
  */
 
-export const PAPER_SEARCH_MODES = ['hybrid', 'keyword', 'semantic'] as const;
+export const PAPER_SEARCH_MODES = ['hybrid', 'keyword', 'local-vector'] as const;
 export type PaperSearchMode = (typeof PAPER_SEARCH_MODES)[number];
 
 export const PAPER_SEARCH_DEFAULT_LIMIT = 8;

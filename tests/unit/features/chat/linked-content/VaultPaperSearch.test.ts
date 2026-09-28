@@ -429,7 +429,7 @@ describe('createVaultPaperSearch', () => {
     );
   });
 
-  it('throws a real error in semantic mode when no vectors can be produced', async () => {
+  it('throws a real error in local-vector mode when no vectors can be produced', async () => {
     const embedding = recordingEmbedding({
       isEnabled: false,
       disabledReason: 'no endpoint configured',
@@ -438,8 +438,19 @@ describe('createVaultPaperSearch', () => {
     await withVault(
       { content: { [CARD_PATH]: CARD_TEXT, [PAGGED_PATH]: PAGGED_TEXT }, embedding },
       async impl => {
-        await expect(impl.searchPapers({ mode: 'semantic', query: 'nematic skyrmion' }))
+        await expect(impl.searchPapers({ mode: 'local-vector', query: 'nematic skyrmion' }))
           .rejects.toThrow(/no endpoint configured/);
+      },
+    );
+  });
+
+  it('rejects the retired semantic mode name at the search boundary', async () => {
+    const embedding = recordingEmbedding();
+    await withVault(
+      { content: { [CARD_PATH]: CARD_TEXT, [PAGGED_PATH]: PAGGED_TEXT }, embedding },
+      async impl => {
+        await expect(impl.searchPapers({ mode: 'semantic' as never, query: 'nematic skyrmion' }))
+          .rejects.toThrow(/mode must be one of hybrid, keyword, local-vector/);
       },
     );
   });

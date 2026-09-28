@@ -65,6 +65,11 @@ function createFakeContext(): FakeContext {
   return {
     appendToNote,
     context: {
+      todos: {
+        readTodos: jest.fn().mockResolvedValue({ revision: 'snapshot', tasks: [], undoAvailable: false }),
+        changeTodos: jest.fn().mockResolvedValue({ revision: 'changed', tasks: [], undoAvailable: true }),
+        undoTodos: jest.fn().mockResolvedValue({ revision: 'undone', tasks: [], undoAvailable: false }),
+      },
       confirmToolAction: jest.fn().mockResolvedValue(true),
       fields: { setPaperFields } as unknown as PaperFieldEditPort,
       getLinkedPaperPath: () => '论文/PDF/current.pdf',
@@ -233,6 +238,8 @@ describe('createCodexPluginTools', () => {
       const args = minimalArguments(spec);
       // set_paper_fields requires at least one whitelisted field besides target.
       if (spec.name === 'set_paper_fields') args.status = 'unread';
+      if (spec.name === 'read_todos') delete args.status;
+      if (spec.name === 'change_todos') args.operations = JSON.stringify([{ op: 'add', task: { content: 'Read a chapter' } }]);
       await expect(registration.handler(callParams(spec.name, args)))
         .resolves.toEqual(expect.objectContaining({ success: true }));
     }

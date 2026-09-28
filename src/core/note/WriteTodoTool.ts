@@ -4,11 +4,12 @@ import {
 } from '../tools/pluginToolNamespace';
 import { defineTool, toJsonSchema, type ToolFieldSpec } from '../tools/ToolSpec';
 import type { PaperNoteWritePort, PaperNoteWriteResult } from './PaperNoteWrite';
+import type { TodoPort } from './TodoService';
 
 export const TODO_NOTE_PATH = '任务/TODO.md';
 export const TODO_NOTE_SECTION = '任务清单';
 export const WRITE_TODO_TOOL_NAME = 'write_todo';
-export const WRITE_TODO_TOOL_VERSION = 2;
+export const WRITE_TODO_TOOL_VERSION = 3;
 export const WRITE_TODO_TOOL_CAPABILITY = 'todo.write';
 export const WRITE_TODO_TOOL_ACTION_LABEL = 'Write TODO';
 export const WRITE_TODO_TOOL_DESCRIPTION =
@@ -46,6 +47,7 @@ export interface WriteTodoToolInput {
 
 export interface WriteTodoToolContext {
   readonly writer: PaperNoteWritePort;
+  readonly todos?: TodoPort;
 }
 
 function isValidDate(value: string): boolean {
@@ -135,6 +137,14 @@ export const WRITE_TODO_TOOL_SPEC = defineTool<WriteTodoToolInput, WriteTodoTool
   fields: WRITE_TODO_TOOL_FIELDS,
   instructions: WRITE_TODO_TOOL_INSTRUCTIONS,
   parse: parseWriteTodoToolInput,
-  handler: (context, input) => executeWriteTodoTool(context.writer, input),
+  handler: async (context, input) => {
+    if (!context.todos) return executeWriteTodoTool(context.writer, input);
+    const snapshot = await context.todos.readTodos({});
+    if (snapshot.tasks.some(task => task.content === input.content && (task.project ?? '') === (input.project ?? ''))) {
+      return `TODO 已存在，未重复写入：${input.content}\n[[任务/TODO]]`;
+    }
+    const result = await context.todos.changeTodos({ revision: snapshot.revision, summary: `添加任务：${input.content}`, operations: [{ op: 'add', task: input }] });
+    return `已加入 TODO（${TODO_NOTE_PATH}）：${input.content}\n${JSON.stringify(result)}`;
+  },
   describeAction: input => `${TODO_NOTE_PATH} ← ${input.content}${input.project ? ` · ${input.project}` : ''}`,
 });

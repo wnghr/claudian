@@ -1,6 +1,8 @@
 /** @jest-environment jsdom */
 
 import { BrowserSelectionController } from '@/features/chat/controllers/BrowserSelectionController';
+import { fireEvent, getByRole, queryByRole } from '@testing-library/dom';
+import { axe } from 'jest-axe';
 
 function createMockContextTray() {
   return {
@@ -115,6 +117,48 @@ describe('BrowserSelectionController', () => {
     expect(contextTray.setItems).toHaveBeenLastCalledWith('browser-selection', [
       expect.objectContaining({ label: 'PDF · p.7 · 1 line selected' }),
     ]);
+  });
+
+  it('offers one-click explanation for a ZotFlow selection without losing its source', async () => {
+    document.body.appendChild(containerEl);
+    const onExplain = jest.fn();
+    controller = new BrowserSelectionController(app, contextTray as any, inputEl, undefined, undefined, onExplain);
+    const page = document.createElement('div');
+    page.dataset.pageNumber = '7';
+    page.textContent = 'selected paper text';
+    containerEl.appendChild(page);
+    const range = document.createRange();
+    range.selectNodeContents(page);
+    range.getBoundingClientRect = () => ({ left: 40, right: 240, top: 100, bottom: 120, width: 200, height: 20 } as DOMRect);
+    getSelectionSpy.mockReturnValue({
+      toString: () => selectionText, anchorNode: page.firstChild, focusNode: page.firstChild,
+      rangeCount: 1, getRangeAt: () => range,
+    } as unknown as Selection);
+    app.workspace.getMostRecentLeaf.mockReturnValue({ view: {
+      getViewType: () => 'zotflow-zotero-reader-view',
+      getDisplayText: () => 'Paper',
+      getState: () => ({ libraryID: 1, itemKey: 'PAPER123' }),
+      containerEl,
+    } });
+    controller.start();
+    jest.advanceTimersByTime(250);
+    await flushMicrotasks();
+    const button = getByRole(document.body, 'button', { name: '解释这段' });
+    jest.useRealTimers();
+    expect((await axe(button)).violations).toEqual([]);
+    jest.useFakeTimers();
+    expect(fireEvent.mouseDown(button)).toBe(false);
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(onExplain).toHaveBeenCalledTimes(1);
+    expect(onExplain).toHaveBeenCalledWith(expect.objectContaining({
+      selectedText: selectionText, pdfPath: 'zotero/PAPER123.pdf', page: 7, libraryID: 1,
+    }));
+    jest.advanceTimersByTime(250);
+    await flushMicrotasks();
+    expect(queryByRole(document.body, 'button', { name: '解释这段' })).toBeNull();
+    controller.stop();
+    containerEl.remove();
   });
 
   it('reads a ZotFlow PDF selection inside its nested reader iframe', async () => {

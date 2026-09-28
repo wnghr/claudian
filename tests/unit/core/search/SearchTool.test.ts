@@ -50,13 +50,13 @@ describe('parseSearchToolInput', () => {
     expect(parseSearchToolInput({
       kind: 'meta',
       limit: 12,
-      mode: 'semantic',
+      mode: 'local-vector',
       query: 'nematic',
       scope: '论文/MD',
     })).toEqual({
       kind: 'meta',
       limit: 12,
-      mode: 'semantic',
+      mode: 'local-vector',
       query: 'nematic',
       scope: '论文/MD',
     });
@@ -64,6 +64,10 @@ describe('parseSearchToolInput', () => {
 
   it('rejects an unknown mode', () => {
     expect(() => parseSearchToolInput({ mode: 'magic', query: 'x' })).toThrow(/mode/i);
+  });
+
+  it('rejects the retired semantic mode name', () => {
+    expect(() => parseSearchToolInput({ mode: 'semantic', query: 'x' })).toThrow(/mode/i);
   });
 
   it('rejects an unknown kind', () => {
@@ -120,13 +124,13 @@ describe('executeSearchTool', () => {
 
     const text = await executeSearchTool(port, {
       limit: 5,
-      mode: 'semantic',
+      mode: 'local-vector',
       query: 'nematic skyrmion',
     });
 
     expect(searchPapers).toHaveBeenCalledWith({
       limit: 5,
-      mode: 'semantic',
+      mode: 'local-vector',
       query: 'nematic skyrmion',
     } satisfies PaperSearchRequest);
     expect(text).toContain('Search: nematic skyrmion');

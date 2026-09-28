@@ -7,6 +7,7 @@ import type {
 } from '../execution';
 import type { PaperFieldEditPort } from '../note/PaperFieldEdit';
 import type { PaperNoteWritePort } from '../note/PaperNoteWrite';
+import type { TodoPort } from '../note/TodoService';
 import type { PaperReadPort } from '../paper/PaperRead';
 import type { PaperSearchPort } from '../search/PaperSearch';
 import type { ClaudianSettings } from '../types';
@@ -20,7 +21,7 @@ import type { ProviderCliResolutionContext, ProviderId } from './types';
  * conversation ownership. Providers receive only the settings, environment,
  * path, CLI, storage, and interaction capabilities they currently consume.
  */
-export interface ProviderHost extends PaperReadPort, PaperSearchPort, PaperNoteWritePort, PaperFieldEditPort {
+export interface ProviderHost extends TodoPort, PaperReadPort, PaperSearchPort, PaperNoteWritePort, PaperFieldEditPort {
   readonly app: App;
   readonly executionLifecycleRegistry: ProviderExecutionLifecycleRegistry;
   readonly settings: ClaudianSettings;

@@ -25,6 +25,7 @@ import type {
   FeatureTabManagerHost,
   TabWorkspaceStateDeliveryRegistration,
 } from '../FeatureHost';
+import type { LinkedContentController } from './linked-content/LinkedContentController';
 import { MentionCacheCoordinator } from './services/MentionCacheCoordinator';
 import { TabStatePersistenceCoordinator } from './services/TabStatePersistenceCoordinator';
 import { getObsidianLanguage } from './session-manager/ProvisionalNoteNames';
@@ -1681,13 +1682,30 @@ export class ClaudianView extends ItemView {
   }
 
   private handleWorkspaceFileOpen(file: TFile | null): void {
-    this.tabManager?.getActiveTab()?.ui.linkedContentController
-      .handleActiveFileChanged(file, true);
+    this.refreshActivePaperBinding(controller => controller.handleActiveFileChanged(file, true));
   }
 
   handleWorkspaceLayoutChanged(): void {
-    this.tabManager?.getActiveTab()?.ui.linkedContentController
-      .handleActiveLeafChanged();
+    this.refreshActivePaperBinding(controller => controller.handleActiveLeafChanged());
+  }
+
+  private refreshActivePaperBinding(
+    refresh: (controller: LinkedContentController) => void,
+  ): void {
+    const tab = this.tabManager?.getActiveTab();
+    if (!tab) return;
+    const controller = tab.ui.linkedContentController;
+    const before = controller.getSnapshot();
+    refresh(controller);
+    const after = controller.getSnapshot();
+    const conversationId = tab.state.currentConversationId;
+    if (before.mode !== 'locked' || !conversationId || !after.path
+      || before.path === after.path) return;
+    void this.plugin.setConversationLinkedContentPath(conversationId, after.path)
+      .catch(error => {
+        if (controller.getSnapshot().path === after.path) controller.lock(before.path ?? undefined);
+        new Notice(`Failed to update linked paper: ${error instanceof Error ? error.message : String(error)}`);
+      });
   }
 
   private handleLinkedContentMetadataChanged(file: TFile | null): void {

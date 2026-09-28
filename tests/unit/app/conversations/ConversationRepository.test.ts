@@ -722,6 +722,22 @@ describe('ConversationRepository hydration', () => {
     expect(persistence.saveMetadata).not.toHaveBeenCalled();
   });
 
+  it('updates the current paper through an explicit persisted transition', async () => {
+    const conversation: Conversation = {
+      ...createConversation(),
+      linkedContentPath: 'Papers/First.pdf',
+    };
+    const { repository, persistence } = createRepository(conversation);
+
+    await repository.setLinkedContentPath(conversation.id, 'Papers/Second.pdf');
+
+    expect(repository.getSync(conversation.id)?.linkedContentPath).toBe('Papers/Second.pdf');
+    expect(persistence.saveMetadata).toHaveBeenCalledWith(expect.objectContaining({
+      id: conversation.id,
+      linkedContentPath: 'Papers/Second.pdf',
+    }));
+  });
+
   it('repairs leaked Linked content mutations at read and persistence boundaries', async () => {
     const conversation: Conversation = {
       ...createConversation(),

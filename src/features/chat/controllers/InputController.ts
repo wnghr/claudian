@@ -468,6 +468,11 @@ export class InputController {
       content: displayContent,
       displayContent,                // Original user input (for UI display)
       timestamp: Date.now(),
+      linkedContentPath: isCompact
+        ? undefined
+        : turnRequest.linkedContentPath
+          ?? this.deps.getLinkedContentController().getSnapshot().path
+          ?? undefined,
       images: imagesForMessage,
       ...(turnRequest.browserSelection?.pdfPath ? {
         executionInput: {
@@ -573,7 +578,6 @@ export class InputController {
 
     try {
       userMsg.content = admittedTurnRequest.text;
-      userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
       const result = await coordinator.execute(this.#createExecutionSubmission(
         displayContent,
         admittedTurnRequest,
@@ -1042,12 +1046,14 @@ export class InputController {
     request: ChatTurnRequest,
     isCompact: boolean,
   ): ChatTurnRequest {
-    const userTurnOrdinal = this.deps.state.messages
-      .filter(isCanonicalUserMessage).length;
-    const linkedContentPath = !isCompact && userTurnOrdinal === 1
-      ? request.linkedContentPath
-        ?? this.deps.getLinkedContentController().getSnapshot().path
-        ?? undefined
+    const previousPath = [...this.deps.state.messages.slice(0, -1)].reverse()
+      .find(message => isCanonicalUserMessage(message) && message.linkedContentPath)
+      ?.linkedContentPath;
+    const currentPath = request.linkedContentPath
+      ?? this.deps.getLinkedContentController().getSnapshot().path
+      ?? undefined;
+    const linkedContentPath = !isCompact && currentPath !== previousPath
+      ? currentPath
       : undefined;
     if (request.linkedContentPath === linkedContentPath) return request;
 

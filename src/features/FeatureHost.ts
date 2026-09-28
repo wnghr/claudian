@@ -125,6 +125,7 @@ export interface FeatureHost {
   ): Promise<void>;
   setConversationArchived(id: string, isArchived: boolean): Promise<void>;
   updateConversation(id: string, updates: ConversationMutablePatch): Promise<void>;
+  setConversationLinkedContentPath(id: string, path: string): Promise<void>;
   getConversationById(id: string): Promise<Conversation | null>;
   getCachedConversation(id: string): Conversation | null;
   getConversationSync(id: string): Conversation | null;

@@ -683,6 +683,7 @@ export class CodexExecutionSession
         reader: this.plugin,
         search: this.plugin,
         writer: this.plugin,
+        todos: this.plugin,
       })) {
         this.dynamicToolRegistry.register(registration);
       }

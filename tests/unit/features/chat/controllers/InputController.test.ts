@@ -2096,6 +2096,30 @@ describe('InputController coordinator execution', () => {
     expect(fixture.plugin.createConversation).toHaveBeenCalledTimes(1);
   });
 
+  it('sends a newly selected paper with the next turn in the same conversation', async () => {
+    const fixture = createFixture({
+      getLinkedContentController: () => ({
+        getSnapshot: () => ({ mode: 'locked', path: 'Papers/Second.pdf' }),
+      }),
+    });
+    fixture.state.messages = [
+      { id: 'old-user', role: 'user', content: 'First paper', timestamp: 1,
+        linkedContentPath: 'Papers/First.pdf' },
+      { id: 'old-answer', role: 'assistant', content: 'First answer', timestamp: 2 },
+    ];
+
+    await fixture.controller.sendMessage({ content: 'Now explain this paper' });
+
+    expect(fixture.coordinator.execute).toHaveBeenCalledWith(expect.objectContaining({
+      context: expect.objectContaining({
+        linkedContent: { path: 'Papers/Second.pdf' },
+      }),
+    }));
+    expect(fixture.state.messages.find(message => message.role === 'user'
+      && message.content === 'Now explain this paper')?.linkedContentPath)
+      .toBe('Papers/Second.pdf');
+  });
+
   it('rebinds Linked content when queued work is promoted to the first turn', async () => {
     const fixture = createFixture({
       getLinkedContentController: () => ({
