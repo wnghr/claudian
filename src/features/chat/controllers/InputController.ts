@@ -30,12 +30,13 @@ import { t } from '../../../i18n/i18n';
 import { ResumeSessionDropdown } from '../../../shared/components/ResumeSessionDropdown';
 import type { BrowserSelectionContext } from '../../../utils/browser';
 import type { CanvasSelectionContext } from '../../../utils/canvas';
-import { extractUserDisplayContent } from '../../../utils/context';
+import { captureSelectionSnapshots, extractUserDisplayContent } from '../../../utils/context';
 import type { EditorSelectionContext } from '../../../utils/editor';
 import { toError } from '../../../utils/error';
 import type { ChatFeatureHost } from '../ChatFeatureHost';
 import type { ChatSettings } from '../ChatSettings';
 import type { ComposerDraftController } from '../composer/ComposerDraftController';
+import { findComposerSessionMentions } from '../composer/composerSessionMentions';
 import {
   type ChatExecutionCoordinator,
   ChatExecutionPreHandoffError,
@@ -54,6 +55,7 @@ import {
 import type { MessageRenderer } from '../rendering/MessageRenderer';
 import { continueResponseAfterNotification } from '../rendering/ResponseContinuation';
 import type { SubagentManager } from '../services/SubagentManager';
+import { resolveSessionMentions } from '../session-mentions/resolveSessionMentions';
 import type { SideChatController } from '../side-chat/SideChatController';
 import type { ChatState } from '../state/ChatState';
 import type { ChatTurnRequest, QueuedMessage, TabReviewOutcome } from '../state/types';
@@ -68,6 +70,9 @@ import {
 import { TurnCoordinator } from './TurnCoordinator';
 
 type ApprovalCallbackOptions = InlineApprovalOptions;
+
+/** Rejected dispatch leaves draft recovery with its caller; handled work owns recovery. */
+type DispatchResult = 'rejected' | 'handled' | 'queued';
 
 export interface InputControllerDeps {
   plugin: ChatFeatureHost;
@@ -119,6 +124,8 @@ export interface SendMessageOptions {
   content?: string;
   images?: ChatMessage['images'];
   turnRequestOverride?: ChatTurnRequest;
+  /** The original composer draft was consumed before asynchronous preparation. */
+  draftConsumed?: boolean;
 }
 
 interface PendingProviderUserMessage {
@@ -163,6 +170,9 @@ export class InputController {
     report: () => void;
   } | null = null;
   private readonly turnCoordinator: TurnCoordinator;
+  private queuedDispatch: { conversationId: string | null; timer: number } | null = null;
+  private mainPreparationBarrier: Promise<void> | null = null;
+  private readonly mentionPreparations = new Map<AbortController, { destination: 'main' | 'side'; pending: Promise<void> }>();
 
   constructor(deps: InputControllerDeps) {
     this.deps = deps;
@@ -170,6 +180,7 @@ export class InputController {
       getPromptParentEl: () => this.deps.getInputContainerEl().parentElement,
       getSuppressedEl: () => this.deps.getInputContainerEl(),
       onBeforeShow: () => this.deps.streamController.hideThinkingIndicator(),
+      onAfterSettle: () => this.deps.streamController.resumeThinkingIndicator(),
     });
     this.asyncQuestions = new AsyncQuestionPrompts({
       prompts: this.inlinePrompts,
@@ -226,7 +237,8 @@ export class InputController {
         new Notice(t('chat.selectAvailableModel'));
         return;
       }
-      queued = await this.#dispatchMessage(options) === true;
+      const result = await this.#dispatchMessage(options);
+      queued = result === 'queued';
     } finally {
       if (!queued) options?.onDelivery?.(false);
     }
@@ -256,6 +268,11 @@ export class InputController {
         onDelivery: accepted => accepted ? resolve() : reject(new Error('The answer was not sent. Please try again.')),
       }).catch(reject);
     });
+  }
+
+  get isPreparingMainTurn(): boolean {
+    return [...this.mentionPreparations].some(([controller, preparation]) =>
+      preparation.destination === 'main' && !controller.signal.aborted);
   }
 
   resumeQueuedTurnAfterIntentAdmission(): void {
@@ -301,7 +318,19 @@ export class InputController {
     }
   }
 
-  async #dispatchMessage(options?: SendMessageOptions): Promise<boolean | void> {
+  #reserveMainPreparation(): () => void {
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    this.mainPreparationBarrier = barrier;
+    return () => {
+      release();
+      if (this.mainPreparationBarrier === barrier) this.mainPreparationBarrier = null;
+    };
+  }
+
+  async #dispatchMessage(
+    options?: SendMessageOptions, skipPreparationBarrier = false, onAdmitted?: () => void,
+  ): Promise<DispatchResult> {
     const {
       state,
       selectionController,
@@ -313,7 +342,7 @@ export class InputController {
     // During conversation creation/switching, don't send - input is preserved so user can retry
     if (state.isCreatingConversation || state.isSwitchingConversation) {
       this.#reportDeferredReviewableSettlement();
-      return;
+      return 'rejected';
     }
 
     const destination = options?.destination ?? this.deps.drafts.destination;
@@ -328,13 +357,13 @@ export class InputController {
       : (composerDraft.images.length > 0);
     if (!content && !hasImages && !options?.turnRequestOverride?.text.trim()) {
       this.#reportDeferredReviewableSettlement();
-      return;
+      return 'rejected';
     }
 
     if (state.isRewinding) {
       new Notice(t('chat.rewind.inProgress'));
       this.#reportDeferredReviewableSettlement();
-      return;
+      return 'rejected';
     }
 
     const sideChat = this.deps.getSideChatController?.() ?? null;
@@ -345,14 +374,137 @@ export class InputController {
       this.#reportDeferredReviewableSettlement();
       if (!sideChat || !isSideChatCommandSupported(this.#getActiveCapabilities())) {
         new Notice(t('chat.sideChat.unsupportedProvider'));
-        return;
+        return 'rejected';
       }
       const images = hasImages
         ? [...(imageOverride ?? composerDraft.images)]
         : [];
       // The side controller owns composer clearing so a rejected command keeps the draft.
       await sideChat.handleCommandSubmission(sideCommand.argument, images, this.#buildSideContext());
-      return;
+      return 'handled';
+    }
+
+    // Check for built-in commands first (e.g., /clear, /new)
+    const builtInCmd = options?.turnRequestOverride ? null : detectBuiltInCommand(content, this.#getActiveProviderId());
+    if (builtInCmd && destination !== 'side') {
+      if (builtInCmd.command.action === 'clear') {
+        this.#clearDeferredReviewableSettlement();
+      } else {
+        this.#reportDeferredReviewableSettlement();
+      }
+      if (shouldUseInput) {
+        this.deps.drafts.restore(destination, { content: '', images: composerDraft.images });
+      }
+      await this.#executeBuiltInCommand(builtInCmd.command);
+      return 'handled';
+    }
+
+    // Reserve busy-main admission order before any hydration can yield.
+    if (destination === 'main' && this.mainPreparationBarrier && !skipPreparationBarrier) {
+      const previous = this.mainPreparationBarrier;
+      const conversationId = state.currentConversationId;
+      const original = shouldUseInput ? this.deps.drafts.consume('main') : { content, images: imageOverride ?? composerDraft.images };
+      const { turnRequest: captured } = this.#buildTurnSubmission({ content, ...options });
+      const capturedOptions: SendMessageOptions = {
+        ...options, destination: 'main', content, images: [...(imageOverride ?? composerDraft.images)],
+        editorContextOverride: captured.editorSelection ?? null,
+        browserContextOverride: captured.browserSelection ?? null,
+        canvasContextOverride: captured.canvasSelection ?? null,
+        draftConsumed: shouldUseInput,
+      };
+      const controller = new AbortController();
+      const releaseAdmission = this.#reserveMainPreparation();
+      let queued = false;
+      const pending = (async () => {
+        await previous;
+        if (controller.signal.aborted || state.currentConversationId !== conversationId || this.deps.canStartTurn?.() === false) {
+          this.deps.drafts.restore('main', original, { merge: true });
+          return;
+        }
+        const result = await this.#dispatchMessage(capturedOptions, true, releaseAdmission);
+        if (result === 'rejected') this.deps.drafts.restore('main', original, { merge: true });
+        queued = result === 'queued';
+      })();
+      this.mentionPreparations.set(controller, { destination, pending });
+      try { await pending; } finally {
+        this.mentionPreparations.delete(controller);
+        releaseAdmission();
+      }
+      return queued ? 'queued' : 'handled';
+    }
+
+    if (!options?.turnRequestOverride && findComposerSessionMentions(content).length > 0) {
+      if (destination === 'side' && detectMainOnlyBuiltInCommand(content)) {
+        new Notice(t('chat.sideChat.mainOnlyCommand', { command: detectMainOnlyBuiltInCommand(content)!.name }));
+        return 'rejected';
+      }
+      const conversationId = state.currentConversationId;
+      const capturedSideRuntime = sideChat?.runtime;
+      const images = [...(imageOverride ?? composerDraft.images)];
+      const captured = this.#buildTurnSubmission({ content, images, ...options });
+      const sideContext = this.#buildSideContext();
+      const original = shouldUseInput ? this.deps.drafts.consume(destination) : { content, images };
+      const preparation = new AbortController();
+      const ownsMainTurn = destination === 'main' && !state.isStreaming
+        && !this.turnCoordinator.isActive && !state.queuedMessage;
+      const releaseAdmission = destination === 'main' && !ownsMainTurn && !skipPreparationBarrier
+        ? this.#reserveMainPreparation() : onAdmitted;
+      let queued = false;
+      const prepare = async (signal: AbortSignal): Promise<void> => {
+        const cancelSidePreparation = () => { if (destination === 'side') capturedSideRuntime?.cancel(); };
+        signal.addEventListener('abort', cancelSidePreparation, { once: true });
+        if (ownsMainTurn) state.isStreaming = true;
+        this.deps.getInputEl().setAttribute?.('aria-busy', 'true');
+        let handedOff = false;
+        try {
+          const resolved = destination === 'side' && capturedSideRuntime
+            ? await capturedSideRuntime.prepareSubmission(sideSignal => resolveSessionMentions(this.deps.plugin, content, sideSignal))
+            : await resolveSessionMentions(this.deps.plugin, content, signal);
+          signal.throwIfAborted();
+          if (state.currentConversationId !== conversationId || this.deps.canStartTurn?.() === false
+            || (destination === 'side' && sideChat?.runtime !== capturedSideRuntime)) {
+            throw new Error('The destination changed while preparing session references.');
+          }
+          const turnRequest = { ...captured.turnRequest, text: resolved.text, draftContent: original.content,
+            sessionReferences: resolved.references };
+          if (ownsMainTurn) state.isStreaming = false;
+          if (destination === 'side') {
+            const accepted = await sideChat?.submitToSide(resolved.text, images,
+              { ...sideContext, sessionReferences: resolved.references }, resolved.text);
+            if (!accepted) throw new Error('The side chat could not accept this message.');
+          } else if (ownsMainTurn) {
+            handedOff = true;
+            releaseAdmission?.();
+            await this.#executeMainTurn(resolved.text, signal, { ...options, images, turnRequestOverride: turnRequest,
+              draftConsumed: shouldUseInput || options?.draftConsumed });
+          } else {
+            handedOff = true;
+            const result = await this.#dispatchMessage({ ...options, destination: 'main', content: resolved.text, images, turnRequestOverride: turnRequest }, true, releaseAdmission);
+            if (result === 'rejected') this.deps.drafts.restore(destination, original, { merge: true });
+            queued = result === 'queued';
+          }
+          handedOff = true;
+        } catch (error) {
+          if (!handedOff) {
+            this.deps.drafts.restore(destination, original, { merge: true });
+            if (!signal.aborted) new Notice(error instanceof Error ? error.message : String(error));
+          } else throw error;
+        } finally {
+          signal.removeEventListener('abort', cancelSidePreparation);
+          this.deps.getInputEl().removeAttribute?.('aria-busy');
+          if (ownsMainTurn && !handedOff) {
+            state.isStreaming = false;
+            this.#restoreQueuedMessageToInput();
+          }
+        }
+      };
+      const pending = ownsMainTurn ? this.turnCoordinator.run(prepare) : prepare(preparation.signal);
+      this.mentionPreparations.set(preparation, { destination, pending });
+      try { await pending; } finally {
+        this.mentionPreparations.delete(preparation);
+        releaseAdmission?.();
+      }
+      return queued ? 'queued' : 'handled';
     }
 
     if (destination === 'side' && sideChat) {
@@ -360,7 +512,7 @@ export class InputController {
       const mainOnly = detectMainOnlyBuiltInCommand(content);
       if (mainOnly) {
         new Notice(t('chat.sideChat.mainOnlyCommand', { command: mainOnly.name }));
-        return;
+        return 'rejected';
       }
       const images = hasImages
         ? [...(imageOverride ?? composerDraft.images)]
@@ -373,22 +525,7 @@ export class InputController {
         context,
       );
       if (!accepted && previousDraft) this.deps.drafts.restore('side', previousDraft, { merge: true });
-      return;
-    }
-
-    // Check for built-in commands first (e.g., /clear, /new)
-    const builtInCmd = options?.turnRequestOverride ? null : detectBuiltInCommand(content, this.#getActiveProviderId());
-    if (builtInCmd) {
-      if (builtInCmd.command.action === 'clear') {
-        this.#clearDeferredReviewableSettlement();
-      } else {
-        this.#reportDeferredReviewableSettlement();
-      }
-      if (shouldUseInput) {
-        this.deps.drafts.restore(destination, { content: '', images: composerDraft.images });
-      }
-      await this.#executeBuiltInCommand(builtInCmd.command);
-      return;
+      return 'handled';
     }
 
     const selectedPdf = options?.turnRequestOverride?.browserSelection
@@ -402,17 +539,20 @@ export class InputController {
     ) {
       new Notice('选中的 PDF 与当前对话绑定的附件不同。请回到原附件，或新建对话后再提问。');
       this.#reportDeferredReviewableSettlement();
-      return;
+      return 'rejected';
     }
 
     // If agent is working, queue the message instead of dropping it
-    if (state.isStreaming || this.turnCoordinator.isActive) {
+    if (state.isStreaming || this.turnCoordinator.isActive || state.queuedMessage) {
       const images = hasImages
         ? [...(imageOverride ?? composerDraft.images)]
         : undefined;
-      const editorContext = selectionController.getContext();
-      const browserContext = browserSelectionController?.getContext() ?? null;
-      const canvasContext = canvasSelectionController.getContext();
+      const editorContext = options?.editorContextOverride !== undefined
+        ? options.editorContextOverride : selectionController.getContext();
+      const browserContext = options?.browserContextOverride !== undefined
+        ? options.browserContextOverride : browserSelectionController?.getContext() ?? null;
+      const canvasContext = options?.canvasContextOverride !== undefined
+        ? options.canvasContextOverride : canvasSelectionController.getContext();
       const { displayContent, turnRequest } = options?.turnRequestOverride
         ? { displayContent: content, turnRequest: cloneChatTurnRequest(options.turnRequestOverride) }
         : this.#buildTurnSubmission({
@@ -429,18 +569,24 @@ export class InputController {
 
       if (shouldUseInput) this.deps.drafts.consume(destination);
       this.updateQueueIndicator();
-      return true;
+      onAdmitted?.();
+      if (!state.isStreaming && !this.turnCoordinator.isActive) this.processQueuedMessage();
+      return 'queued';
     }
 
     if (!shouldUseInput) this.deps.conversationController.cancelBranchDraft();
-    await this.turnCoordinator.run(signal => this.#executeMainTurn(content, signal, options));
+    await this.turnCoordinator.run(signal => {
+      onAdmitted?.();
+      return this.#executeMainTurn(content, signal, options);
+    });
+    return 'handled';
   }
 
   async #executeMainTurn(content: string, signal: AbortSignal, options?: SendMessageOptions): Promise<void> {
     const { plugin, state, renderer, streamController, conversationController } = this.deps;
     const composerDraft = this.deps.drafts.capture('main');
     const imageOverride = options?.images;
-    const shouldUseInput = options?.content === undefined;
+    const shouldUseInput = options?.content === undefined || options?.draftConsumed === true;
     // Slash commands are passed directly to SDK for handling
     // SDK handles expansion, $ARGUMENTS, @file references, and frontmatter options
     const images = imageOverride ?? composerDraft.images;
@@ -463,7 +609,7 @@ export class InputController {
     // Capture and consume the main submission before native navigation can yield
     // and the shared composer can switch to another destination.
     if (shouldUseInput) {
-      this.deps.drafts.consume('main');
+      if (!options?.draftConsumed) this.deps.drafts.consume('main');
       if (conversationController.hasBranchDraft) {
         const committed = await conversationController.commitBranchDraft(signal);
         if (committed.status !== 'committed' || signal.aborted || this.deps.canStartTurn?.() === false) {
@@ -700,7 +846,7 @@ export class InputController {
         wasInvalidated = true;
       } else if (result.status === 'error' && result.error) {
         hadExecutionError = true;
-        await streamController.appendText(`\n\n**Error:** ${result.error.message}`);
+        await streamController.appendError(result.error.message);
       }
     } catch (error) {
       if (error instanceof ChatExecutionPreHandoffError) {
@@ -717,7 +863,7 @@ export class InputController {
         hadExecutionError = true;
         shouldReportReviewableSettlement = true;
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-        await streamController.appendText(`\n\n**Error:** ${errorMsg}`);
+        await streamController.appendError(errorMsg);
         currentReviewableSettlementReporter =
           this.deps.captureReviewableSettlement?.('error') ?? null;
       }
@@ -725,8 +871,10 @@ export class InputController {
       this.activeDelivery = undefined;
       const finalAssistantMsg = this.activeStreamingAssistantMessage ?? assistantMsg;
 
-      // ALWAYS clear the timer interval, even on stream invalidation (prevents memory leaks)
-      state.clearFlavorTimerInterval();
+      // ALWAYS clear the timer interval, even on stream invalidation (prevents memory leaks).
+      // An invalidated turn that still owns the stream also withdraws its pending indicator.
+      if (state.streamGeneration === streamGeneration) streamController.hideThinkingIndicator();
+      else state.clearFlavorTimerInterval();
 
       try {
         // Skip remaining cleanup if stream was invalidated (tab closed or conversation switched)
@@ -816,8 +964,12 @@ export class InputController {
     if (visibleQueuedMessage) {
       const isPendingSteerOnly = !state.queuedMessage && !!visiblePendingSteer;
       indicatorEl.createSpan({
+        cls: 'claudian-input-queue-strip-tag',
+        text: isPendingSteerOnly ? 'Steering' : 'Queued',
+      });
+      indicatorEl.createSpan({
         cls: 'claudian-queue-indicator-text',
-        text: `${isPendingSteerOnly ? '⌙ Steering: ' : '⌙ Queued: '}${this.#getQueuedMessageDisplay(visibleQueuedMessage)}`,
+        text: this.#getQueuedMessageDisplay(visibleQueuedMessage),
       });
 
       if (state.queuedMessage) {
@@ -873,6 +1025,7 @@ export class InputController {
 
   clearQueuedMessage(): void {
     const { state } = this.deps;
+    this.#cancelQueuedDispatch();
     state.queuedMessage?.onDelivery?.(false);
     state.queuedMessage = null;
     this.updateQueueIndicator();
@@ -880,6 +1033,7 @@ export class InputController {
 
   withdrawQueuedMessageToComposer(): void {
     const { state } = this.deps;
+    this.#cancelQueuedDispatch();
     if (!state.queuedMessage) return;
 
     const queuedMessage = this.#cloneQueuedMessage(state.queuedMessage);
@@ -895,7 +1049,7 @@ export class InputController {
     if (!message) return;
     message.onDelivery?.(false);
 
-    this.deps.drafts.restore('main', message, {
+    this.deps.drafts.restore('main', { ...message, content: message.turnRequest?.draftContent ?? message.content }, {
       merge: options.mergeWithComposer, focus: true,
     });
   }
@@ -908,6 +1062,7 @@ export class InputController {
 
   #restoreQueuedMessageToInput(): void {
     const { state } = this.deps;
+    this.#cancelQueuedDispatch();
     const queuedMessage = state.queuedMessage
       ? this.#cloneQueuedMessage(state.queuedMessage)
       : null;
@@ -919,31 +1074,59 @@ export class InputController {
   private processQueuedMessage(): boolean {
     const { state } = this.deps;
     if (!state.queuedMessage) return false;
+    if (this.queuedDispatch) return true;
 
-    const queuedMessage = this.#cloneQueuedMessage(state.queuedMessage);
-    state.queuedMessage = null;
-    this.updateQueueIndicator();
-
-    window.setTimeout(
+    // The visible queue retains ownership until the scheduled callback enters a turn.
+    const reservation = { conversationId: state.currentConversationId, timer: 0 };
+    this.queuedDispatch = reservation;
+    reservation.timer = window.setTimeout(
       () => {
-        if (this.deps.canStartTurn?.() === false) {
-          if (!state.queuedMessage) {
-            state.queuedMessage = queuedMessage;
-            this.updateQueueIndicator();
-          }
+        if (this.queuedDispatch !== reservation) return;
+        if (state.currentConversationId !== reservation.conversationId
+          || state.isRewinding || state.isCreatingConversation || state.isSwitchingConversation) {
+          this.#restoreQueuedMessageToInput();
           return;
         }
-        void this.sendMessage({
-          destination: 'main',
-          content: queuedMessage.content,
-          images: queuedMessage.images ?? [],
-          turnRequestOverride: this.#toQueuedChatTurn(queuedMessage).request,
-          onDelivery: queuedMessage.onDelivery,
-        }).catch(() => this.#reportDeferredReviewableSettlement());
+        if (this.deps.canStartTurn?.() === false || state.isStreaming || this.turnCoordinator.isActive) {
+          this.#cancelQueuedDispatch();
+          return;
+        }
+        if (this.deps.getTabProviderId?.() === null) {
+          this.#cancelQueuedDispatch();
+          new Notice(t('chat.selectAvailableModel'));
+          return;
+        }
+        const queuedMessage = state.queuedMessage;
+        if (!queuedMessage) {
+          this.#cancelQueuedDispatch();
+          return;
+        }
+        void this.turnCoordinator.run(signal => {
+          this.#cancelQueuedDispatch();
+          state.queuedMessage = null;
+          this.updateQueueIndicator();
+          this.deps.conversationController.cancelBranchDraft();
+          return this.#executeMainTurn(queuedMessage.content, signal, {
+            destination: 'main', content: queuedMessage.content,
+            images: queuedMessage.images ?? [],
+            turnRequestOverride: this.#toQueuedChatTurn(queuedMessage).request,
+            onDelivery: queuedMessage.onDelivery,
+          });
+        }).catch(() => {
+          if (this.queuedDispatch === reservation) this.#cancelQueuedDispatch();
+          this.#reportDeferredReviewableSettlement();
+        })
+          .finally(() => queuedMessage.onDelivery?.(false));
       },
       0
     );
     return true;
+  }
+
+  #cancelQueuedDispatch(): void {
+    if (!this.queuedDispatch) return;
+    window.clearTimeout(this.queuedDispatch.timer);
+    this.queuedDispatch = null;
   }
 
   #deferReviewableSettlement(report: (() => void) | null): void {
@@ -1045,14 +1228,14 @@ export class InputController {
       : undefined;
     return {
       displayContent: options.content,
-      turnRequest: {
+      turnRequest: cloneChatTurnRequest({
         text: options.content,
         images: options.images,
         linkedContentPath,
         editorSelection: editorContext,
         browserSelection: browserContext,
         canvasSelection: canvasContext,
-      },
+      }),
     };
   }
 
@@ -1098,6 +1281,7 @@ export class InputController {
         reasoning: settings.reasoning,
         permissionMode: settings.permissionMode,
         serviceTier: settings.serviceTier,
+        readableRoots: [this.deps.plugin.getSessionSnapshotDirectory()],
         systemInstructions: dynamicSystemPromptSections.length > 0
           ? {
               dynamicSections: [...dynamicSystemPromptSections],
@@ -1106,6 +1290,8 @@ export class InputController {
           : { kind: 'provider-default' },
       },
       context: {
+        ...(request.selections !== undefined ? { selections: captureSelectionSnapshots(request) } : {}),
+        ...(request.sessionReferences?.length ? { sessionReferences: request.sessionReferences } : {}),
         ...(request.browserSelection
           ? { browserSelection: request.browserSelection }
           : {}),
@@ -1775,7 +1961,19 @@ export class InputController {
   // Streaming Control
   // ============================================
 
+  /** Tab teardown closes admission before cancelling and joining these preparations. */
+  async drainSessionMentionPreparations(): Promise<void> {
+    this.#cancelQueuedDispatch();
+    const pending = [...this.mentionPreparations.values()].map(value => value.pending);
+    for (const controller of this.mentionPreparations.keys()) controller.abort();
+    await Promise.allSettled(pending);
+  }
+
   cancelStreaming(): void {
+    const destination = this.deps.drafts.destination;
+    for (const [controller, preparation] of this.mentionPreparations) {
+      if (preparation.destination === destination) controller.abort();
+    }
     const sideChat = this.deps.getSideChatController?.() ?? null;
     if (sideChat?.destination === 'side') {
       sideChat.cancelSide();
@@ -1786,7 +1984,10 @@ export class InputController {
 
   #cancelMainStreaming(): void {
     const { state, streamController } = this.deps;
-    if (!state.isStreaming) return;
+    if (!state.isStreaming) {
+      this.#restoreQueuedMessageToInput();
+      return;
+    }
     state.cancelRequested = true;
     this.turnCoordinator.cancel();
     this.#restoreQueuedMessageToInput();
@@ -1797,7 +1998,7 @@ export class InputController {
 
   /** Cancels the active turn and waits for its cleanup and conversation persistence. */
   async cancelStreamingAndWait(): Promise<void> {
-    const activeTurn = this.turnCoordinator.drain();
+    const activeTurn = Promise.allSettled([this.turnCoordinator.drain(), ...[...this.mentionPreparations.values()].map(value => value.pending)]);
     this.cancelStreaming();
     await activeTurn;
   }
@@ -1987,7 +2188,14 @@ export class InputController {
 function cloneChatTurnRequest(request: ChatTurnRequest): ChatTurnRequest {
   return {
     ...request,
+    ...(request.selections !== undefined ? { selections: captureSelectionSnapshots(request) } : {}),
+    ...(request.editorSelection ? { editorSelection: { ...request.editorSelection,
+      ...(request.editorSelection.cursorContext ? { cursorContext: { ...request.editorSelection.cursorContext } } : {}),
+    } } : {}),
+    ...(request.browserSelection ? { browserSelection: { ...request.browserSelection } } : {}),
+    ...(request.canvasSelection ? { canvasSelection: { ...request.canvasSelection, nodeIds: [...request.canvasSelection.nodeIds] } } : {}),
     images: request.images ? [...request.images] : undefined,
+    ...(request.sessionReferences ? { sessionReferences: request.sessionReferences.map(reference => ({ ...reference })) } : {}),
   };
 }
 
@@ -2006,6 +2214,15 @@ function mergeQueuedChatTurns(
     displayContent: mergeText(existing.displayContent, incoming.displayContent),
     request: {
       ...cloneChatTurnRequest(incoming.request),
+      selections: [...captureSelectionSnapshots(existing.request), ...captureSelectionSnapshots(incoming.request)],
+      editorSelection: undefined,
+      browserSelection: undefined,
+      canvasSelection: undefined,
+      sessionReferences: [...(existing.request.sessionReferences ?? []), ...(incoming.request.sessionReferences ?? [])],
+      ...(existing.request.draftContent !== undefined || incoming.request.draftContent !== undefined ? {
+        draftContent: mergeText(existing.request.draftContent ?? existing.displayContent,
+          incoming.request.draftContent ?? incoming.displayContent),
+      } : {}),
       linkedContentPath:
         incoming.request.linkedContentPath ?? existing.request.linkedContentPath,
       images: images.length > 0 ? images : undefined,

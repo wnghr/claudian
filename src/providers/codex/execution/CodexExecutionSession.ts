@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { stringifyUnknown } from '@/utils/stringify';
+
 import {
   ExecutionEventQueue,
   type ProviderExecutionErrorCategory,
@@ -28,21 +30,19 @@ import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { PLUGIN_TOOL_INSTRUCTIONS } from '../../../core/tools/pluginToolSpecs';
 import type { ChatMessage, ImageAttachment, StreamChunk } from '../../../core/types';
 import { createTurnStats, isTokenCount } from '../../../core/types';
-import { appendBrowserContext } from '../../../utils/browser';
-import { appendCanvasContext } from '../../../utils/canvas';
 import {
   appendLinkedContent,
   appendLinkedContentBody,
+  appendSelectionContexts,
+  appendSessionReferences,
 } from '../../../utils/context';
-import { appendEditorContext } from '../../../utils/editor';
 import {
   buildContextFromHistory,
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
 import {
-  deriveCodexMemoriesDirFromSessionsRoot,
   deriveCodexSessionsRootFromSessionPath,
-  findCodexSessionFile,
+  findCodexSessionFileAsync,
 } from '../history/CodexHistoryStore';
 import { getCodexModelOptions } from '../modelOptions';
 import {
@@ -58,6 +58,8 @@ import {
   resolveCodexAppServerLaunchSpec,
 } from '../runtime/codexAppServerSupport';
 import type {
+  ConfigReadParams,
+  ConfigReadResult,
   ItemCompletedNotification,
   SandboxPolicy,
   ServerRequestResolvedNotification,
@@ -129,8 +131,10 @@ const JSON_RPC_PRE_HANDOFF_REJECTION_CODES = new Set([
 
 interface CodexPolicy {
   readonly approvalPolicy: string;
+  readonly approvalsReviewer: string;
   readonly sandbox: string;
-  readonly sandboxPolicy: SandboxPolicy;
+  /** Config-independent policy; config-derived modes leave the policy to Codex. */
+  readonly sandboxPolicy?: SandboxPolicy;
 }
 
 interface CodexInputBundle {
@@ -267,7 +271,7 @@ export class CodexExecutionSession
   private readonly subagents = new CodexSubagentTracker(
     subagent => this.#emitSessionEvent({ type: 'subagent_updated', subagent }),
     async threadId => {
-      if (!this.transport) throw new Error('Codex transport is unavailable');
+      if (!this.transport) throw new Error('Codex CLI transport is unavailable');
       return (await this.transport.request<ThreadReadResult>('thread/read', { threadId, includeTurns: true }, 5_000)).thread;
     },
     () => this.#resolveTargetWorkingDirectory(),
@@ -277,8 +281,13 @@ export class CodexExecutionSession
 
   private threadId: string | null;
   private loadedThreadId: string | null = null;
+  /** Sandbox mode in effect on the loaded thread; turn/start overrides persist across turns. */
+  private loadedThreadSandbox: string | null = null;
+  private loadedThreadSandboxRevision = 0;
   private loadedThreadBaseInstructions: string | null = null;
+  private supportsApprovalReviewer = false;
   private sessionFilePath: string | null;
+  private sessionFileLookupThreadId: string | null = null;
   private workspaceDependencyToolVersion: number | null;
   private linkedPaperPath: string | null = null;
   private pendingFork: CodexProviderState['forkSource'];
@@ -320,10 +329,10 @@ export class CodexExecutionSession
 
   execute(request: ProviderExecutionRequest): ProviderExecutionRun {
     if (this.disposed) {
-      throw new Error('Codex execution session has been disposed.');
+      throw new Error('Codex CLI execution session has been disposed.');
     }
     if (this.activeRun) {
-      throw new Error('Codex execution session already has an active requested run.');
+      throw new Error('Codex CLI execution session already has an active requested run.');
     }
     // A ZotFlow source note is the usual linked content, so the path is passed
     // through as-is and the locator decides whether it names a readable paper.
@@ -393,7 +402,7 @@ export class CodexExecutionSession
         || typeof result !== 'object'
         || result.turnId !== nativeTurnId
       ) {
-        throw new Error('Codex returned an ambiguous steer acknowledgement.');
+        throw new Error('Codex CLI returned an ambiguous steer acknowledgement.');
       }
       return true;
     } catch (error) {
@@ -453,7 +462,7 @@ export class CodexExecutionSession
         this.#finishError(
           run,
           'configuration',
-          'No Codex model is selected. Enable a model in Claudian settings.',
+          'No Codex CLI model is selected. Enable a model in Claudian settings.',
           true,
         );
         return;
@@ -467,7 +476,7 @@ export class CodexExecutionSession
         this.#finishError(
           run,
           'configuration',
-          'Codex app-server does not support exact allow-list enforcement for provider built-in tools.',
+          'Codex CLI app-server does not support exact allow-list enforcement for provider built-in tools.',
           false,
         );
         return;
@@ -480,7 +489,7 @@ export class CodexExecutionSession
         this.#finishError(
           run,
           'configuration',
-          'Codex cannot compact before its native context is restored. Send a normal prompt first.',
+          'Codex CLI cannot compact before its native context is restored. Send a normal prompt first.',
           true,
         );
         return;
@@ -521,6 +530,10 @@ export class CodexExecutionSession
       if (threadIdentityChanged || this.snapshot.status !== 'executing') {
         this.#updateSnapshot('executing');
         this.#emitSnapshot(run);
+      }
+
+      if (policy.approvalsReviewer === 'auto_review' && !this.supportsApprovalReviewer) {
+        throw new Error('Codex CLI did not enable automatic approval review. Update Codex or choose Ask for approval.');
       }
 
       this.notificationRouter = new CodexNotificationRouter(
@@ -569,18 +582,29 @@ export class CodexExecutionSession
         },
       };
 
+      const sandboxPolicy = await this.#resolveTurnSandboxPolicy(policy);
+      if (!this.#isRunCurrent(run, generation)) return;
+      // The override may take effect before, or without, its acknowledgement.
+      const sandboxRevision = sandboxPolicy
+        ? this.#setLoadedThreadSandbox(null)
+        : null;
+
       const result = await this.transport!.request<TurnStartResult>('turn/start', {
         threadId: thread.threadId,
         input: bundle.input,
         approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
         model,
         serviceTier,
         effort,
         summary: getEffectiveCodexReasoningSummary(settings, model),
         personality: getCodexProviderSettings(settings).responseStyle,
-        sandboxPolicy: policy.sandboxPolicy,
+        ...(sandboxPolicy ? { sandboxPolicy } : {}),
         collaborationMode,
       });
+      if (sandboxRevision === this.loadedThreadSandboxRevision) {
+        this.#setLoadedThreadSandbox(policy.sandbox);
+      }
       this.#markNativeConversationContextEstablished(run);
       if (!this.#isRunCurrent(run, generation)) return;
       this.#observeNativeTurn(thread.threadId, result.turn.id);
@@ -595,7 +619,7 @@ export class CodexExecutionSession
   async #ensureProcess(generation: number): Promise<void> {
     await this.processDisposalPromise;
     if (this.disposed || generation !== this.lifecycleGeneration) {
-      throw new Error('Codex execution session has been disposed.');
+      throw new Error('Codex CLI execution session has been disposed.');
     }
     if (
       this.process
@@ -606,15 +630,15 @@ export class CodexExecutionSession
     }
 
     if (this.#resolveNativePersistence() === false && this.threadId) {
-      throw new Error('This non-persistent Codex session cannot be restored after its process ends. Start a new side chat.');
+      throw new Error('This non-persistent Codex CLI session cannot be restored after its process ends. Start a new side chat.');
     }
     await this.#shutdownDeadProcess();
     if (this.disposed || generation !== this.lifecycleGeneration) {
-      throw new Error('Codex execution session has been disposed.');
+      throw new Error('Codex CLI execution session has been disposed.');
     }
     const launchSpec = await resolveCodexAppServerLaunchSpec(this.plugin, 'codex');
     if (this.disposed || generation !== this.lifecycleGeneration) {
-      throw new Error('Codex execution session has been disposed.');
+      throw new Error('Codex CLI execution session has been disposed.');
     }
 
     const process = new CodexAppServerProcess(launchSpec);
@@ -627,17 +651,17 @@ export class CodexExecutionSession
     try {
       process.start();
       if (this.disposed || generation !== this.lifecycleGeneration) {
-        throw new Error('Codex execution session has been disposed.');
+        throw new Error('Codex CLI execution session has been disposed.');
       }
       const transport = new CodexRPCTransport(process);
       this.transport = transport;
       transport.start();
       if (this.disposed || generation !== this.lifecycleGeneration) {
-        throw new Error('Codex execution session has been disposed.');
+        throw new Error('Codex CLI execution session has been disposed.');
       }
       const initializeResult = await initializeCodexAppServerTransport(transport);
       if (this.disposed || generation !== this.lifecycleGeneration) {
-        throw new Error('Codex execution session has been disposed.');
+        throw new Error('Codex CLI execution session has been disposed.');
       }
 
       this.runtimeContext = createCodexRuntimeContext(launchSpec, initializeResult);
@@ -722,7 +746,7 @@ export class CodexExecutionSession
         method,
         (requestId, params) => {
           if (!this.#isTransportCurrent(transport, generation)) {
-            return Promise.reject(new Error('Stale Codex app-server transport.'));
+            return Promise.reject(new Error('Stale Codex CLI app-server transport.'));
           }
           return this.serverRequestRouter.handleServerRequest(
             requestId,
@@ -939,7 +963,7 @@ export class CodexExecutionSession
     this.#finishError(
       recovery.run,
       'provider',
-      'Codex became idle, but its completed turn could not be recovered.',
+      'Codex CLI became idle, but its completed turn could not be recovered.',
       true,
     );
   }
@@ -1078,7 +1102,7 @@ export class CodexExecutionSession
         this.#finishError(
           run,
           'provider',
-          completion.errorMessage ?? 'Codex turn failed.',
+          completion.errorMessage ?? 'Codex CLI turn failed.',
           true,
         );
       } else if (
@@ -1131,7 +1155,7 @@ export class CodexExecutionSession
       )
     ) {
       if (persistExtendedHistory === false) {
-        throw new Error('This non-persistent Codex session cannot be restored after its configuration changes. Start a new side chat.');
+        throw new Error('This non-persistent Codex CLI session cannot be restored after its configuration changes. Start a new side chat.');
       }
       const result = await this.transport!.request<ThreadResumeResult>(
         'thread/resume',
@@ -1139,6 +1163,7 @@ export class CodexExecutionSession
           threadId: this.threadId,
           model,
           approvalPolicy: policy.approvalPolicy,
+          approvalsReviewer: policy.approvalsReviewer,
           sandbox: policy.sandbox,
           serviceTier: resolveCodexServiceTier(
             request.configuration.serviceTier ?? settings.serviceTier,
@@ -1154,8 +1179,10 @@ export class CodexExecutionSession
             : {}),
         },
       );
+      this.#recordApprovalReviewer(result, policy.approvalsReviewer);
       this.subagents.seed(result.thread);
       this.loadedThreadId = result.thread.id;
+      this.#setLoadedThreadSandbox(sandboxModeOf(result.sandbox));
       this.loadedThreadBaseInstructions = baseInstructions;
       return {
         threadId: result.thread.id,
@@ -1181,6 +1208,7 @@ export class CodexExecutionSession
         model,
         cwd: this.#resolveTargetWorkingDirectory(),
         approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
         sandbox: policy.sandbox,
         serviceTier: resolveCodexServiceTier(
           request.configuration.serviceTier ?? settings.serviceTier,
@@ -1198,7 +1226,9 @@ export class CodexExecutionSession
         ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
       },
     );
+    this.#recordApprovalReviewer(result, policy.approvalsReviewer);
     this.loadedThreadId = result.thread.id;
+    this.#setLoadedThreadSandbox(sandboxModeOf(result.sandbox));
     this.loadedThreadBaseInstructions = baseInstructions;
     this.workspaceDependencyToolVersion = dynamicTools.some(spec =>
       spec.namespace === CODEX_WORKSPACE_DEPENDENCY_TOOL_NAMESPACE
@@ -1229,7 +1259,7 @@ export class CodexExecutionSession
     if (this.forkSetupPromise) return this.forkSetupPromise;
     const transport = this.transport;
     if (!transport || !this.pendingFork) {
-      return Promise.reject(new Error('Codex fork setup is not available.'));
+      return Promise.reject(new Error('Codex CLI fork setup is not available.'));
     }
 
     const setup = this.#materializeForkThread(
@@ -1263,7 +1293,7 @@ export class CodexExecutionSession
     transport: CodexRPCTransport,
   ): Promise<CodexEnsuredThread> {
     const fork = this.pendingFork;
-    if (!fork) throw new Error('Codex fork source is not available.');
+    if (!fork) throw new Error('Codex CLI fork source is not available.');
 
     let target = this.pendingForkTarget;
     if (!target) {
@@ -1273,6 +1303,7 @@ export class CodexExecutionSession
         lastTurnId: fork.resumeAt,
         model,
         approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
         sandbox: policy.sandbox,
         serviceTier: resolveCodexServiceTier(request.configuration.serviceTier ?? settings.serviceTier, model, settings),
         baseInstructions: `${baseInstructions}\n\n${LEGACY_WORKSPACE_DEPENDENCY_INSTRUCTIONS}`,
@@ -1282,7 +1313,7 @@ export class CodexExecutionSession
     }
 
     if (!this.#isRunCurrent(run, generation)) {
-      throw new Error('Codex fork setup was interrupted after child adoption.');
+      throw new Error('Codex CLI fork setup was interrupted after child adoption.');
     }
 
     if (persistExtendedHistory === false) {
@@ -1301,6 +1332,7 @@ export class CodexExecutionSession
         threadId: target.threadId,
         model,
         approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer: policy.approvalsReviewer,
         sandbox: policy.sandbox,
         serviceTier: resolveCodexServiceTier(
           request.configuration.serviceTier ?? settings.serviceTier,
@@ -1315,13 +1347,15 @@ export class CodexExecutionSession
       },
     );
     if (!this.#isRunCurrent(run, generation)) {
-      throw new Error('Codex fork setup was interrupted while resuming the child.');
+      throw new Error('Codex CLI fork setup was interrupted while resuming the child.');
     }
     if (resumeResult.thread.id !== target.threadId) {
-      throw new Error('Codex resumed a different thread than the owned fork target.');
+      throw new Error('Codex CLI resumed a different thread than the owned fork target.');
     }
 
+    this.#recordApprovalReviewer(resumeResult, policy.approvalsReviewer);
     this.loadedThreadId = target.threadId;
+    this.#setLoadedThreadSandbox(sandboxModeOf(resumeResult.sandbox));
     this.loadedThreadBaseInstructions = baseInstructions;
     const checkpointIndex = resumeResult.thread.turns.findIndex(
       turn => turn.id === fork.resumeAt,
@@ -1339,10 +1373,10 @@ export class CodexExecutionSession
         },
       );
       if (!this.#isRunCurrent(run, generation)) {
-        throw new Error('Codex fork setup was interrupted while rolling back the child.');
+        throw new Error('Codex CLI fork setup was interrupted while rolling back the child.');
       }
       if (rollbackResult.thread.id !== target.threadId) {
-        throw new Error('Codex rolled back a different thread than the owned fork target.');
+        throw new Error('Codex CLI rolled back a different thread than the owned fork target.');
       }
     }
 
@@ -1369,9 +1403,11 @@ export class CodexExecutionSession
       'thread/fork',
       { threadId: fork.sessionId, ...overrides },
     ).then((forkResult) => {
+      this.#recordApprovalReviewer(forkResult, overrides.approvalsReviewer);
+      this.#setLoadedThreadSandbox(sandboxModeOf(forkResult.sandbox));
       const threadId = normalizeString(forkResult.thread.id);
       if (!threadId) {
-        throw new Error('Codex fork did not return a child thread ID.');
+        throw new Error('Codex CLI fork did not return a child thread ID.');
       }
       const sessionFilePath = forkResult.thread.path
         ? pathMapper?.toHostPath(forkResult.thread.path) ?? forkResult.thread.path
@@ -1563,7 +1599,7 @@ export class CodexExecutionSession
   ): void {
     const message = error instanceof Error
       ? error.message
-      : 'Unknown Codex error';
+      : 'Unknown Codex CLI error';
     if (isMissingThreadError(message)) {
       this.#finishError(
         run,
@@ -1594,7 +1630,7 @@ export class CodexExecutionSession
           this.#finishError(
             run,
             'process-exited',
-            'Codex app-server process exited unexpectedly.',
+            'Codex CLI app-server process exited unexpectedly.',
             true,
           );
         });
@@ -1602,7 +1638,7 @@ export class CodexExecutionSession
         this.#finishError(
           run,
           'process-exited',
-          'Codex app-server process exited unexpectedly.',
+          'Codex CLI app-server process exited unexpectedly.',
           true,
         );
       }
@@ -1610,7 +1646,7 @@ export class CodexExecutionSession
       this.#updateSnapshot('invalidated', {
         reason: 'process-exited',
         recoverable: true,
-        message: 'Codex app-server process exited unexpectedly.',
+        message: 'Codex CLI app-server process exited unexpectedly.',
       });
       this.#emitSessionState();
     }
@@ -1637,7 +1673,9 @@ export class CodexExecutionSession
     this.runtimeContext = null;
     this.subagents.clear();
     this.loadedThreadId = null;
+    this.#setLoadedThreadSandbox(null);
     this.loadedThreadBaseInstructions = null;
+    this.supportsApprovalReviewer = false;
     this.dynamicToolRegistry = new CodexDynamicToolRegistry();
     this.serverRequestRouter.setDynamicToolRegistry(null);
 
@@ -1657,7 +1695,7 @@ export class CodexExecutionSession
       }
       if (cleanupError instanceof Error) throw cleanupError;
       if (cleanupError !== undefined) {
-        throw new Error(String(cleanupError));
+        throw new Error(stringifyUnknown(cleanupError), { cause: cleanupError });
       }
     })();
     this.processDisposalPromise = pending;
@@ -1843,10 +1881,10 @@ export class CodexExecutionSession
     if (request.configuration.reasoning !== undefined && (effort !== request.configuration.reasoning
       || (modelMetadata && !getCodexReasoningEffortOptions(modelMetadata, codexSettings.enableUltraEffort)
         .some(option => option.value === request.configuration.reasoning)))) {
-      throw new Error(`Codex model "${model}" does not support reasoning effort "${request.configuration.reasoning}".`);
+      throw new Error(`Codex CLI model "${model}" does not support reasoning effort "${request.configuration.reasoning}".`);
     }
     if (!effort) {
-      throw new Error(`Codex model "${model}" has no enabled reasoning efforts.`);
+      throw new Error(`Codex CLI model "${model}" has no enabled reasoning efforts.`);
     }
     return effort;
   }
@@ -1873,6 +1911,12 @@ export class CodexExecutionSession
     };
   }
 
+  #recordApprovalReviewer(result: ThreadStartResult, requested: unknown): void {
+    // Older servers may ignore unknown request fields. Never claim automatic review in that case.
+    this.supportsApprovalReviewer = typeof result.approvalsReviewer === 'string'
+      && (requested !== 'auto_review' || result.approvalsReviewer === 'auto_review');
+  }
+
   #resolveNativePersistence(): boolean | undefined {
     if (this.config.nativePersistence === 'enabled') return true;
     if (this.config.nativePersistence === 'disabled-if-supported') return false;
@@ -1887,6 +1931,7 @@ export class CodexExecutionSession
     if (toolPolicy.kind === 'passive' || toolPolicy.kind === 'read-only') {
       return {
         approvalPolicy: 'never',
+        approvalsReviewer: 'user',
         sandbox: 'read-only',
         sandboxPolicy: strictReadOnlySandbox(),
       };
@@ -1894,6 +1939,7 @@ export class CodexExecutionSession
     if (toolPolicy.kind === 'allow-list') {
       return {
         approvalPolicy: 'never',
+        approvalsReviewer: 'user',
         sandbox: 'read-only',
         sandboxPolicy: strictReadOnlySandbox(),
       };
@@ -1901,6 +1947,7 @@ export class CodexExecutionSession
     if (toolPolicy.kind === 'unrestricted') {
       return {
         approvalPolicy: 'never',
+        approvalsReviewer: 'user',
         sandbox: 'danger-full-access',
         sandboxPolicy: { type: 'dangerFullAccess' },
       };
@@ -1909,37 +1956,35 @@ export class CodexExecutionSession
     const permissionMode =
       normalizeString(request.configuration.permissionMode)
       ?? normalizeString(settings.permissionMode)
-      ?? 'normal';
+      ?? 'auto-review';
     const safeMode = getCodexProviderSettings(settings).safeMode;
     const sandboxConfig = resolveCodexSandboxConfig(permissionMode, safeMode);
-    return {
-      ...sandboxConfig,
-      sandboxPolicy: sandboxConfig.sandbox === 'danger-full-access'
-        ? { type: 'dangerFullAccess' }
-        : sandboxConfig.sandbox === 'read-only'
-          ? strictReadOnlySandbox()
-          : this.#buildWorkspaceWriteSandboxPolicy(),
-    };
+    return sandboxConfig.sandbox === 'danger-full-access'
+      ? { ...sandboxConfig, sandboxPolicy: { type: 'dangerFullAccess' } }
+      : sandboxConfig;
   }
 
-  #buildWorkspaceWriteSandboxPolicy(): SandboxPolicy {
-    const transcriptRoot = this.#resolveTranscriptRootTarget();
-    const memoriesDir = deriveCodexMemoriesDirFromSessionsRoot(transcriptRoot)
-      ?? this.runtimeContext?.memoriesDirTarget
-      ?? null;
-    const roots = [
-      this.#resolveTargetWorkingDirectory(),
-      memoriesDir,
-      this.#mapHostPathToTarget(os.tmpdir()),
-      this.launchSpec?.target.platformFamily === 'unix' ? '/tmp' : null,
-    ].filter((value): value is string => Boolean(value?.trim()));
+  #setLoadedThreadSandbox(mode: string | null): number {
+    this.loadedThreadSandbox = mode;
+    return ++this.loadedThreadSandboxRevision;
+  }
+
+  async #resolveTurnSandboxPolicy(policy: CodexPolicy): Promise<SandboxPolicy | undefined> {
+    if (policy.sandboxPolicy) return policy.sandboxPolicy;
+    if (this.loadedThreadSandbox === policy.sandbox) return undefined;
+    // turn/start cannot select a mode, and resuming a loaded thread ignores one, so a mode
+    // switch must restore the policy Codex derives from the user's config for that mode.
+    if (policy.sandbox !== 'workspace-write') return strictReadOnlySandbox();
+    const { config } = await this.transport!.request<ConfigReadResult>('config/read', {
+      cwd: this.#resolveTargetWorkingDirectory(),
+    } satisfies ConfigReadParams);
+    const configured = config.sandbox_workspace_write;
     return {
       type: 'workspaceWrite',
-      writableRoots: [...new Set(roots)],
-      readOnlyAccess: { type: 'fullAccess' },
-      networkAccess: false,
-      excludeTmpdirEnvVar: false,
-      excludeSlashTmp: false,
+      writableRoots: configured?.writable_roots ?? [],
+      networkAccess: configured?.network_access ?? false,
+      excludeTmpdirEnvVar: configured?.exclude_tmpdir_env_var ?? false,
+      excludeSlashTmp: configured?.exclude_slash_tmp ?? false,
     };
   }
 
@@ -1953,6 +1998,7 @@ export class CodexExecutionSession
       .map(block => block.text)
       .join('\n\n');
     const context = request.context;
+    prompt = appendSessionReferences(prompt, context?.sessionReferences, path => this.#mapRequiredHostPath(path));
     if (context?.linkedContent) {
       prompt = context.linkedContent.content === undefined
         ? appendLinkedContent(prompt, context.linkedContent.path)
@@ -1962,15 +2008,7 @@ export class CodexExecutionSession
           context.linkedContent.content,
         );
     }
-    if (context?.editorSelection) {
-      prompt = appendEditorContext(prompt, context.editorSelection);
-    }
-    if (context?.browserSelection) {
-      prompt = appendBrowserContext(prompt, context.browserSelection);
-    }
-    if (context?.canvasSelection) {
-      prompt = appendCanvasContext(prompt, context.canvasSelection);
-    }
+    prompt = appendSelectionContexts(prompt, context);
 
     const history = request.conversationHistory;
     if (!history?.length) return prompt;
@@ -2036,11 +2074,14 @@ export class CodexExecutionSession
         });
       }
 
-      const prompt = promptOverride
-        ?? request.input
+      const prompt = promptOverride ?? appendSelectionContexts(appendSessionReferences(
+        request.input
           .filter(block => block.type === 'text')
           .map(block => block.text)
-          .join('\n\n');
+          .join('\n\n'),
+        request.context?.sessionReferences,
+        path => this.#mapRequiredHostPath(path),
+      ), request.context);
       if (prompt) {
         input.push({ type: 'text', text: prompt, text_elements: [] });
       }
@@ -2073,7 +2114,7 @@ export class CodexExecutionSession
     const targetPath = this.#mapHostPathToTarget(hostPath);
     if (!targetPath) {
       throw new Error(
-        `Codex cannot access path from the selected target: ${hostPath}`,
+        `Codex CLI cannot access path from the selected target: ${hostPath}`,
       );
     }
     return targetPath;
@@ -2094,24 +2135,44 @@ export class CodexExecutionSession
       ?? deriveCodexSessionsRootFromSessionPath(this.sessionFilePath);
   }
 
-  #resolveTranscriptRootTarget(): string | null {
-    if (this.runtimeContext?.sessionsDirTarget) {
-      return this.runtimeContext.sessionsDirTarget;
+  #discoverSessionFile(): void {
+    const threadId = this.threadId;
+    if (
+      this.sessionFilePath
+      || !threadId
+      // Non-persistent threads are started and forked ephemeral; they never write a rollout.
+      || this.#resolveNativePersistence() === false
+      || this.sessionFileLookupThreadId === threadId
+    ) {
+      return;
     }
-    if (!this.sessionFilePath) return null;
-    const targetPath = this.#mapHostPathToTarget(this.sessionFilePath);
-    return deriveCodexSessionsRootFromSessionPath(targetPath);
+    // One bounded background lookup per thread; a miss is not retried after later runs.
+    this.sessionFileLookupThreadId = threadId;
+    void findCodexSessionFileAsync(
+      threadId,
+      this.#resolveTranscriptRootHost() ?? undefined,
+    ).then(
+      found => this.#adoptDiscoveredSessionFile(threadId, found),
+      () => undefined,
+    );
   }
 
-  #discoverSessionFile(): void {
-    if (this.sessionFilePath || !this.threadId) return;
-    const found = findCodexSessionFile(
-      this.threadId,
-      this.#resolveTranscriptRootHost() ?? undefined,
-    );
-    if (found) {
-      this.sessionFilePath = found;
-      this.#updateSnapshot(this.snapshot.status);
+  #adoptDiscoveredSessionFile(threadId: string, found: string | null): void {
+    if (!found || this.disposed || this.threadId !== threadId || this.sessionFilePath) {
+      return;
+    }
+    this.sessionFilePath = found;
+    const currentSnapshot = this.snapshot;
+    if (currentSnapshot.status === 'invalidated') {
+      this.#updateSnapshot('invalidated', currentSnapshot.invalidation);
+    } else {
+      this.#updateSnapshot(currentSnapshot.status);
+    }
+    const run = this.activeRun;
+    if (run && !run.isTerminal) {
+      this.#emitSnapshot(run);
+    } else {
+      this.#emitSessionState();
     }
   }
 
@@ -2162,11 +2223,24 @@ function readProviderProjection(
 function resolveCodexSandboxConfig(
   permissionMode: string,
   safeMode: CodexSafeMode,
-): { approvalPolicy: string; sandbox: string } {
+): Pick<CodexPolicy, 'approvalPolicy' | 'approvalsReviewer' | 'sandbox'> {
   if (permissionMode === 'yolo') {
-    return { approvalPolicy: 'never', sandbox: 'danger-full-access' };
+    return { approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: 'danger-full-access' };
   }
-  return { approvalPolicy: 'on-request', sandbox: safeMode };
+  return {
+    approvalPolicy: 'on-request',
+    approvalsReviewer: permissionMode === 'auto-review' ? 'auto_review' : 'user',
+    sandbox: safeMode,
+  };
+}
+
+function sandboxModeOf(policy: SandboxPolicy | undefined): string | null {
+  switch (policy?.type) {
+    case 'dangerFullAccess': return 'danger-full-access';
+    case 'workspaceWrite': return 'workspace-write';
+    case 'readOnly': return 'read-only';
+    default: return null;
+  }
 }
 
 function strictReadOnlySandbox(): SandboxPolicy {

@@ -1,5 +1,6 @@
 import { extractToolResultImages } from '../../../core/tools/toolResultContent';
 import type { ImageAttachment } from '../../../core/types';
+import { stringifyUnknown } from '@/utils/stringify';
 import { isCodexEncryptedMessage } from './codexSubagentNormalization';
 
 /**
@@ -831,12 +832,7 @@ export function stringifyCodexToolOutput(value: unknown): string {
     if (textParts.length > 0) return textParts.join('');
   }
 
-  try {
-    const result = JSON.stringify(value);
-    return typeof result === 'string' ? result : String(value);
-  } catch {
-    return String(value);
-  }
+  return stringifyUnknown(value);
 }
 
 export function extractCodexExecCellId(output: string): string | undefined {

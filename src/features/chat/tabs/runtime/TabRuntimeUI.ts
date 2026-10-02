@@ -1,5 +1,6 @@
 import { Notice } from 'obsidian';
 
+import { getHiddenCommandSet } from '../../../../core/providers/commands/hiddenCommands';
 import {
   getProviderSettingsSnapshotWithModel,
   normalizeProviderModelSelection,
@@ -18,12 +19,12 @@ import { MainChatComposerDropdown } from '../../composer/MainChatComposerDropdow
 import { LinkedContentController } from '../../linked-content';
 import type { SideChatController } from '../../side-chat/SideChatController';
 import { ComposerContextTray } from '../../ui/ComposerContextTray';
+import { ComposerInfoRow } from '../../ui/ComposerInfoRow';
 import { FileContextManager } from '../../ui/FileContext';
 import { ImageContextManager } from '../../ui/ImageContext';
 import { createInputToolbar } from '../../ui/InputToolbar';
 import { NavigationSidebar } from '../../ui/NavigationSidebar';
 import { installTextareaSizing } from '../../ui/textareaSizing';
-import { clearReportedContextWindowForModel } from '../../utils/usageInfo';
 import { getTabProviderId } from '../providerResolution';
 import { commitProvisionalTab } from '../TabLifecycle';
 import { TabModelSelectionCoordinator } from '../TabModelSelectionCoordinator';
@@ -32,7 +33,6 @@ import {
   getBlankTabModelOptions,
   getTabCapabilities,
   getTabChatUIConfig,
-  getTabHiddenCommands,
   getTabSettingsSnapshot,
   refreshTabProviderUI,
   syncComposerDropdownForProvider,
@@ -58,14 +58,19 @@ function buildContextManagers(
   options: TabRuntimeConstructionContext,
   shell: TabRuntimeShellBundle,
   contextTray: ComposerContextTray,
+  infoRow: ComposerInfoRow,
   onUserModified: () => void,
+  runtimeRef: PublishedTabRuntimeRef,
 ): Pick<
   TabUIComponents,
   'fileContextManager' | 'imageContextManager' | 'linkedContentController'
 > {
   const { dom } = shell;
   const { plugin } = options;
-  const fileContextManager = new FileContextManager(plugin.app);
+  const fileContextManager = new FileContextManager(plugin.app, {
+    getConversationList: () => plugin.getConversationList(),
+    getCurrentConversationId: () => runtimeRef.current()?.conversationId,
+  });
   options.registerCleanup('tab file context manager', () => fileContextManager.destroy());
   const linkedContentController = new LinkedContentController({
     app: plugin.app,
@@ -82,7 +87,7 @@ function buildContextManagers(
   } else {
     linkedContentController.resetAutoDraft();
   }
-  linkedContentController.mountContextTray(contextTray);
+  linkedContentController.mountInfoRow(infoRow);
   if (dom.welcomeEl) linkedContentController.mountWelcome(dom.welcomeEl);
   const imageContextManager = new ImageContextManager(
     dom.inputContainerEl,
@@ -187,7 +192,7 @@ function buildInputToolbar(
     const tab = runtimeRef.requirePublished();
     tab.ui.modelSelector.updateDisplay();
     tab.ui.modeSelector.updateDisplay();
-    tab.ui.thinkingBudgetSelector.updateDisplay();
+    tab.ui.effortSelector.updateDisplay();
     tab.ui.permissionToggle.updateDisplay();
     tab.ui.serviceTierToggle.updateDisplay();
     return true;
@@ -267,7 +272,7 @@ function buildInputToolbar(
           { plugin: plugin.providerHost },
         );
         if (!isSelectionTargetCurrent()) return;
-        tab.ui.thinkingBudgetSelector.updateDisplay();
+        tab.ui.effortSelector.updateDisplay();
         tab.ui.serviceTierToggle.updateDisplay();
         tab.ui.modelSelector.updateDisplay();
         tab.ui.modeSelector.updateDisplay();
@@ -327,19 +332,10 @@ function buildInputToolbar(
         { plugin: plugin.providerHost },
       );
       if (!isSelectionTargetCurrent()) return;
-      tab.ui.thinkingBudgetSelector.updateDisplay();
+      tab.ui.effortSelector.updateDisplay();
       tab.ui.serviceTierToggle.updateDisplay();
       tab.ui.modelSelector.updateDisplay();
       tab.ui.modelSelector.renderOptions();
-
-      const currentUsage = tab.state.usage;
-      if (currentUsage) {
-        tab.state.usage = clearReportedContextWindowForModel(
-          currentUsage,
-          normalizedModel,
-          boundProvider,
-        );
-      }
     },
     onModeChange: async (mode: string) => {
       const tab = runtimeRef.requirePublished();
@@ -354,12 +350,6 @@ function buildInputToolbar(
       });
       tab.ui.modeSelector.updateDisplay();
       tab.ui.modeSelector.renderOptions();
-      onUserModified();
-    },
-    onThinkingBudgetChange: async (budget: string) => {
-      if (applySideSetting({ reasoning: budget })) return;
-      const tab = runtimeRef.requirePublished();
-      await updateTabReasoning(tab, plugin, budget);
       onUserModified();
     },
     onEffortLevelChange: async (effort: string) => {
@@ -382,8 +372,8 @@ function buildInputToolbar(
     },
   });
   options.registerCleanup(
-    'tab input toolbar layout',
-    () => toolbarComponents.layoutController.destroy(),
+    'tab input toolbar menus',
+    () => toolbarComponents.menus.destroy(),
   );
   return toolbarComponents;
 }
@@ -409,13 +399,17 @@ export function buildTabRuntimeUI(
     },
   });
   options.registerCleanup('tab composer context tray', () => contextTray.destroy());
+  const infoRow = new ComposerInfoRow(dom.infoRowEl);
+  options.registerCleanup('tab composer info row', () => infoRow.destroy());
 
   const toolbar = buildInputToolbar(shell, services, options, runtimeRef, onUserModified);
   const contextManagers = buildContextManagers(
     options,
     shell,
     contextTray,
+    infoRow,
     onUserModified,
+    runtimeRef,
   );
   const catalogInfo = shell.providerCatalogResolver();
   const composerDropdown = buildComposerDropdown(
@@ -423,7 +417,7 @@ export function buildTabRuntimeUI(
     getTabProviderId(shell, plugin),
     contextManagers.fileContextManager,
     options,
-    () => getTabHiddenCommands(shell, plugin),
+    () => getHiddenCommandSet(plugin.settings),
     catalogInfo,
   );
   const navigationSidebar = new NavigationSidebar(
@@ -437,11 +431,12 @@ export function buildTabRuntimeUI(
     ...contextManagers,
     modelSelector: toolbar.modelSelector,
     modeSelector: toolbar.modeSelector,
-    thinkingBudgetSelector: toolbar.thinkingBudgetSelector,
+    effortSelector: toolbar.effortSelector,
     permissionToggle: toolbar.permissionToggle,
     serviceTierToggle: toolbar.serviceTierToggle,
     composerDropdown,
     contextUsageMeter: toolbar.contextUsageMeter,
+    toolbarMenus: toolbar.menus,
     navigationSidebar,
   };
 

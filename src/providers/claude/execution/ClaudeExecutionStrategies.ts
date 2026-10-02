@@ -27,12 +27,8 @@ export interface ClaudeExecutionStrategySink {
   releaseNativeTurnFence(queryToken: number): void;
   handleNativeQueryOpened(query: Query): void;
   handleNativeQueryClosed(query: Query): void;
-  handleAuthoritativeContextWindow(
-    query: Query,
-    model: string,
-    contextWindow: number,
-  ): void;
   publishCommands(query: Query, commands?: SlashCommand[]): void;
+  publishModels(query: Query): void;
 }
 
 export interface ClaudeExecutionStrategy {
@@ -74,16 +70,6 @@ implements ClaudeExecutionStrategy {
   private consumerPromise: Promise<void> | null = null;
   private currentConfig: ClaudeEncodedExecutionRequest | null = null;
   private activeNativeTurn: PersistentNativeTurn | null = null;
-  private authoritativeContextWindow: {
-    readonly query: Query;
-    readonly model: string;
-    readonly contextWindow: number;
-  } | null = null;
-  private contextWindowDiscovery: {
-    readonly query: Query;
-    readonly model: string;
-    readonly promise: Promise<void>;
-  } | null = null;
   private preparingTurnToken: number | null = null;
   private hasNonPersistentContext = false;
   private disposed = false;
@@ -110,12 +96,11 @@ implements ClaudeExecutionStrategy {
       await this.#ensureQuery(request, queryToken);
       requestSignal?.throwIfAborted();
       if (!this.query || !this.messageChannel) {
-        throw new Error('Claude persistent query is unavailable');
+        throw new Error('Claude Code persistent query is unavailable');
       }
 
       await this.#applyDynamicUpdates(request);
       requestSignal?.throwIfAborted();
-      void this.#refreshAuthoritativeContextWindow(request.model);
       const message = buildClaudeSDKUserMessage(
         request.prompt,
         this.sink.getProviderSessionId() ?? '',
@@ -207,13 +192,11 @@ implements ClaudeExecutionStrategy {
     this.query = null;
     this.messageChannel = null;
     this.abortController = null;
-    this.authoritativeContextWindow = null;
-    this.contextWindowDiscovery = null;
     if (query) {
       this.sink.handleNativeQueryClosed(query);
       this.#finishNativeTurn(query, {
         type: 'failed',
-        error: new Error('Claude persistent query was disposed.'),
+        error: new Error('Claude Code persistent query was disposed.'),
       });
       await query.interrupt().catch(() => undefined);
     }
@@ -229,7 +212,7 @@ implements ClaudeExecutionStrategy {
     const requestSignal = request.options.abortController?.signal;
     requestSignal?.throwIfAborted();
     if (this.disposed) {
-      throw new Error('Claude persistent strategy is disposed');
+      throw new Error('Claude Code persistent strategy is disposed');
     }
     if (
       this.hasNonPersistentContext
@@ -239,7 +222,7 @@ implements ClaudeExecutionStrategy {
       )
     ) {
       throw new Error(
-        'This non-persistent Claude session cannot be restored after its configuration or process changes. Start a new request.',
+        'This non-persistent Claude Code session cannot be restored after its configuration or process changes. Start a new request.',
       );
     }
     if (
@@ -276,8 +259,6 @@ implements ClaudeExecutionStrategy {
     this.messageChannel = messageChannel;
     this.query = query;
     this.currentConfig = request;
-    this.authoritativeContextWindow = null;
-    this.contextWindowDiscovery = null;
     this.sink.handleNativeQueryOpened(query);
     this.consumerPromise = this.#consume(query, queryToken);
   }
@@ -312,62 +293,6 @@ implements ClaudeExecutionStrategy {
     this.currentConfig = request;
   }
 
-  #refreshAuthoritativeContextWindow(model: string): Promise<void> {
-    const query = this.query;
-    if (!query || typeof query.getContextUsage !== 'function') {
-      return Promise.resolve();
-    }
-    if (
-      this.authoritativeContextWindow?.query === query
-      && this.authoritativeContextWindow.model === model
-    ) {
-      return Promise.resolve();
-    }
-    if (
-      this.contextWindowDiscovery?.query === query
-      && this.contextWindowDiscovery.model === model
-    ) {
-      return this.contextWindowDiscovery.promise;
-    }
-
-    let request: ReturnType<Query['getContextUsage']>;
-    try {
-      request = query.getContextUsage({ detail: 'summary' });
-    } catch {
-      return Promise.resolve();
-    }
-    const promise = request
-      .then((contextUsage) => {
-        if (
-          this.query !== query
-          || this.currentConfig?.model !== model
-          || this.disposed
-        ) {
-          return;
-        }
-        const contextWindow = contextUsage.rawMaxTokens;
-        if (!isFinitePositiveNumber(contextWindow)) {
-          return;
-        }
-        this.authoritativeContextWindow = { query, model, contextWindow };
-        this.sink.handleAuthoritativeContextWindow(
-          query,
-          model,
-          contextWindow,
-        );
-      })
-      .catch(() => {
-        // Result model metadata remains the fallback when control discovery fails.
-      })
-      .finally(() => {
-        if (this.contextWindowDiscovery?.promise === promise) {
-          this.contextWindowDiscovery = null;
-        }
-      });
-    this.contextWindowDiscovery = { query, model, promise };
-    return promise;
-  }
-
   async #consume(query: Query, queryToken: number): Promise<void> {
     try {
       for await (const message of query) {
@@ -376,6 +301,7 @@ implements ClaudeExecutionStrategy {
         }
         if (message.type === 'system' && message.subtype === 'init') {
           this.sink.publishCommands(query);
+          this.sink.publishModels(query);
         }
         if (message.type === 'system' && message.subtype === 'commands_changed') {
           this.sink.publishCommands(query, message.commands);
@@ -393,7 +319,7 @@ implements ClaudeExecutionStrategy {
       if (this.query === query && !this.disposed) {
         const nativeTurn = this.#getNativeTurn(query);
         const nativeTurnToken = nativeTurn?.queryToken ?? queryToken;
-        const error = new Error('Claude persistent query ended unexpectedly.');
+        const error = new Error('Claude Code persistent query ended unexpectedly.');
         this.#detachCurrentQuery(query);
         this.sink.handleNativeEnd(nativeTurnToken);
         this.#finishNativeTurn(query, { type: 'failed', error });
@@ -415,7 +341,7 @@ implements ClaudeExecutionStrategy {
       this.#detachCurrentQuery(query);
       this.#finishNativeTurn(query, {
         type: 'failed',
-        error: new Error('Claude persistent query was replaced.'),
+        error: new Error('Claude Code persistent query was replaced.'),
       });
     }
     if (query) {
@@ -447,8 +373,6 @@ implements ClaudeExecutionStrategy {
     this.messageChannel = null;
     this.abortController = null;
     this.currentConfig = null;
-    this.authoritativeContextWindow = null;
-    this.contextWindowDiscovery = null;
     this.sink.handleNativeQueryClosed(query);
   }
 }
@@ -478,7 +402,7 @@ implements ClaudeExecutionStrategy {
     queryToken: number,
   ): Promise<void> {
     if (this.disposed) {
-      throw new Error('Claude ephemeral strategy is disposed');
+      throw new Error('Claude Code ephemeral strategy is disposed');
     }
     const abortController = request.options.abortController
       ?? new AbortController();
@@ -508,6 +432,7 @@ implements ClaudeExecutionStrategy {
         if (this.activeQuery !== query || this.disposed) break;
         if (message.type === 'system' && message.subtype === 'init') {
           this.sink.publishCommands(query);
+          this.sink.publishModels(query);
         }
         if (message.type === 'system' && message.subtype === 'commands_changed') {
           this.sink.publishCommands(query, message.commands);
@@ -569,10 +494,6 @@ implements ClaudeExecutionStrategy {
     }
     await this.turnBarrier.catch(() => undefined);
   }
-}
-
-function isFinitePositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 async function* toSingleMessagePrompt(

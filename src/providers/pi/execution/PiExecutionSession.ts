@@ -35,12 +35,11 @@ import type {
   StreamChunk,
   TurnStats,
 } from '../../../core/types';
-import { appendBrowserContext } from '../../../utils/browser';
-import { appendCanvasContext } from '../../../utils/canvas';
 import {
   appendLinkedContent,
+  appendSelectionContexts,
+  appendSessionReferences,
 } from '../../../utils/context';
-import { appendEditorContext } from '../../../utils/editor';
 import { parseEnvironmentVariables } from '../../../utils/env';
 import {
   buildContextFromHistory,
@@ -697,7 +696,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       ...parseEnvironmentVariables(envText),
     };
     this.#validateResumeSeed(env);
-    const toolProfile = resolveToolProfile(request.toolPolicy, settings);
+    const toolProfile = resolveToolProfile(request.toolPolicy);
     const launchSpec = buildPiLaunchSpec({
       enableTreeBridge: !this.#shouldDisableNativePersistence(),
       command: await this.host.getResolvedProviderCliPath('pi') ?? 'pi',
@@ -708,10 +707,8 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       noTools: toolProfile.noTools,
       tools: toolProfile.tools,
       providerState: getPiState(this.providerState),
-      settings: {
-        ...settings,
-        toolMode: toolProfile.toolMode,
-      },
+      readOnlyTools: toolProfile.readOnlyTools,
+      settings,
       systemPrompt: resolveSystemPrompt(
         request,
         this.host.settings,
@@ -1048,6 +1045,7 @@ implements ProviderExecutionSession, SteerableExecutionSession {
           content: chunk.content,
           toolCallId: chunk.id,
           toolScope: { kind: 'main' },
+          ...(chunk.toolUseResult ? { toolUseResult: chunk.toolUseResult } : {}),
           type: 'tool_output',
         });
         break;
@@ -1423,7 +1421,11 @@ implements ProviderExecutionSession, SteerableExecutionSession {
       active.onRequestAbort,
     );
     active.events.close();
-    if (this.activeRun === active) this.activeRun = null;
+    if (this.activeRun === active) {
+      this.activeRun = null;
+      // No further events reach normalization; release run-scoped tool state such as nested call arguments.
+      this.normalizationState = createPiEventNormalizationState();
+    }
   }
 
   #emitRequested(
@@ -1685,31 +1687,21 @@ function resolveThinkingLevel(
   return resolved;
 }
 
-function resolveToolProfile(
-  policy: ProviderToolPolicy,
-  settings: PiProviderSettings,
-): {
+function resolveToolProfile(policy: ProviderToolPolicy): {
   noTools: boolean;
-  toolMode: PiProviderSettings['toolMode'];
+  readOnlyTools?: boolean;
   tools?: readonly string[];
 } {
   if (policy.kind === 'passive') {
-    return { noTools: true, toolMode: settings.toolMode };
+    return { noTools: true };
   }
   if (policy.kind === 'read-only') {
-    return { noTools: false, toolMode: 'readonly' };
+    return { noTools: false, readOnlyTools: true };
   }
   if (policy.kind === 'allow-list') {
-    return {
-      noTools: policy.names.length === 0,
-      toolMode: settings.toolMode,
-      tools: policy.names,
-    };
+    return { noTools: policy.names.length === 0, tools: policy.names };
   }
-  return {
-    noTools: false,
-    toolMode: policy.kind === 'unrestricted' ? 'all' : settings.toolMode,
-  };
+  return { noTools: false };
 }
 
 function resolveSystemPrompt(
@@ -1745,15 +1737,8 @@ function encodePrompt(
   if (context?.linkedContent?.path) {
     text = appendLinkedContent(text, context.linkedContent.path);
   }
-  if (context?.editorSelection) {
-    text = appendEditorContext(text, context.editorSelection);
-  }
-  if (context?.browserSelection) {
-    text = appendBrowserContext(text, context.browserSelection);
-  }
-  if (context?.canvasSelection) {
-    text = appendCanvasContext(text, context.canvasSelection);
-  }
+  text = appendSelectionContexts(text, context);
+  text = appendSessionReferences(text, context?.sessionReferences);
   if (replayConversationHistory && request.conversationHistory?.length) {
     const history = [...request.conversationHistory] as ChatMessage[];
     const historyContext = buildContextFromHistory(history, { preserveCapturedContext });

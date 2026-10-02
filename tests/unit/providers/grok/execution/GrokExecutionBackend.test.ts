@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 
+import { capturedSelectionPrompt, capturedSelections } from '@test/helpers/capturedSelections';
+
 const mockLoadGrokPromptIndexAfterAssistant = jest.fn();
 const mockResolveGrokSessionDirectory = jest.fn();
 
@@ -133,9 +135,7 @@ function persistGrok45Catalog(
   });
 }
 
-function featurePermissionRequest(
-  permissionMode: 'normal' | 'plan' | 'yolo',
-): ProviderExecutionRequest {
+function featurePermissionRequest(permissionMode: string): ProviderExecutionRequest {
   const base = executionRequest(permissionMode);
   return {
     ...base,
@@ -589,12 +589,12 @@ describe('GrokExecutionBackend', () => {
 
     await collect(session.execute({
       ...baseRequest,
-      context: { linkedContent: { path: 'Projects/Research' } },
+      context: { ...capturedSelections, sessionReferences: [{ id: 'conv-1-ref', title: 'Review', providerId: 'codex', updatedAt: 'updated', snapshotPath: '/tmp/claudian-sessions/ref.md' }], linkedContent: { path: 'Projects/Research' } },
     }).events);
 
     expect(native.loadRequests[0]?.cwd).toBe('/tmp/vault');
     expect(native.promptRequests[0]?.prompt).toEqual([{
-      text: 'Inspect linked content\n\n<linked_content path="Projects/Research" />',
+      text: 'Inspect linked content\n\n<linked_content path="Projects/Research" />\n\n' + capturedSelectionPrompt + '\n\n<context_sessions>\n<context_session title="Review" id="conv-1-ref" provider="codex" updated="updated" path="/tmp/claudian-sessions/ref.md" />\n</context_sessions>',
       type: 'text',
     }]);
     expect(JSON.stringify(native.promptRequests[0]?.prompt)).not.toMatch(
@@ -1130,9 +1130,14 @@ describe('GrokExecutionBackend', () => {
     expect(JSON.stringify(native.promptRequests[0]?.prompt)).not.toContain('native-owned prior');
   });
 
-  it.each(['normal', 'yolo'] as const)(
-    'uses default native mode for a persistent feature-shaped %s request',
-    async (permissionMode) => {
+  it.each([
+    ['normal', { autoMode: false, yoloMode: false }, 1],
+    ['acceptEdits', { autoMode: false, yoloMode: false }, 1],
+    ['auto', { autoMode: true, yoloMode: false }, 2],
+    ['yolo', { autoMode: false, yoloMode: true }, 2],
+  ] as const)(
+    'reloads the native session with %s permission metadata',
+    async (permissionMode, meta, loadCount) => {
       const native = new FakeNativeConnection();
       const session = new GrokExecutionBackend(
         createGrokHost(),
@@ -1146,10 +1151,130 @@ describe('GrokExecutionBackend', () => {
         { modeId: 'default', sessionId: 'session-existing' },
         { modeId: 'default', sessionId: 'session-existing' },
       ]);
-      expect(native.loadRequests).toHaveLength(permissionMode === 'yolo' ? 2 : 1);
-      expect(native.loadRequests.at(-1)?._meta).toMatchObject({
-        yoloMode: permissionMode === 'yolo',
+      expect(native.loadRequests).toHaveLength(loadCount);
+      expect(native.loadRequests.at(-1)?._meta).toMatchObject(meta);
+    },
+  );
+
+  it.each(['auto', 'yolo'])(
+    'configures and prompts the replacement process after switching to %s',
+    async (permissionMode) => {
+      const natives: FakeNativeConnection[] = [];
+      const session = new GrokExecutionBackend(createGrokHost(), {
+        nativeFactory: {
+          create: () => {
+            const native = new FakeNativeConnection();
+            natives.push(native);
+            return native;
+          },
+        },
+      }).createSession(sessionConfig);
+
+      await collect(session.execute(featurePermissionRequest('normal')).events);
+      const events = await collect(session.execute(featurePermissionRequest(permissionMode)).events);
+
+      expect(events).not.toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+      expect(natives).toHaveLength(2);
+      expect(natives[0]?.shutdownCalls).toBe(1);
+      expect(natives[0]?.promptRequests).toHaveLength(1);
+      expect(natives[0]?.modeRequests).toHaveLength(1);
+      expect(natives[1]?.loadRequests).toHaveLength(1);
+      expect(natives[1]?.modeRequests).toHaveLength(1);
+      expect(natives[1]?.promptRequests).toHaveLength(1);
+    },
+  );
+
+  it('cancels an accept-edits edit request that arrives after cancellation starts', async () => {
+    const native = new FakeNativeConnection();
+    native.promptImplementation = () => new Promise(() => {});
+    let nativeOptions!: GrokExecutionNativeCreateOptions;
+    const requestApproval = jest.fn();
+    const session = new GrokExecutionBackend(createGrokHost(), {
+      nativeFactory: { create: options => { nativeOptions = options; return native; } },
+    }).createSession({
+      ...sessionConfig,
+      interactionPort: { ...interactionPort, requestApproval },
+    });
+    const run = session.execute(featurePermissionRequest('acceptEdits'));
+    while (native.promptRequests.length === 0) await Promise.resolve();
+
+    run.cancel();
+    const response = await nativeOptions.requestPermission({
+      options: [{ kind: 'allow_once', name: 'Allow', optionId: 'allow-once' }],
+      sessionId: 'session-existing',
+      toolCall: { kind: 'edit', title: 'probe.txt', toolCallId: 'tool-late' },
+    });
+
+    expect(response).toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(requestApproval).not.toHaveBeenCalled();
+    await collect(run.events);
+  });
+
+  // The approval port denies, so prompted requests resolve to reject-once.
+  it.each([
+    ['normal', 'edit', 1, 'reject-once'],
+    ['normal', 'execute', 1, 'reject-once'],
+    ['acceptEdits', 'edit', 0, 'allow-once'],
+    ['acceptEdits', 'execute', 1, 'reject-once'],
+  ] as const)(
+    'answers a %s %s permission request after %i prompts with %s',
+    async (permissionMode, kind, prompts, optionId) => {
+      const native = new FakeNativeConnection();
+      native.promptImplementation = () => new Promise(() => {});
+      let nativeOptions!: GrokExecutionNativeCreateOptions;
+      const requestApproval = jest.fn(async (request: { interactionId: string }) => ({
+        decision: 'deny' as const,
+        interactionId: request.interactionId,
+      }));
+      const session = new GrokExecutionBackend(createGrokHost(), {
+        nativeFactory: { create: options => { nativeOptions = options; return native; } },
+      }).createSession({
+        ...sessionConfig,
+        interactionPort: { ...interactionPort, requestApproval },
       });
+      const run = session.execute(featurePermissionRequest(permissionMode));
+      while (native.promptRequests.length === 0) await Promise.resolve();
+
+      const response = await nativeOptions.requestPermission({
+        options: [
+          { kind: 'allow_always', name: 'Allow edits this session', optionId: 'allow-edits-session' },
+          { kind: 'allow_once', name: 'Allow', optionId: 'allow-once' },
+          { kind: 'reject_once', name: 'Reject', optionId: 'reject-once' },
+        ],
+        sessionId: 'session-existing',
+        toolCall: { kind, title: 'probe.txt', toolCallId: 'tool-1' },
+      });
+
+      expect(requestApproval).toHaveBeenCalledTimes(prompts);
+      expect(response).toEqual({ outcome: { outcome: 'selected', optionId } });
+      run.cancel();
+      await collect(run.events);
+    },
+  );
+
+  it.each(['acceptEdits', 'auto', 'normal'])(
+    'keeps the selected %s mode when native always-approve turns off',
+    async (permissionMode) => {
+      const native = new FakeNativeConnection();
+      native.promptImplementation = () => new Promise(() => {});
+      const session = new GrokExecutionBackend(
+        createGrokHost(),
+        { nativeFactory: { create: () => native } },
+      ).createSession(sessionConfig);
+      const permissions: string[] = [];
+      session.onEvent(event => {
+        if (event.type === 'permission_mode_changed') permissions.push(event.permissionMode);
+      });
+      const run = session.execute(featurePermissionRequest(permissionMode));
+      while (native.promptRequests.length === 0) await Promise.resolve();
+
+      native.emitPermissionMode('normal');
+      native.emitPermissionMode('yolo');
+      native.emitPermissionMode('normal');
+      run.cancel();
+      await collect(run.events);
+
+      expect(permissions).toEqual(['yolo', permissionMode]);
     },
   );
 
@@ -2246,7 +2371,7 @@ describe('GrokExecutionBackend', () => {
     const failedEvents = await collect(session.execute(executionRequest('fork')).events);
 
     expect(failedEvents.at(-1)).toMatchObject({
-      message: 'Grok returned a fork for an unexpected parent session.',
+      message: 'Grok Build returned a fork for an unexpected parent session.',
       type: 'execution_error',
     });
     expect(session.getSnapshot()).toMatchObject({

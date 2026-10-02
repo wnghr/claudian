@@ -3,7 +3,7 @@ import '@/providers';
 
 import { createHarness, releaseSideChatHarnesses, startSideChat } from '@test/helpers/features/chat/SideChatDOMHarness';
 import { fireEvent, waitFor, within } from '@testing-library/dom';
-import { App } from 'obsidian';
+import { App, Component } from 'obsidian';
 
 import type { Conversation } from '@/core/types';
 import type { ChatFeatureHost } from '@/features/chat/ChatFeatureHost';
@@ -37,7 +37,7 @@ it('refreshes destination settings when the side panel collapses, expands, and i
     app,
     getCommittedSettings: () => plugin.settings,
     settings: {
-      model: 'claude-opus-4-6', effortLevel: 'medium', permissionMode: 'normal',
+      model: 'claude-opus-4-6', effortLevel: 'medium', permissionMode: 'manual',
       savedProviderModel: { claude: 'claude-opus-4-6' }, savedProviderEffort: { claude: 'medium' },
       providerConfigs: { claude: { enabled: true, visibleModels: ['claude-sonnet-4-5', 'claude-opus-4-6'],
         discoveredModels: [
@@ -52,7 +52,7 @@ it('refreshes destination settings when the side panel collapses, expands, and i
   } as unknown as ChatFeatureHost;
   const tab = await createTabRuntime({
     plugin,
-    component: { addChild: () => undefined, register: () => undefined, registerDomEvent: () => undefined, registerEvent: () => undefined } as never,
+    component: Object.assign(new Component(), { registerDomEvent: () => undefined, registerEvent: () => undefined }) as never,
     containerEl: document.body.appendChild(document.createElement('div')),
     conversation,
     getProviderCatalogConfig: () => null,
@@ -71,19 +71,19 @@ it('refreshes destination settings when the side panel collapses, expands, and i
     side.updateSideSettings({ permissionMode: 'yolo', reasoning: 'low' });
     side.collapse();
     fireEvent.click(ui.getByRole('button', { name: 'Side chat' }));
-    expect(ui.queryByText('YOLO')).not.toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: YOLO' })).not.toBeNull();
     expect(ui.getByText('Low', { selector: '.claudian-thinking-current' })).toBeDefined();
-    expect(ui.queryByText('Safe')).toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: Manual' })).toBeNull();
 
     fireEvent.click(ui.getByRole('button', { name: 'Collapse' }));
-    expect(ui.queryByText('Safe')).not.toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: Manual' })).not.toBeNull();
     expect(ui.getByText('High', { selector: '.claudian-thinking-current' })).toBeDefined();
-    expect(ui.queryByText('YOLO')).toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: YOLO' })).toBeNull();
 
     fireEvent.click(ui.getByRole('button', { name: 'Side chat' }));
-    expect(ui.queryByText('YOLO')).not.toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: YOLO' })).not.toBeNull();
     expect(ui.getByText('Low', { selector: '.claudian-thinking-current' })).toBeDefined();
-    expect(ui.queryByText('Safe')).toBeNull();
+    expect(ui.queryByRole('button', { name: 'Permission mode: Manual' })).toBeNull();
 
     let finishDisposal!: () => void;
     const disposalGate = new Promise<void>(resolve => { finishDisposal = resolve; });
@@ -96,9 +96,9 @@ it('refreshes destination settings when the side panel collapses, expands, and i
     const discarded = side.discard();
     try {
       expect(side.destination).toBe('main');
-      expect(ui.queryByText('Safe')).not.toBeNull();
+      expect(ui.queryByRole('button', { name: 'Permission mode: Manual' })).not.toBeNull();
     expect(ui.getByText('High', { selector: '.claudian-thinking-current' })).toBeDefined();
-      expect(ui.queryByText('YOLO')).toBeNull();
+      expect(ui.queryByRole('button', { name: 'Permission mode: YOLO' })).toBeNull();
     } finally {
       finishDisposal();
       await discarded;

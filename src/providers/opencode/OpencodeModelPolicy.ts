@@ -2,7 +2,6 @@ import { formatReasoningValueLabel } from '@/core/providers/reasoning';
 
 import type {
   ProviderModelPolicy,
-  ProviderReasoningOption,
   ProviderUIOption,
 } from '../../core/providers/types';
 import { maybeGetOpencodeWorkspaceServices } from './app/OpencodeWorkspaceServices';
@@ -16,15 +15,12 @@ import {
   resolveOpencodeBaseModelRawId,
   resolveOpencodeDefaultThinkingLevel,
 } from './models';
-import {
-  resolveOpencodeModeForPermissionMode,
-  resolvePermissionModeForManagedOpencodeMode,
-} from './modes';
+import { OPENCODE_PERMISSION_MODE_POLICY } from './permissionModes';
 import { getOpencodeProviderSettings, updateOpencodeProviderSettings } from './settings';
 
 
 export const opencodeModelPolicy: ProviderModelPolicy = {
-  permissionModes: { inactiveValue: 'normal', activeValue: 'yolo' },
+  permissionModes: OPENCODE_PERMISSION_MODE_POLICY,
   getModelOptions(settings): ProviderUIOption[] {
     const opencodeSettings = getOpencodeProviderSettings(settings);
     const applyAlias = (rawId: string, option: ProviderUIOption): ProviderUIOption => {
@@ -60,13 +56,13 @@ export const opencodeModelPolicy: ProviderModelPolicy = {
     return isOpencodeModelSelectionId(model);
   },
 
-  isAdaptiveReasoningModel(model: string, settings: Record<string, unknown>): boolean {
+  supportsReasoningEffort(model: string, settings: Record<string, unknown>): boolean {
     return getOpencodeThinkingOptions(model, settings).length > 0;
   },
 
-  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderReasoningOption[] {
-    const options = getOpencodeThinkingOptions(model, settings);
-    if (options.every(option => option.value === OPENCODE_DEFAULT_THINKING_LEVEL)) return [];
+  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderUIOption[] {
+    const options = getOpencodeThinkingOptions(model, settings)
+      .filter(option => option.value !== OPENCODE_DEFAULT_THINKING_LEVEL);
     return options.map((variant) => ({
         description: variant.description,
         label: formatReasoningValueLabel(variant.label),
@@ -167,26 +163,6 @@ export const opencodeModelPolicy: ProviderModelPolicy = {
 
   getCustomModelIds(): Set<string> {
     return new Set<string>();
-  },
-
-  resolvePermissionMode(settings: Record<string, unknown>): string | null {
-    const selectedMode = getOpencodeProviderSettings(settings).selectedMode;
-    return resolvePermissionModeForManagedOpencodeMode(selectedMode);
-  },
-
-  applyPermissionMode(value: string, settings: unknown): void {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-      return;
-    }
-
-    const settingsBag = settings as Record<string, unknown>;
-    settingsBag.permissionMode = value;
-    updateOpencodeProviderSettings(settingsBag, {
-      selectedMode: resolveOpencodeModeForPermissionMode(
-        value,
-        getOpencodeProviderSettings(settingsBag).availableModes,
-      ),
-    });
   }
 };
 
@@ -222,7 +198,7 @@ function getDefaultThinkingLevelForModel(
 function getOpencodeThinkingOptions(
   model: string,
   settings: Record<string, unknown>,
-): ProviderReasoningOption[] {
+): ProviderUIOption[] {
   const rawModelId = decodeOpencodeModelId(model);
   if (!rawModelId) {
     return [];

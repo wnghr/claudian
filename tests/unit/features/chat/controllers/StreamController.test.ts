@@ -17,8 +17,10 @@ import {
   StreamController,
   type StreamControllerDeps,
 } from '@/features/chat/controllers/StreamController';
+import * as displayOnlyCodeFences from '@/features/chat/rendering/DisplayOnlyCodeFences';
 import { SubagentManager } from '@/features/chat/services/SubagentManager';
 import { ChatState } from '@/features/chat/state/ChatState';
+import * as markdownMath from '@/utils/markdownMath';
 
 jest.mock('@/core/tools/toolInput', () => ({
   extractResolvedAnswers: jest.fn().mockReturnValue(undefined),
@@ -273,6 +275,54 @@ describe('StreamController - Text Content', () => {
         deps.state.currentTextEl,
         'First second'
       );
+    });
+
+    it('scans for deferred math and diagrams only when a text render runs', async () => {
+      const mathSpy = jest.spyOn(markdownMath, 'hasStreamingMathDelimiters');
+      const mermaidSpy = jest.spyOn(displayOnlyCodeFences, 'hasMermaidFence');
+      try {
+        deps.state.currentTextEl = createMockEl();
+        controller.setTabActive(false);
+        for (let i = 0; i < 20; i += 1) {
+          await controller.appendText('$x$ ');
+        }
+        jest.advanceTimersByTime(500);
+        await Promise.resolve();
+
+        expect(deps.renderer.renderContent).not.toHaveBeenCalled();
+        expect(mathSpy).not.toHaveBeenCalled();
+        expect(mermaidSpy).not.toHaveBeenCalled();
+
+        controller.setTabActive(true);
+        jest.advanceTimersByTime(16);
+        await Promise.resolve();
+        expect(deps.renderer.renderContent).toHaveBeenCalledTimes(1);
+        expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(
+          deps.state.currentTextEl, '$x$ '.repeat(20), { deferMath: true }
+        );
+        const scansAfterFirstRender = mathSpy.mock.calls.length;
+        expect(mermaidSpy).toHaveBeenCalledTimes(scansAfterFirstRender);
+
+        for (let i = 0; i < 20; i += 1) {
+          await controller.appendText('$y$ ');
+        }
+        jest.advanceTimersByTime(16);
+        await Promise.resolve();
+        expect(deps.renderer.renderContent).toHaveBeenCalledTimes(1);
+        expect(mathSpy).toHaveBeenCalledTimes(scansAfterFirstRender);
+        expect(mermaidSpy).toHaveBeenCalledTimes(scansAfterFirstRender);
+
+        jest.advanceTimersByTime(150);
+        await Promise.resolve();
+        expect(deps.renderer.renderContent).toHaveBeenCalledTimes(2);
+        expect(deps.renderer.renderContent).toHaveBeenLastCalledWith(
+          deps.state.currentTextEl, '$x$ '.repeat(20) + '$y$ '.repeat(20), { deferMath: true }
+        );
+        expect(mathSpy).toHaveBeenCalledTimes(2 * scansAfterFirstRender);
+      } finally {
+        mathSpy.mockRestore();
+        mermaidSpy.mockRestore();
+      }
     });
 
     it('should catch up with the latest text when a hidden tab becomes active', async () => {
@@ -836,7 +886,7 @@ describe('StreamController - Text Content', () => {
         expect.anything(),
         expect.objectContaining({ id: 'read-1', name: 'Read' }),
         expect.any(Map),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false, renderMarkdown: expect.any(Function) }),
       );
     });
 
@@ -862,6 +912,55 @@ describe('StreamController - Text Content', () => {
       expect(vault.adapter.list).toHaveBeenCalledWith('notes');
     });
 
+    it('refreshes the vault for files a script changed through nested calls, even when the script failed', async () => {
+      const vault = deps.plugin.app.vault;
+      vault.getAbstractFileByPath = jest.fn().mockReturnValue(null);
+      vault.adapter.list = jest.fn().mockResolvedValue({ files: [], folders: [] });
+      const msg = createTestMessage();
+      deps.state.currentContentEl = createMockEl();
+
+      await controller.handleStreamChunk(
+        { type: 'tool_use', id: 'script-refresh', name: 'exec', input: { code: 'await tools.write({})' } }, msg,
+      );
+      await controller.handleStreamChunk({
+        type: 'tool_result', id: 'script-refresh', content: 'Script error', isError: true,
+        toolUseResult: { scriptToolCalls: [
+          { name: 'Write', input: { file_path: 'notes/new.md', content: 'hi' }, status: 'completed' },
+          { name: TOOL_APPLY_PATCH, input: { patch: '*** Begin Patch\n*** Add File: drafts/plan.md\n+x\n*** End Patch' }, status: 'completed' },
+          { name: 'Edit', input: { file_path: 'failed/edit.md' }, status: 'error' },
+          { name: 'Read', input: { file_path: 'read/only.md' }, status: 'completed' },
+        ] },
+      }, msg);
+      await jest.advanceTimersByTimeAsync(200);
+
+      expect((vault.adapter.list as jest.Mock).mock.calls.map(([dir]) => dir).sort()).toEqual(['drafts', 'notes']);
+    });
+
+    it('refreshes each nested file change once as script progress and completion arrive', async () => {
+      const vault = deps.plugin.app.vault;
+      vault.getAbstractFileByPath = jest.fn().mockReturnValue(null);
+      vault.adapter.list = jest.fn().mockResolvedValue({ files: [], folders: [] });
+      const msg = createTestMessage();
+      deps.state.currentContentEl = createMockEl();
+      const write = { name: 'Write', input: { file_path: 'notes/new.md', content: 'hi' } };
+      const edit = { name: 'Edit', input: { file_path: 'drafts/plan.md' } };
+      const refreshedDirs = () => (vault.adapter.list as jest.Mock).mock.calls.map(([dir]) => dir);
+
+      await controller.handleStreamChunk({ type: 'tool_use', id: 'script-progress', name: 'exec', input: { code: '' } }, msg);
+      await controller.handleStreamChunk({ type: 'tool_output', id: 'script-progress', content: '',
+        toolUseResult: { scriptToolCalls: [{ ...write, status: 'running' }] } }, msg);
+      await controller.handleStreamChunk({ type: 'tool_output', id: 'script-progress', content: '',
+        toolUseResult: { scriptToolCalls: [{ ...write, status: 'completed' }, { ...edit, status: 'running' }] } }, msg);
+      await jest.advanceTimersByTimeAsync(200);
+      expect(refreshedDirs()).toEqual(['notes']);
+      expect(msg.toolCalls?.[0].scriptToolCalls?.map(call => call.status)).toEqual(['completed', 'running']);
+
+      await controller.handleStreamChunk({ type: 'tool_result', id: 'script-progress', content: 'done',
+        toolUseResult: { scriptToolCalls: [{ ...write, status: 'completed' }, { ...edit, status: 'completed' }] } }, msg);
+      await jest.advanceTimersByTimeAsync(200);
+      expect(refreshedDirs()).toEqual(['notes', 'drafts']);
+    });
+
     it('should pass expanded default to apply_patch tool blocks when enabled', async () => {
       const { renderToolCall } = jest.requireMock('@/features/chat/rendering/ToolCallRenderer');
       (deps.plugin.settings as any).expandFileEditsByDefault = true;
@@ -884,7 +983,7 @@ describe('StreamController - Text Content', () => {
         expect.anything(),
         expect.objectContaining({ id: 'patch-1', name: TOOL_APPLY_PATCH }),
         expect.any(Map),
-        { initiallyExpanded: true },
+        expect.objectContaining({ initiallyExpanded: true }),
       );
     });
 
@@ -1044,7 +1143,7 @@ describe('StreamController - Text Content', () => {
       expect(createWriteEditBlock).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ id: 'write-1', name: 'Write' }),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false }),
       );
       // renderToolCall should NOT be called for Write/Edit tools
       expect(renderToolCall).not.toHaveBeenCalled();
@@ -1068,7 +1167,7 @@ describe('StreamController - Text Content', () => {
       expect(createWriteEditBlock).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ id: 'write-1', name: 'Write' }),
-        { initiallyExpanded: true },
+        expect.objectContaining({ initiallyExpanded: true }),
       );
     });
 
@@ -1415,6 +1514,67 @@ describe('StreamController - Text Content', () => {
       jest.advanceTimersByTime(500);
 
       expect(deps.state.thinkingEl).toBeNull();
+    });
+
+    it('drops explicit compaction status once the compaction boundary renders', async () => {
+      const msg = createTestMessage();
+      controller.showThinkingIndicator('Compacting...', 'claudian-thinking--compact');
+      jest.advanceTimersByTime(500);
+      expect(deps.state.waitingStatus).toBe('Compacting...');
+
+      await controller.handleStreamChunk({ type: 'context_compacted' }, msg);
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(500);
+
+      expect(deps.state.waitingStatus).not.toBeNull();
+      expect(deps.state.waitingStatus).not.toBe('Compacting...');
+    });
+
+    it('ignores indicator work left over from a superseded stream', () => {
+      controller.showThinkingIndicator();
+      deps.state.bumpStreamGeneration();
+      jest.advanceTimersByTime(500);
+      expect(deps.state.thinkingEl).toBeNull();
+      expect(deps.state.waitingStatus).toBeNull();
+
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(500);
+      const staleEl = deps.state.thinkingEl;
+      expect(staleEl).not.toBeNull();
+      deps.state.bumpStreamGeneration();
+
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(500);
+      expect(deps.state.thinkingEl).not.toBeNull();
+      expect(deps.state.thinkingEl).not.toBe(staleEl);
+    });
+
+    it('cancels a pending or visible indicator on dispose', () => {
+      controller.showThinkingIndicator();
+      controller.dispose();
+      jest.advanceTimersByTime(500);
+      expect(deps.state.thinkingEl).toBeNull();
+      expect(deps.state.waitingStatus).toBeNull();
+
+      const visible = new StreamController(deps);
+      visible.showThinkingIndicator();
+      jest.advanceTimersByTime(500);
+      expect(deps.state.waitingStatus).not.toBeNull();
+      visible.dispose();
+      expect(deps.state.thinkingEl).toBeNull();
+      expect(deps.state.waitingStatus).toBeNull();
+      expect(deps.state.flavorTimerInterval).toBeNull();
+    });
+
+    it('keeps the pending delay when asked to show again before it elapses', () => {
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(300);
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(300);
+      controller.showThinkingIndicator();
+      jest.advanceTimersByTime(100);
+
+      expect(deps.state.thinkingEl).not.toBeNull();
     });
 
     it('should re-append existing indicator to bottom when called again', () => {
@@ -1827,6 +1987,26 @@ describe('StreamController - Text Content', () => {
 
       expect(deps.renderer.renderContent).toHaveBeenCalledTimes(1);
       expect(deps.renderer.renderContent).toHaveBeenCalledWith(contentEl, 'Hidden reasoning');
+    });
+
+    it('does not scan collapsed thinking deltas for deferred math or diagrams', async () => {
+      const mathSpy = jest.spyOn(markdownMath, 'hasStreamingMathDelimiters');
+      const mermaidSpy = jest.spyOn(displayOnlyCodeFences, 'hasMermaidFence');
+      try {
+        const msg = createTestMessage();
+        for (let i = 0; i < 20; i += 1) {
+          await controller.handleStreamChunk({ type: 'thinking', content: '$x$ ' }, msg);
+        }
+        jest.advanceTimersByTime(500);
+        await Promise.resolve();
+
+        expect(deps.renderer.renderContent).not.toHaveBeenCalled();
+        expect(mathSpy).not.toHaveBeenCalled();
+        expect(mermaidSpy).not.toHaveBeenCalled();
+      } finally {
+        mathSpy.mockRestore();
+        mermaidSpy.mockRestore();
+      }
     });
 
     it('should render accumulated thinking through the coordinator when expanded', async () => {
@@ -2356,7 +2536,7 @@ describe('StreamController - Text Content', () => {
         expect.anything(),
         expect.objectContaining({ id: 'refined-tool', name }),
         expect.any(Map),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false }),
       );
     });
 
@@ -2385,7 +2565,7 @@ describe('StreamController - Text Content', () => {
       expect(createWriteEditBlock).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ id: 'edit-refined', name: 'Edit' }),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false }),
       );
       expect(renderToolCall).not.toHaveBeenCalled();
     });
@@ -2573,7 +2753,7 @@ describe('StreamController - Text Content', () => {
         parentEl,
         toolCall,
         deps.state.toolCallElements,
-        { initiallyExpanded: true },
+        expect.objectContaining({ initiallyExpanded: true }),
       );
       expect(updateToolCallResult).toHaveBeenCalledTimes(1);
       expect(updateToolCallResult).toHaveBeenCalledWith(
@@ -2675,14 +2855,14 @@ describe('StreamController - Text Content', () => {
         parentEl,
         toolCall,
         deps.state.toolCallElements,
-        { initiallyExpanded: true },
+        expect.objectContaining({ initiallyExpanded: true }),
       );
       expect(renderToolCall).toHaveBeenNthCalledWith(
         3,
         parentEl,
         toolCall,
         deps.state.toolCallElements,
-        { initiallyExpanded: true },
+        expect.objectContaining({ initiallyExpanded: true }),
       );
       expect(updateToolCallResult).toHaveBeenCalledTimes(2);
       expect(initialEl.remove).toHaveBeenCalledTimes(1);
@@ -2995,7 +3175,7 @@ describe('StreamController - Text Content', () => {
       deps.getProviderId = () => 'codex';
 
       const subagentState = {
-        info: { id: 'spawn-1', description: 'Codex subagent', prompt: '', status: 'running', toolCalls: [] },
+        info: { id: 'spawn-1', description: 'Codex CLI subagent', prompt: '', status: 'running', toolCalls: [] },
         labelEl: { setText: jest.fn() },
       };
       createSubagentBlock.mockReturnValueOnce(subagentState);
@@ -3039,7 +3219,7 @@ describe('StreamController - Text Content', () => {
       );
 
       expect(createSubagentBlock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-          description: 'Codex subagent (gpt-5.4-mini)',
+          description: 'Codex CLI subagent (gpt-5.4-mini)',
           prompt: 'Inspect utils.ts and return the final patch summary.',
         }));
       expect(subagentState.info.description).toBe('Zeno (gpt-5.4-mini)');
@@ -3712,7 +3892,7 @@ describe('StreamController - Text Content', () => {
         expect.anything(),
         expect.objectContaining({ id: 'mixed-late-output' }),
         expect.any(Map),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false }),
       );
     });
 
@@ -3777,7 +3957,7 @@ describe('StreamController - Text Content', () => {
         expect.anything(),
         expect.objectContaining({ id: 'mixed-output' }),
         expect.any(Map),
-        { initiallyExpanded: false },
+        expect.objectContaining({ initiallyExpanded: false }),
       );
       expect(updateToolCallResult).toHaveBeenCalledWith(
         'mixed-output',

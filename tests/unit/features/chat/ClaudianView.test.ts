@@ -63,7 +63,7 @@ function createModelRefreshTab(providerId: 'codex' | 'grok') {
       permissionToggle: { updateDisplay: jest.fn() },
       serviceTierToggle: { updateDisplay: jest.fn() },
       contextUsageMeter: { update: jest.fn() },
-      thinkingBudgetSelector: { updateDisplay: jest.fn() },
+      effortSelector: { updateDisplay: jest.fn() },
     },
   };
 }
@@ -103,8 +103,8 @@ describe('ClaudianView model refresh routing', () => {
       }));
     jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockReturnValue({
       getReasoningOptions: () => [],
-      isAdaptiveReasoningModel: () => false,
-      getPermissionModeToggle: jest.fn().mockReturnValue(null),
+      supportsReasoningEffort: () => false,
+      getPermissionModeOptions: jest.fn().mockReturnValue(null),
     } as any);
     jest.spyOn(ProviderRegistry, 'getCapabilities').mockImplementation(providerId => ({
       providerId,
@@ -1369,6 +1369,29 @@ describe('ClaudianView tab controls', () => {
     expect(view.isWideSessionLayout).toBe(false);
   });
 
+  it('keeps dual mode and its previews while the view has no width, as in a collapsed sidebar', () => {
+    const viewContainerEl = createMockEl();
+    viewContainerEl.addClass('claudian-wide-session-layout');
+    const view = Object.create(ClaudianView.prototype) as any;
+    attachSessionBrowser(view);
+    const discardProvisionalTabs = jest.fn().mockResolvedValue(undefined);
+    Object.assign(view, {
+      cancelSessionSidebarRendering: jest.fn(),
+      isWideSessionLayout: true,
+      requestedWideSessionLayout: true,
+      sessionLayoutRequestRevision: 0,
+      tabManager: { discardProvisionalTabs, getAllTabs: jest.fn().mockReturnValue([]) },
+      viewContainerEl,
+    });
+
+    view.updateSessionSidebarLayout(0);
+
+    expect(discardProvisionalTabs).not.toHaveBeenCalled();
+    expect(view.pendingSessionLayoutTransition ?? null).toBeNull();
+    expect(view.isWideSessionLayout).toBe(true);
+    expect(viewContainerEl.hasClass('claudian-wide-session-layout')).toBe(true);
+  });
+
   it('cancels a pending compact transition when the view becomes wide again', async () => {
     const viewContainerEl = createMockEl();
     viewContainerEl.addClass('claudian-wide-session-layout');
@@ -1945,23 +1968,106 @@ describe('ClaudianView tab controls', () => {
     expect(setLinkedContentPinned).toHaveBeenCalledWith('Projects/Plan.md', true);
   });
 
-  it('archives linked-content sessions through the existing guarded archive flow', async () => {
+  it('pins many sessions in one batch and retains their provisional tabs', async () => {
+    const provisionalTab = {
+      conversationId: 'conversation-1',
+      lifecycleState: 'provisional',
+      session: createOwnershipSession(() => { provisionalTab.lifecycleState = 'cold'; }),
+    };
+    const setConversationsPinned = jest.fn().mockResolvedValue(undefined);
     const view = Object.create(ClaudianView.prototype) as any;
     attachSessionBrowser(view);
-    view.setConversationArchived = jest.fn().mockResolvedValue(undefined);
+    Object.assign(view, {
+      plugin: { setConversationsPinned },
+      tabManager: { getAllTabs: () => [provisionalTab] },
+    });
 
-    await view.archiveConversations(['conversation-1', 'conversation-2']);
+    await view.setConversationsPinned(['conversation-1', 'conversation-2'], true);
 
-    expect(view.setConversationArchived.mock.calls).toEqual([
-      ['conversation-1', true],
-      ['conversation-2', true],
-    ]);
+    expect(setConversationsPinned).toHaveBeenCalledTimes(1);
+    expect(setConversationsPinned).toHaveBeenCalledWith(['conversation-1', 'conversation-2'], true);
+    expect(provisionalTab.lifecycleState).toBe('cold');
+  });
+
+  it('archives many sessions in one batch after closing their tabs and skips running sessions', async () => {
+    const tabs = [
+      { id: 'open-tab', conversationId: 'conversation-1', state: { isStreaming: false } },
+      { id: 'running-tab', conversationId: 'conversation-3', state: { isStreaming: true } },
+    ];
+    const manager = {
+      closeTab: jest.fn().mockResolvedValue(true),
+      getTabIdentities() { return this.getAllTabs(); },
+      getTab(id: string) { return this.getAllTabs().find((tab: any) => tab.id === id) ?? null; },
+      getAllTabs: jest.fn().mockReturnValue(tabs),
+    };
+    const archiveConversationsIf = jest.fn(async (ids: readonly string[]) => ids.length);
+    const view = Object.create(ClaudianView.prototype) as any;
+    attachSessionBrowser(view);
+    Object.assign(view, {
+      plugin: { getAllViews: jest.fn().mockReturnValue([view]), archiveConversationsIf },
+      tabManager: manager,
+    });
+    view.getTabManager = jest.fn().mockReturnValue(manager);
+
+    await view.archiveConversations(['conversation-1', 'conversation-2', 'conversation-3']);
+
+    expect(manager.closeTab).toHaveBeenCalledTimes(1);
+    expect(manager.closeTab).toHaveBeenCalledWith('open-tab');
+    expect(archiveConversationsIf).toHaveBeenCalledTimes(1);
+    expect(archiveConversationsIf).toHaveBeenCalledWith(['conversation-1', 'conversation-2'], expect.any(Function));
+    expect(manager.closeTab.mock.invocationCallOrder[0])
+      .toBeLessThan(archiveConversationsIf.mock.invocationCallOrder[0]);
+    expect(Notice).toHaveBeenCalledWith('Skipped 1 session that is open or running');
+  });
+
+  it('does not archive a session reopened while a later session in the batch is still closing', async () => {
+    let tabs: Array<{ id: string; conversationId: string; state: { isStreaming: boolean } }> = [
+      { id: 'tab-1', conversationId: 'conversation-1', state: { isStreaming: false } },
+      { id: 'tab-2', conversationId: 'conversation-2', state: { isStreaming: false } },
+    ];
+    let releaseSecondClose!: () => void;
+    const manager = {
+      closeTab: jest.fn(async (tabId: string) => {
+        if (tabId === 'tab-2') {
+          await new Promise<void>((resolve) => { releaseSecondClose = resolve; });
+        }
+        tabs = tabs.filter(tab => tab.id !== tabId);
+        return true;
+      }),
+      getTabIdentities: () => tabs,
+      getTab: (id: string) => tabs.find(tab => tab.id === id) ?? null,
+      getAllTabs: () => tabs,
+    };
+    const archived: string[] = [];
+    const archiveConversationsIf = jest.fn(async (
+      ids: readonly string[],
+      shouldArchive: (conversation: { id: string }) => boolean,
+    ) => {
+      for (const id of ids) if (shouldArchive({ id })) archived.push(id);
+      return archived.length;
+    });
+    const view = Object.create(ClaudianView.prototype) as any;
+    attachSessionBrowser(view);
+    Object.assign(view, {
+      plugin: { getAllViews: jest.fn().mockReturnValue([view]), archiveConversationsIf },
+      tabManager: manager,
+    });
+    view.getTabManager = jest.fn().mockReturnValue(manager);
+
+    const archiving = view.archiveConversations(['conversation-1', 'conversation-2']);
+    await new Promise(resolve => setImmediate(resolve));
+    tabs.push({ id: 'reopened', conversationId: 'conversation-1', state: { isStreaming: true } });
+    releaseSecondClose();
+    await archiving;
+
+    expect(archived).toEqual(['conversation-2']);
+    expect(Notice).toHaveBeenCalledWith('Skipped 1 session that is open or running');
   });
 
   it('formats persisted model metadata for the session hover card', () => {
     jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockReturnValue({
       getReasoningOptions: () => [],
-      isAdaptiveReasoningModel: () => false,
+      supportsReasoningEffort: () => false,
       getModelOptions: jest.fn().mockReturnValue([
         { value: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
       ]),
@@ -2285,6 +2391,7 @@ describe('ClaudianView runtime tab initialization', () => {
         ensureConversationMetadataLoaded: jest.fn().mockResolvedValue(undefined),
         registerTabWorkspaceStateDelivery: jest.fn()
           .mockReturnValue(readyTabWorkspaceStateDelivery()),
+        registerZenModeSource: jest.fn(() => jest.fn()),
         settings: { restoreTabsOnStartup: true },
       },
       sessionSidebarWidth: null,
@@ -2338,6 +2445,11 @@ describe('ClaudianView runtime tab initialization', () => {
 
     expect(view.updateTabBar).toHaveBeenCalledTimes(2);
     expect(view.notifyConversationNavigationChanged).toHaveBeenCalledTimes(2);
+
+    // A provider switch on the same tab recolours the view, which also notifies zen.
+    view.syncProviderBrandColor.mockClear();
+    tabManagerCallbacks.onTabProviderChanged('restored-1', 'codex');
+    expect(view.syncProviderBrandColor).toHaveBeenCalledTimes(1);
   });
 
   it('abandons deferred restoration when view shutdown begins', async () => {
@@ -2389,6 +2501,7 @@ describe('ClaudianView runtime tab initialization', () => {
         ensureConversationMetadataLoaded: jest.fn().mockResolvedValue(undefined),
         registerTabWorkspaceStateDelivery: jest.fn()
           .mockReturnValue(readyTabWorkspaceStateDelivery()),
+        registerZenModeSource: jest.fn(() => jest.fn()),
         settings: { restoreTabsOnStartup: true },
       },
       restoreActiveInputToTabContent: jest.fn(),
@@ -2407,9 +2520,15 @@ describe('ClaudianView runtime tab initialization', () => {
     });
 
     await view.onOpenImpl();
+    expect(view.plugin.registerZenModeSource).toHaveBeenCalledWith(view);
+    expect(view.getZenRuntime()).toBeNull();
+    const unregisterZen = view.plugin.registerZenModeSource.mock.results[0].value as jest.Mock;
     const restoring = view.setState({}, { history: false });
     await Promise.resolve();
     const closing = view.onClose();
+    // Zen presentation returns synchronously, before asynchronous shutdown begins.
+    expect(unregisterZen).toHaveBeenCalledTimes(1);
+    expect(unregisterZen.mock.invocationCallOrder[0]).toBeLessThan(beginShutdown.mock.invocationCallOrder[0]);
     persistedState.resolve({ activeTabId: null, openTabs: [] });
     await expect(Promise.all([restoring, closing])).resolves.toEqual([undefined, undefined]);
 
@@ -2462,6 +2581,7 @@ describe('ClaudianView runtime tab initialization', () => {
         claimLegacyTabManagerState,
         completeLegacyTabManagerStateMigration: jest.fn().mockResolvedValue(undefined),
         ensureConversationMetadataLoaded: jest.fn().mockResolvedValue(undefined),
+        registerZenModeSource: jest.fn(() => jest.fn()),
         settings: { restoreTabsOnStartup: true },
       },
       notifyConversationNavigationChanged: jest.fn(),
@@ -2545,6 +2665,7 @@ describe('ClaudianView runtime tab initialization', () => {
         claimLegacyTabManagerState,
         completeLegacyTabManagerStateMigration: jest.fn().mockResolvedValue(undefined),
         ensureConversationMetadataLoaded: jest.fn().mockResolvedValue(undefined),
+        registerZenModeSource: jest.fn(() => jest.fn()),
         settings: { restoreTabsOnStartup: false },
       },
       notifyConversationNavigationChanged: jest.fn(),
@@ -3450,14 +3571,22 @@ describe('ClaudianView Escape handling', () => {
 
   function createEscapeHarness(options: {
     isStreaming: boolean;
+    toolbarMenuOpen?: boolean;
   }): {
     cancelInlineRename: jest.Mock;
     cancelStreaming: jest.Mock;
+    closeOpenMenu: jest.Mock;
     eventRefs: unknown[];
     view: any;
   } {
     const cancelInlineRename = jest.fn().mockReturnValue(false);
     const cancelStreaming = jest.fn();
+    let toolbarMenuOpen = options.toolbarMenuOpen ?? false;
+    const closeOpenMenu = jest.fn(() => {
+      const wasOpen = toolbarMenuOpen;
+      toolbarMenuOpen = false;
+      return wasOpen;
+    });
     const eventRefs: unknown[] = [];
     const parentScope = new Scope();
     const view = Object.create(ClaudianView.prototype) as any;
@@ -3512,12 +3641,13 @@ describe('ClaudianView Escape handling', () => {
           linkedContentController: {
             handleActiveFileMetadataChanged: jest.fn(),
           },
+          toolbarMenus: { closeOpenMenu },
         },
       }),
     };
 
     view.sessionBrowser.cancelInlineRename = cancelInlineRename;
-    return { cancelInlineRename, cancelStreaming, eventRefs, view };
+    return { cancelInlineRename, cancelStreaming, closeOpenMenu, eventRefs, view };
   }
 
   function createScopedSendHarness(options: {
@@ -3618,6 +3748,25 @@ describe('ClaudianView Escape handling', () => {
 
     expect(cancelStreaming).toHaveBeenCalledTimes(1);
     expect(result).toBe(false);
+  });
+
+  it('closes an open toolbar menu instead of cancelling the turn when the scope sees Escape first', () => {
+    const { cancelStreaming, closeOpenMenu, view } = createEscapeHarness({
+      isStreaming: true,
+      toolbarMenuOpen: true,
+    });
+
+    view.wireEventHandlers();
+    const escapeHandler = view.scope.handlers.find((handler: any) => handler.key === 'Escape');
+    const result = escapeHandler.func({ key: 'Escape', isComposing: false } as KeyboardEvent);
+
+    expect(closeOpenMenu).toHaveBeenCalledTimes(1);
+    expect(cancelStreaming).not.toHaveBeenCalled();
+    expect(result).toBe(false);
+
+    // With the menu closed, the next Escape cancels as before.
+    escapeHandler.func({ key: 'Escape', isComposing: false } as KeyboardEvent);
+    expect(cancelStreaming).toHaveBeenCalledTimes(1);
   });
 
   it('consumes scoped Escape without cancelling when not streaming', () => {

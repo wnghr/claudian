@@ -1,5 +1,6 @@
 import { FakeSideBackend } from '@test/helpers/features/chat/SideChatSessionHarness';
 import { waitFor } from '@testing-library/dom';
+import { Component } from 'obsidian';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
@@ -119,6 +120,7 @@ export function createHarness(options: {
   const app = { vault: { adapter: { basePath: '/vault' }, getFiles: () => [] } };
   const settings = options.settings ?? {};
   const plugin = {
+    getSessionSnapshotDirectory: () => '/tmp/claudian-sessions',
     app,
     getConversationSummary(id: string) { return (this as unknown as { getConversationSync: (id: string) => any }).getConversationSync(id); },
     getConversationSync: () => options.providerState ? { id: 'conversation-1', providerId: 'claude', providerState: options.providerState } : null,
@@ -133,7 +135,7 @@ export function createHarness(options: {
     getInput: () => inputEl, getImages: () => imageContextManager as never, getDestination: () => controller.destination,
   });
   const controller = new SideChatController({
-    component: { register: () => undefined } as never,
+    component: new Component(),
     composerEl,
     drafts,
     getInputEl: () => inputEl as never,

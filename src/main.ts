@@ -1,3 +1,4 @@
+import { SessionSnapshotStore } from './app/conversations/SessionSnapshotStore';
 import { StartupProfiler } from './core/performance/StartupProfiler';
 // Must run before any SDK imports to patch Electron/Node.js realm incompatibility
 import { patchSetMaxListenersForElectron } from './utils/electronCompat';
@@ -11,6 +12,7 @@ import type { Editor, TAbstractFile, WorkspaceLeaf } from 'obsidian';
 import { ItemView, MarkdownView, Notice, Plugin, TFile, TFolder } from 'obsidian';
 
 import { ConversationRepository } from './app/conversations/ConversationRepository';
+import { NativeSessionArchiveSync } from './app/conversations/NativeSessionArchiveSync';
 import { SessionMetadataLoader } from './app/conversations/SessionMetadataLoader';
 import { ChatModelSelectionCoordinator } from './app/settings/ChatModelSelectionCoordinator';
 import { DEFAULT_CLAUDIAN_SETTINGS } from './app/settings/defaultSettings';
@@ -32,6 +34,10 @@ import type { SessionMetadataReadResult } from './core/bootstrap/SessionStorage'
 import type { SharedAppStorage } from './core/bootstrap/storage';
 import { ClaudianProviderHost } from './composition/ClaudianProviderHost';
 import { isClaudianView } from './composition/claudianViews';
+import {
+  decodeTabWorkspaceViewState,
+  TAB_WORKSPACE_VIEW_STATE_KEY,
+} from './core/bootstrap/tabManagerState';
 import {
   ProviderExecutionLifecycleRegistry,
   type ProviderExecutionTransitionScope,
@@ -124,6 +130,9 @@ import {
   readZotFlowStoragePath,
   resolveZotFlowDataFilePath,
 } from './features/chat/linked-content/ZotFlowPaths';
+import { InactiveSessionArchiver } from './features/chat/session-manager/InactiveSessionArchiver';
+import type { ZenModeSource } from './features/chat/zen/types';
+import { ZenModeController } from './features/chat/zen/ZenModeController';
 import { InlineEditSessionOwner } from './features/inline-edit/InlineEditSessionOwner';
 import { type InlineEditContext, InlineEditModal } from './features/inline-edit/ui/InlineEditModal';
 import { ClaudianSettingTab } from './features/settings/ClaudianSettings';
@@ -153,7 +162,13 @@ export default class ClaudianPlugin extends Plugin {
   private sessionMetadata!: SessionMetadataLoader;
   private providerChatOptionsChangeTail: Promise<void> = Promise.resolve();
   private readonly inlineEditSessions = new InlineEditSessionOwner();
+  private readonly inactiveSessionArchiver = new InactiveSessionArchiver(this);
+  private readonly zenMode = new ZenModeController({
+    app: this.app,
+    isEnabled: () => this.getCommittedSettings().enableZenMode,
+  });
   private isUnloading = false;
+  private vaultRefreshTimer: number | undefined;
   private applicationShutdownPromise: Promise<void> | null = null;
   private tabWorkspaceMigrationCoordinator!: TabWorkspaceMigrationCoordinator;
   private paperReader: PaperReader | null = null;
@@ -426,7 +441,30 @@ export default class ClaudianPlugin extends Plugin {
     return createEmbeddingClient({ config });
   }
   private readonly startupMaintenanceAbort = new AbortController();
+  private readonly nativeSessionArchives = new NativeSessionArchiveSync({
+    getConversation: id => this.conversationRepository.getSync(id),
+    getSessionArchive: async (providerId) => {
+      if (!ProviderWorkspaceRegistry.providesSessionArchive(providerId)) return null;
+      await ProviderWorkspaceRegistry.ensureInitialized(this.providerHost, providerId, 'session-archive');
+      return ProviderWorkspaceRegistry.getIfInitialized(providerId)?.sessionArchive ?? null;
+    },
+    onFailure: (providerId, error) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      new Notice(`${ProviderRegistry.getProviderDisplayName(providerId)} could not archive or restore its sessions: ${reason}`);
+    },
+  });
   private modelMetadataMigration: Promise<void> | null = null;
+  private readonly sessionSnapshots = new SessionSnapshotStore();
+  private sessionSnapshotCleanup: Promise<void> | null = null;
+
+  writeSessionSnapshot(conversationId: string, markdown: string): Promise<string> {
+    return this.sessionSnapshots.write(conversationId, markdown);
+  }
+
+  getSessionSnapshotDirectory(): string {
+    return this.sessionSnapshots.directory;
+  }
+
   private sessionInputCleanup: Promise<void> | null = null;
   private sessionInputCleanupTimer: number | null = null;
 
@@ -437,6 +475,7 @@ export default class ClaudianPlugin extends Plugin {
         'settings-load',
         () => this.loadSettings({ deferNonRestoredSessionMetadata: true }),
       );
+      this.zenMode.start();
       // Provider workspace services are initialized lazily on first use.
 
       this.registerView(
@@ -458,7 +497,7 @@ export default class ClaudianPlugin extends Plugin {
         for (const view of this.getAllViews()) {
           view.handleLinkedContentCreated(file.path);
         }
-        this.notifyConversationViewsChanged();
+        this.scheduleVaultRefresh();
       }));
 
       this.addRibbonIcon('bot', 'Open Claudian', () => {
@@ -594,6 +633,7 @@ export default class ClaudianPlugin extends Plugin {
         this.sessionInputCleanupTimer = window.setTimeout(() => {
           this.sessionInputCleanupTimer = null;
           if (this.isUnloading) return;
+          this.sessionSnapshotCleanup = this.sessionSnapshots.sweep(this.startupMaintenanceAbort.signal);
           this.sessionInputCleanup = this.storage.cleanupObsoleteSessionInputs(this.startupMaintenanceAbort.signal);
         }, 0);
       });
@@ -610,6 +650,10 @@ export default class ClaudianPlugin extends Plugin {
 
   onunload(): void {
     this.isUnloading = true;
+    // Return any zen presentation to its view before asynchronous shutdown.
+    this.zenMode.dispose();
+    window.clearTimeout(this.vaultRefreshTimer);
+    this.vaultRefreshTimer = undefined;
     this.startupMaintenanceAbort.abort();
     if (this.sessionInputCleanupTimer !== null) {
       window.clearTimeout(this.sessionInputCleanupTimer);
@@ -625,8 +669,11 @@ export default class ClaudianPlugin extends Plugin {
     await Promise.allSettled([
       this.sessionMetadata?.dispose(),
       this.sessionInputCleanup,
+      this.sessionSnapshotCleanup,
       ...this.getAllViews().map(view => view.prepareForPluginUnload()),
     ]);
+    // Admitted native archive work needs provider services that are disposed below.
+    await this.nativeSessionArchives.dispose();
     try {
       await this.executionLifecycleRegistry.dispose();
     } catch {
@@ -738,7 +785,7 @@ export default class ClaudianPlugin extends Plugin {
     try {
       await deleteLegacyMCPConfig(sharedStorage.getAdapter());
     } catch {
-      new Notice('Failed to remove obsolete Claude configuration');
+      new Notice('Failed to remove obsolete Claude Code configuration');
     }
     const { claudian } = await sharedStorage.initialize();
     this.settings = {
@@ -791,6 +838,7 @@ export default class ClaudianPlugin extends Plugin {
         }
       },
       onConversationListChanged: () => this.notifyConversationViewsChanged(),
+      onAllMetadataLoaded: () => this.archiveInactiveSessions(),
     });
     const didNormalizePendingSessionInvalidations = this.runtimeSettings.syncPendingSessionInvalidations();
 
@@ -904,15 +952,22 @@ export default class ClaudianPlugin extends Plugin {
     };
     const timestampsChanged = settings.showMessageTimestamps !== previous.showMessageTimestamps;
     const layoutChanged = settings.enableDualPane !== previous.enableDualPane || settings.dualPaneSide !== previous.dualPaneSide;
-    const commandsChanged = JSON.stringify(settings.hiddenProviderCommands) !== JSON.stringify(previous.hiddenProviderCommands);
+    const commandsChanged = JSON.stringify(settings.hiddenCommands) !== JSON.stringify(previous.hiddenCommands);
     const contextChanged = JSON.stringify(settings.customContextLimits) !== JSON.stringify(previous.customContextLimits);
     if (timestampsChanged || layoutChanged || commandsChanged || contextChanged) {
       for (const view of this.getAllViews()) {
         if (timestampsChanged) publish(() => view.refreshMessageTimestamps());
         if (layoutChanged) publish(() => view.refreshDualPaneLayout());
-        if (commandsChanged) publish(() => view.updateHiddenProviderCommands());
+        if (commandsChanged) publish(() => view.updateHiddenCommands());
         if (contextChanged) publish(() => view.refreshModelSelector());
       }
+    }
+    if (settings.enableZenMode !== previous.enableZenMode) publish(() => this.zenMode.reconcile());
+    if (
+      settings.sessionAutoArchiveAfter !== previous.sessionAutoArchiveAfter
+      && this.sessionMetadata.hasLoadedAll
+    ) {
+      this.archiveInactiveSessions();
     }
     if (settings.maxWarmAgentProcesses !== previous.maxWarmAgentProcesses) {
       try {
@@ -1198,8 +1253,59 @@ export default class ClaudianPlugin extends Plugin {
   }
 
   async setConversationArchived(id: string, isArchived: boolean): Promise<void> {
-    await this.conversationRepository.setArchived(id, isArchived);
+    const changed = await this.conversationRepository.setArchived(id, isArchived);
     this.notifyConversationViewsChanged();
+    if (changed) await this.nativeSessionArchives.sync([id]);
+  }
+
+  async setConversationsPinned(ids: readonly string[], isPinned: boolean): Promise<void> {
+    await this.mutateConversations(ids, id => this.conversationRepository.setPinned(id, isPinned));
+  }
+
+  async restoreConversations(ids: readonly string[]): Promise<void> {
+    const restoredIds: string[] = [];
+    try {
+      await this.mutateConversations(ids, async (id) => {
+        if (await this.conversationRepository.setArchived(id, false)) restoredIds.push(id);
+      });
+    } finally {
+      await this.nativeSessionArchives.sync(restoredIds);
+    }
+  }
+
+  async archiveConversationsIf(
+    ids: readonly string[],
+    shouldArchive: (conversation: Readonly<Conversation>) => boolean,
+  ): Promise<number> {
+    const archivedIds: string[] = [];
+    try {
+      await this.mutateConversations(ids, async (id) => {
+        if (await this.conversationRepository.archiveIf(id, shouldArchive)) archivedIds.push(id);
+      });
+    } finally {
+      await this.nativeSessionArchives.sync(archivedIds);
+    }
+    return archivedIds.length;
+  }
+
+  /** Applies independent per-session writes, then refreshes views once. */
+  private async mutateConversations(
+    ids: readonly string[],
+    mutate: (id: string) => Promise<void>,
+  ): Promise<void> {
+    const results = await Promise.allSettled(ids.map(mutate));
+    this.notifyConversationViewsChanged();
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failure) throw failure.reason;
+  }
+
+  private archiveInactiveSessions(): void {
+    if (this.isUnloading) return;
+    void this.inactiveSessionArchiver.run().catch(() => {
+      new Notice('Failed to auto-archive inactive sessions');
+    });
   }
 
   private async handleLinkedContentRename(
@@ -1210,13 +1316,16 @@ export default class ClaudianPlugin extends Plugin {
     for (const view of this.getAllViews()) {
       view.handleLinkedContentRenamed(oldPath, file.path, includeDescendants);
     }
-    await this.rewriteLinkedContentPaths(oldPath, file.path, includeDescendants);
-    await this.pinnedLinkedContentPaths.rewritePaths(
-      oldPath,
-      file.path,
-      includeDescendants,
-    );
-    this.notifyConversationViewsChanged();
+    await this.conversationRepository.rewriteLinkedContentPaths(oldPath, file.path, { includeDescendants });
+    try {
+      await this.pinnedLinkedContentPaths.rewritePaths(
+        oldPath,
+        file.path,
+        includeDescendants,
+      );
+    } finally {
+      this.scheduleVaultRefresh();
+    }
   }
 
   private async handlePinnedLinkedContentDeleted(file: TAbstractFile): Promise<void> {
@@ -1230,7 +1339,7 @@ export default class ClaudianPlugin extends Plugin {
         includeDescendants,
       );
     } finally {
-      this.notifyConversationViewsChanged();
+      this.scheduleVaultRefresh();
     }
   }
 
@@ -1253,6 +1362,14 @@ export default class ClaudianPlugin extends Plugin {
   async setConversationLinkedContentPath(id: string, path: string): Promise<void> {
     await this.conversationRepository.setLinkedContentPath(id, path);
     this.notifyConversationViewsChanged();
+  }
+
+  private scheduleVaultRefresh(): void {
+    if (this.isUnloading || this.vaultRefreshTimer !== undefined) return;
+    this.vaultRefreshTimer = window.setTimeout(() => {
+      this.vaultRefreshTimer = undefined;
+      if (!this.isUnloading) this.notifyConversationViewsChanged();
+    }, 50);
   }
 
   private notifyConversationViewsChanged(): void {
@@ -1341,6 +1458,10 @@ export default class ClaudianPlugin extends Plugin {
     await this.tabWorkspaceMigrationCoordinator.completeMigration();
   }
 
+  registerZenModeSource(source: ZenModeSource): () => void {
+    return this.zenMode.register(source);
+  }
+
   getView(): ClaudianView | null {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLAUDIAN);
     const activeView = this.app.workspace.getActiveViewOfType(ItemView);
@@ -1348,6 +1469,21 @@ export default class ClaudianPlugin extends Plugin {
       return activeView;
     }
     return leaves.map(leaf => leaf.view).find(isClaudianView) ?? null;
+  }
+
+  getWorkspaceConversationIds(): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLAUDIAN)) {
+      const liveTabs = isClaudianView(leaf.view) ? leaf.view.getTabManager()?.getTabIdentities() ?? [] : [];
+      // Deferred leaves keep their saved state; mounted views report pending restoration through getState().
+      const savedTabs = decodeTabWorkspaceViewState(
+        leaf.getViewState().state?.[TAB_WORKSPACE_VIEW_STATE_KEY],
+      )?.openTabs ?? [];
+      for (const { conversationId } of [...liveTabs, ...savedTabs]) {
+        if (conversationId) ids.add(conversationId);
+      }
+    }
+    return ids;
   }
 
   getAllViews(): ClaudianView[] {

@@ -1,76 +1,90 @@
 import type { ProviderCommandCatalog } from '../../../core/providers/commands/ProviderCommandCatalog';
-import type { ProviderVaultEntryRepository } from '../../../core/providers/commands/ProviderVaultEntryRepository';
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
+import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
   ProviderCLIResolver,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
-import type { VaultFileAdapter } from '../../../core/storage/VaultFileAdapter';
 import {
   ClaudeCommandCatalog,
   type CommandProbe,
 } from '../commands/ClaudeCommandCatalog';
 import { probeRuntimeCommands } from '../commands/probeRuntimeCommands';
+import type { ClaudeDiscoveredModel } from '../modelCatalog';
 import { ClaudeCLIResolver } from '../runtime/ClaudeCLIResolver';
-import { ClaudeModelCatalog } from '../runtime/ClaudeModelCatalog';
-import { createClaudeModels } from '../runtime/ClaudeModels';
-import { SkillStorage } from '../storage/SkillStorage';
-import { SlashCommandStorage } from '../storage/SlashCommandStorage';
+import {
+  applySessionClaudeModels,
+  type ClaudeModelProbe,
+  createClaudeModels,
+  discoverClaudeModels,
+} from '../runtime/ClaudeModels';
 import { createClaudeSettingsTabRenderer } from '../ui/ClaudeSettingsTab';
 
 export interface ClaudeWorkspaceServices extends ProviderWorkspaceServices {
   cliResolver: ProviderCLIResolver;
   commandCatalog: ProviderCommandCatalog;
-  vaultCommandRepository: ProviderVaultEntryRepository;
+  /** Writes back the model list a live session reported at init. */
+  publishSessionModels(models: ClaudeDiscoveredModel[]): Promise<void>;
   dispose(): Promise<void>;
 }
 
 export interface ClaudeWorkspaceServicesOptions {
   readonly commandProbe?: CommandProbe;
-  readonly modelProbe?: ConstructorParameters<typeof ClaudeModelCatalog>[1];
+  readonly modelProbe?: ClaudeModelProbe;
 }
 
 export async function createClaudeWorkspaceServices(
   plugin: ProviderHost,
-  adapter: VaultFileAdapter,
   options: ClaudeWorkspaceServicesOptions = {},
 ): Promise<ClaudeWorkspaceServices> {
   const cliResolver = new ClaudeCLIResolver();
-  const nativeCatalog = new ClaudeModelCatalog(plugin, options.modelProbe);
-  const modelCatalog = createClaudeModels(plugin, nativeCatalog);
+  const modelCatalog = createClaudeModels(plugin, signal => discoverClaudeModels(plugin, signal, options.modelProbe));
 
   const commandCatalog = new ClaudeCommandCatalog(
-    new SlashCommandStorage(adapter),
-    new SkillStorage(adapter),
     options.commandProbe ?? (signal => probeRuntimeCommands(plugin, signal)),
   );
+  let transitioning = false;
+  let disposed = false;
   const unregisterTransitionHook = plugin.executionLifecycleRegistry
     .registerTransitionHook('claude', {
       beforeTransition: async () => {
+        transitioning = true;
         modelCatalog.beginTransition();
-        await nativeCatalog.cancel();
+        await modelCatalog.quiesce();
         await commandCatalog.beginEnvironmentTransition();
       },
-      afterTransition: () => { commandCatalog.endEnvironmentTransition(); modelCatalog.endTransition(); },
+      afterTransition: () => {
+        commandCatalog.endEnvironmentTransition();
+        modelCatalog.endTransition();
+        transitioning = false;
+      },
     });
   let disposePromise: Promise<void> | null = null;
 
   return {
     cliResolver,
     commandCatalog,
-    vaultCommandRepository: commandCatalog,
-    settingsTabRenderer: createClaudeSettingsTabRenderer({ cliResolver, vaultCommandRepository: commandCatalog, modelCatalog }),
+    settingsTabRenderer: createClaudeSettingsTabRenderer({ cliResolver, modelCatalog }),
     modelCatalog,
+    async publishSessionModels(models) {
+      // A session reporting across an environment transition may describe the old runtime.
+      await applySessionClaudeModels(plugin, models, () => !disposed && !transitioning);
+    },
     dispose() {
       if (disposePromise) return disposePromise;
+      disposed = true;
       unregisterTransitionHook();
-      disposePromise = Promise.all([commandCatalog.dispose(), modelCatalog.dispose(), nativeCatalog.dispose()]).then(() => undefined);
+      disposePromise = Promise.all([commandCatalog.dispose(), modelCatalog.dispose()]).then(() => undefined);
       return disposePromise;
     },
   };
 }
 
 export const claudeWorkspaceRegistration: ProviderWorkspaceRegistration<ClaudeWorkspaceServices> = {
-  initialize: async ({ plugin, vaultAdapter }) => createClaudeWorkspaceServices(plugin, vaultAdapter),
+  initialize: async ({ plugin }) => createClaudeWorkspaceServices(plugin),
 };
+
+export function getClaudeWorkspaceServices(): ClaudeWorkspaceServices | null {
+  return ProviderWorkspaceRegistry.getIfInitialized('claude') as ClaudeWorkspaceServices | null;
+}

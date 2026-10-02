@@ -5,7 +5,7 @@ import {
 } from '../../core/bootstrap/storagePaths';
 import { normalizeLinkedContentPath } from '../../core/path/LinkedContentPath';
 import {
-  normalizeHiddenProviderCommands,
+  migrateHiddenCommands,
 } from '../../core/providers/commands/hiddenCommands';
 import { decodeProviderModelSelectionId, toProviderRuntimeModelId } from '../../core/providers/modelSelection';
 import {
@@ -37,6 +37,7 @@ const RETIRED_SHARED_SETTING_FIELDS = [
   'pinnedLinkedNotePaths',
   'enableFilePane',
   'persistentExternalContextPaths',
+  'hiddenProviderCommands',
 ] as const;
 
 function getProviderSettingsAdapters() {
@@ -63,6 +64,12 @@ function normalizeEnableDualPane(value: unknown): boolean {
   return typeof value === 'boolean'
     ? value
     : DEFAULT_CLAUDIAN_SETTINGS.enableDualPane;
+}
+
+function normalizeEnableZenMode(value: unknown): boolean {
+  return typeof value === 'boolean'
+    ? value
+    : DEFAULT_CLAUDIAN_SETTINGS.enableZenMode;
 }
 
 function normalizeDualPaneSide(value: unknown): DualPaneSide {
@@ -131,11 +138,15 @@ function normalizePinnedLinkedContentPaths(value: unknown): string[] {
 
 function shouldPersistChatViewNormalization(
   stored: Record<string, unknown>,
+  enableZenMode: boolean,
   enableDualPane: boolean,
   dualPaneSide: DualPaneSide,
   restoreTabsOnStartup: boolean,
 ): boolean {
   return 'enableFilePane' in stored || (
+    'enableZenMode' in stored
+    && stored.enableZenMode !== enableZenMode
+  ) || (
     'enableDualPane' in stored
     && stored.enableDualPane !== enableDualPane
   ) || (
@@ -263,7 +274,7 @@ function pruneDeselectedProviderProjections(settings: Record<string, unknown>): 
     const model = savedModels?.[providerId];
     if (typeof model !== 'string') continue;
     if (selected.some(id => typeof id === 'string' && normalize(id) === normalize(model))) continue;
-    for (const key of ['savedProviderModel', 'savedProviderEffort', 'savedProviderThinkingBudget', 'savedProviderServiceTier']) {
+    for (const key of ['savedProviderModel', 'savedProviderEffort', 'savedProviderServiceTier']) {
       const values = cleaned[key];
       if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
       const remaining = { ...values } as Record<string, unknown>;
@@ -456,7 +467,7 @@ export class ClaudianSettingsStorage {
       : migrateLegacyChatModelSelection(stored);
     const didNormalizeChatModelSelection = !hasStoredChatModelSelection
       || JSON.stringify(lastSelectedChatModel) !== JSON.stringify(stored.lastSelectedChatModel);
-    const hiddenProviderCommands = normalizeHiddenProviderCommands(stored.hiddenProviderCommands);
+    const hiddenCommands = migrateHiddenCommands(stored);
     const envSnippets = normalizeEnvSnippets(stored.envSnippets);
     const {
       changed: didStripRuntimeProviderConfig,
@@ -469,8 +480,10 @@ export class ClaudianSettingsStorage {
     const chatViewPlacement = isChatViewPlacement(stored.chatViewPlacement)
       ? stored.chatViewPlacement
       : DEFAULT_CLAUDIAN_SETTINGS.chatViewPlacement;
+    const enableZenMode = normalizeEnableZenMode(stored.enableZenMode);
     const enableDualPane = normalizeEnableDualPane(stored.enableDualPane);
     const dualPaneSide = normalizeDualPaneSide(stored.dualPaneSide);
+    const skillsSynced = stored.skillsSynced === true;
     const restoreTabsOnStartup = normalizeRestoreTabsOnStartup(
       stored.restoreTabsOnStartup,
     );
@@ -491,7 +504,7 @@ export class ClaudianSettingsStorage {
     );
     const normalizedProviderSettings = {
       ...stored,
-      hiddenProviderCommands,
+      hiddenCommands,
       providerConfigs,
     };
     const storedSharedSettings = stripRetiredSharedFields({
@@ -502,15 +515,17 @@ export class ClaudianSettingsStorage {
       ...storedSharedSettings,
       sharedEnvironmentVariables: getSharedEnvironmentVariables(normalizedProviderSettings),
       envSnippets,
-      hiddenProviderCommands,
+      hiddenCommands,
       providerConfigs,
       chatViewPlacement,
+      enableZenMode,
       enableDualPane,
       dualPaneSide,
       restoreTabsOnStartup,
       llmForZoteroCacheRoot,
       zoteroDataDirectory,
       enableZoteroSupport,
+      skillsSynced,
       sessionManagerOrganization,
       pinnedLinkedContentPaths,
       lastSelectedChatModel,
@@ -542,6 +557,7 @@ export class ClaudianSettingsStorage {
       || ('chatViewPlacement' in stored && stored.chatViewPlacement !== chatViewPlacement)
       || shouldPersistChatViewNormalization(
         stored,
+        enableZenMode,
         enableDualPane,
         dualPaneSide,
         restoreTabsOnStartup,
@@ -562,6 +578,11 @@ export class ClaudianSettingsStorage {
           !== JSON.stringify(pinnedLinkedContentPaths)
       )
       || JSON.stringify(envSnippets) !== JSON.stringify(stored.envSnippets ?? [])
+      || 'hiddenProviderCommands' in stored
+      || (
+        'hiddenCommands' in stored
+        && JSON.stringify(hiddenCommands) !== JSON.stringify(stored.hiddenCommands)
+      )
       || didNormalizeProviderSettings
       || didStripRuntimeProviderConfig
       || didMigrateCurrentDeviceProviderConfigs

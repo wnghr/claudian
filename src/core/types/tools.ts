@@ -1,4 +1,5 @@
 import type { DiffLine, DiffStats } from './diff';
+import type { ImageAttachment } from './chat';
 
 /** Diff data for Write/Edit tool operations (pre-computed from SDK structuredPatch). */
 export interface ToolDiffData {
@@ -28,7 +29,31 @@ export interface AskUserQuestionItem {
 /** User-provided answers keyed by question text or stable question id. */
 export type AskUserAnswers = Record<string, string | string[]>;
 
-import type { ImageAttachment } from './chat';
+/** One web search hit, as far as the provider reports it. */
+export interface WebSearchResultItem {
+  title: string;
+  url: string;
+  snippet?: string;
+  publishedAt?: string;
+}
+
+/** Image produced by a tool: a local file or inline base64 data. */
+export type ToolResultImage =
+  | { kind: 'file'; path: string; alt?: string }
+  | { kind: 'data'; mediaType: string; data: string; alt?: string };
+
+/** A call a script tool made to another tool; it never reached the model as its own tool call. */
+export interface ScriptToolCallItem {
+  /** Shared tool name when the provider maps one. */
+  name: string;
+  /** Input in the shared renderer shape, when the provider reports complete arguments. */
+  input?: Record<string, unknown>;
+  /** Provider-formatted arguments, shown only when `input` is absent. */
+  args?: string;
+  status: 'running' | 'completed' | 'error' | 'cancelled';
+  durationMs?: number;
+  error?: string;
+}
 
 /** Provider-owned fields for lossless per-tool replay and persistence. */
 export interface ToolProviderPayload {
@@ -45,10 +70,20 @@ export interface ToolCallInfo {
   status: 'running' | 'completed' | 'error' | 'blocked';
   result?: string;
   images?: ImageAttachment[];
+  /** Plain results are displayed verbatim; unmarked Read results retain legacy gutter decoding. */
+  resultFormat?: 'plain';
   providerPayload?: ToolProviderPayload;
   isExpanded?: boolean;
   diffData?: ToolDiffData;
   resolvedAnswers?: AskUserAnswers;
+  /** Structured web search hits; renderers fall back to result text when absent. */
+  webSearchResults?: WebSearchResultItem[];
+  /** Provider-synthesized answer accompanying structured hits. */
+  webSearchSummary?: string;
+  /** Images the tool produced, shown after its expanded result. */
+  resultImages?: ToolResultImage[];
+  /** Calls a script tool made to other tools, in call order. Live snapshots only append calls or advance their status. */
+  scriptToolCalls?: ScriptToolCallItem[];
   /** Live async question presentation; replay alone never opens a prompt. */
   questionStatus?: 'pending' | 'expired';
   subagent?: SubagentInfo;

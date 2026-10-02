@@ -9,6 +9,7 @@ import type {
 } from '../../../core/types';
 import { t } from '../../../i18n/i18n';
 import { createProviderIconSvg } from '../../../shared/icons';
+import { confirmDelete } from '../../../shared/modals/ConfirmModal';
 import { extractUserDisplayContent } from '../../../utils/context';
 import type { ChatFeatureHost } from '../ChatFeatureHost';
 import type { TabAttention } from '../state/types';
@@ -53,6 +54,8 @@ type HistoryRenderOptions = {
   showOpenStateLabels?: boolean;
   showMetadataPopover?: boolean;
   organization?: SessionManagerOrganization;
+  /** Divides an unpinned flat list into recency groups. */
+  groupByRecency?: boolean;
   sort?: SessionManagerSort;
   language?: string;
   contentExists?: (contentPath: string) => boolean;
@@ -61,6 +64,8 @@ type HistoryRenderOptions = {
   onGroupCollapseChange?: (groupKey: string, collapsed: boolean) => void;
   onGroupKeysChange?: (groupKeys: readonly string[]) => void;
   onSetConversationsArchived?: (ids: readonly string[]) => Promise<void>;
+  onSetConversationsPinned?: (ids: readonly string[], isPinned: boolean) => Promise<void>;
+  onRestoreConversations?: (ids: readonly string[]) => Promise<void>;
   onSetLinkedContentPinned?: (contentPath: string, isPinned: boolean) => Promise<void>;
   onStartLinkedContentConversation?: (contentPath: string) => Promise<void>;
   pinnedLinkedContentPaths?: ReadonlySet<string>;
@@ -112,6 +117,10 @@ export class SessionBrowser {
   private metadataPopoverEl: HTMLElement | null = null;
   private metadataPopoverTarget: HTMLElement | null = null;
   private metadataPopoverSequence = 0;
+  readonly #selectedConversationIds = new Set<string>();
+  #selectionSearchQuery = '';
+  #selectionContainer: HTMLElement | null = null;
+  #selectionDismissCleanup: (() => void) | null = null;
   private metadataPopoverView: {
     el: HTMLElement;
     linkedContent: HTMLElement;
@@ -125,6 +134,7 @@ export class SessionBrowser {
   constructor(private readonly deps: SessionBrowserDeps) {}
 
   dispose(): void {
+    this.#clearHistorySelection();
     this.cancelInlineRename();
     this.#closeSessionMetadataPopover();
     this.metadataPopoverView = null;
@@ -152,6 +162,16 @@ export class SessionBrowser {
     if (options.showMetadataPopover) {
       this.#closeSessionMetadataPopover();
     }
+    const searchQuery = options.searchQuery ?? '';
+    if (
+      !this.#canMultiSelect(options)
+      || searchQuery !== this.#selectionSearchQuery
+      || (this.#selectionContainer !== null && this.#selectionContainer !== container)
+    ) {
+      this.#clearHistorySelection();
+      this.#selectionSearchQuery = searchQuery;
+    }
+    this.#selectionContainer = container;
 
     const previousList = options.preserveListState
       ? container.querySelector<HTMLElement>('.claudian-history-list')
@@ -337,6 +357,7 @@ export class SessionBrowser {
       language: options.language ?? 'en',
       contentExists: options.contentExists,
       contentIsNote: options.contentIsNote,
+      groupByRecency: options.groupByRecency ? { now: Date.now() } : undefined,
     });
     if (organization === 'linked-content') {
       options.onGroupKeysChange?.([
@@ -412,6 +433,9 @@ export class SessionBrowser {
             : section.conversations,
         );
       } else {
+        if (section.kind === 'recency') {
+          this.#renderRecencyDivider(sessionList, section, options);
+        }
         for (const conversation of visibleConversations) {
           this.#renderHistoryConversationItem(sessionList, conversation, options);
         }
@@ -517,6 +541,7 @@ export class SessionBrowser {
       section.kind === 'content'
       && section.contentPath
       && options.onStartLinkedContentConversation
+      && options.sessionActionMode !== 'archived'
     ) {
       const contentPath = section.contentPath;
       const startLinkedContentConversation = options.onStartLinkedContentConversation;
@@ -587,9 +612,11 @@ export class SessionBrowser {
     const isPinnedLinkedContent = contentPath
       ? options.pinnedLinkedContentPaths?.has(contentPath) ?? false
       : false;
+    const isArchivedView = options.sessionActionMode === 'archived';
     const canToggleLinkedContentPin = !!(
       contentPath
       && onSetLinkedContentPinned
+      && !isArchivedView
       && (section.kind === 'content' || section.kind === 'missing' || isPinnedLinkedContent)
     );
     const canArchiveLinkedContentSessions = !!(
@@ -597,9 +624,10 @@ export class SessionBrowser {
       && onSetConversationsArchived
       && options.sessionActionMode === 'active'
     );
+    const canDeleteLinkedContentSessions = !!contentPath && isArchivedView;
     if (
       contentPath
-      && (canToggleLinkedContentPin || canArchiveLinkedContentSessions)
+      && (canToggleLinkedContentPin || canArchiveLinkedContentSessions || canDeleteLinkedContentSessions)
     ) {
       groupHeader.addEventListener('contextmenu', (event) => {
         event.preventDefault();
@@ -618,25 +646,17 @@ export class SessionBrowser {
             }));
         }
         if (canArchiveLinkedContentSessions && onSetConversationsArchived) {
-          const archivableConversationIds = linkedContentConversations
-            .filter(conversation => (
-              !this.#getHistoryConversationStatusForMetadata(conversation, options).isRunning
-            ))
-            .map(conversation => conversation.id);
           if (canToggleLinkedContentPin) menu.addSeparator();
-          menu.addItem((menuItem) => {
-            menuItem
-              .setTitle('Archive all sessions')
-              .setDisabled(archivableConversationIds.length === 0);
-            if (archivableConversationIds.length > 0) {
-              menuItem.onClick(() => {
-                runConversationAction(
-                  () => onSetConversationsArchived(archivableConversationIds),
-                  'Failed to archive Linked content sessions',
-                );
-              });
-            }
-          });
+          this.#addArchiveAllMenuItem(
+            menu,
+            linkedContentConversations,
+            options,
+            onSetConversationsArchived,
+            'Failed to archive Linked content sessions',
+          );
+        }
+        if (canDeleteLinkedContentSessions) {
+          this.#addRestoreAndDeleteAllMenuItems(menu, linkedContentConversations, options);
         }
         menu.showAtMouseEvent(event);
       });
@@ -823,9 +843,18 @@ export class SessionBrowser {
       }
     }
 
+    if (this.#canMultiSelect(options)) {
+      this.#attachHistorySelection(item, conversation.id);
+    }
+
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (this.#selectedConversationIds.has(conversation.id) && this.#selectedConversationIds.size > 1) {
+        this.#showSelectionContextMenu(options, event);
+        return;
+      }
+      this.#clearHistorySelection();
       this.#showHistoryContextMenu(
         item,
         conversation,
@@ -1384,6 +1413,264 @@ export class SessionBrowser {
     return 'message-square';
   }
 
+  #renderRecencyDivider(
+    list: HTMLElement,
+    section: SessionListSection,
+    options: HistoryRenderOptions,
+  ): void {
+    const divider = list.createDiv({ cls: 'claudian-session-recency-divider' });
+    divider.createSpan({ cls: 'claudian-session-recency-divider-label', text: section.label });
+    const onSetConversationsArchived = options.onSetConversationsArchived;
+    const isArchivedView = options.sessionActionMode === 'archived';
+    if (!isArchivedView && (options.sessionActionMode !== 'active' || !onSetConversationsArchived)) return;
+
+    const buildMenu = (): Menu => {
+      const menu = new Menu().setUseNativeMenu(false);
+      if (isArchivedView) {
+        this.#addRestoreAndDeleteAllMenuItems(menu, section.conversations, options);
+      } else if (onSetConversationsArchived) {
+        this.#addArchiveAllMenuItem(
+          menu,
+          section.conversations,
+          options,
+          onSetConversationsArchived,
+          'Failed to archive sessions',
+        );
+      }
+      return menu;
+    };
+    // A native button keeps the group actions reachable by keyboard; right-click stays a shortcut.
+    const actionsButton = divider.createEl('button', {
+      cls: 'claudian-session-recency-divider-action',
+      attr: { type: 'button', 'aria-label': `Actions for ${section.label}`, 'aria-haspopup': 'menu' },
+    });
+    setIcon(actionsButton, 'more-horizontal');
+    actionsButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const rect = actionsButton.getBoundingClientRect();
+      buildMenu().showAtPosition({ x: rect.left, y: rect.bottom });
+    });
+    divider.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      buildMenu().showAtMouseEvent(event);
+    });
+  }
+
+  /** Archive-pane group actions: restore or permanently delete every session in the group. */
+  #addRestoreAndDeleteAllMenuItems(
+    menu: Menu,
+    conversations: readonly ConversationMeta[],
+    options: HistoryRenderOptions,
+  ): void {
+    const ids = conversations.map(conversation => conversation.id);
+    const onRestoreConversations = options.onRestoreConversations;
+    if (onRestoreConversations) {
+      menu.addItem(menuItem => menuItem
+        .setTitle('Restore all sessions')
+        .setDisabled(ids.length === 0)
+        .onClick(() => {
+          runConversationAction(() => onRestoreConversations(ids), 'Failed to restore sessions');
+        }));
+    }
+    menu.addItem(menuItem => menuItem
+      .setTitle('Delete all sessions')
+      .setDisabled(ids.length === 0)
+      .onClick(() => {
+        runConversationAction(
+          () => this.#deleteHistoryConversations(ids, options),
+          'Failed to delete sessions',
+        );
+      }));
+  }
+
+  #addArchiveAllMenuItem(
+    menu: Menu,
+    conversations: readonly ConversationMeta[],
+    options: HistoryRenderOptions,
+    archive: (ids: readonly string[]) => Promise<void>,
+    failureMessage: string,
+  ): void {
+    const archivableIds = conversations
+      .filter(conversation => (
+        !this.#getHistoryConversationStatusForMetadata(conversation, options).isRunning
+      ))
+      .map(conversation => conversation.id);
+    menu.addItem((menuItem) => {
+      menuItem
+        .setTitle('Archive all sessions')
+        .setDisabled(archivableIds.length === 0);
+      if (archivableIds.length > 0) {
+        menuItem.onClick(() => {
+          runConversationAction(() => archive(archivableIds), failureMessage);
+        });
+      }
+    });
+  }
+
+  #canMultiSelect(options: HistoryRenderOptions): boolean {
+    return options.sessionActionMode === 'archived'
+      ? !!options.onRestoreConversations
+      : options.sessionActionMode === 'active' && !!options.onSetConversationsArchived;
+  }
+
+  /**
+   * Option/Alt+click or Option/Alt+Enter toggles selection. Any other click, Escape, or
+   * pointer/focus moving outside the selected sessions clears it.
+   */
+  #attachHistorySelection(item: HTMLElement, conversationId: string): void {
+    if (this.#selectedConversationIds.has(conversationId)) {
+      this.#setHistoryItemSelected(item, true);
+    }
+    const toggle = (event: Event): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      const selected = !this.#selectedConversationIds.has(conversationId);
+      if (selected) {
+        this.#selectedConversationIds.add(conversationId);
+        this.#watchSelectionDismissal();
+      } else {
+        this.#selectedConversationIds.delete(conversationId);
+      }
+      this.#setHistoryItemSelected(item, selected);
+    };
+    // Capture phase runs before the item's open/new-tab handlers.
+    item.addEventListener('click', (event) => {
+      if (event.altKey) {
+        toggle(event);
+      } else {
+        this.#clearHistorySelection();
+      }
+    }, { capture: true });
+    item.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.altKey) {
+        toggle(event);
+      } else if (event.key === 'Escape') {
+        this.#clearHistorySelection();
+      }
+    }, { capture: true });
+  }
+
+  #watchSelectionDismissal(): void {
+    const container = this.#selectionContainer;
+    if (this.#selectionDismissCleanup || !container) return;
+    // Popout windows have their own Element constructor.
+    const ElementConstructor = container.ownerDocument.defaultView?.Element ?? Element;
+    const isInsideSession = (target: EventTarget | null): boolean => (
+      target instanceof ElementConstructor
+      && container.contains(target)
+      && target.closest('.claudian-history-item') !== null
+    );
+    const onPointerDown = (event: PointerEvent): void => {
+      if (!isInsideSession(event.target)) this.#clearHistorySelection();
+    };
+    const onFocusIn = (event: FocusEvent): void => {
+      if (!isInsideSession(event.target)) this.#clearHistorySelection();
+    };
+    const doc = container.ownerDocument;
+    doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('focusin', onFocusIn, true);
+    this.#selectionDismissCleanup = () => {
+      doc.removeEventListener('pointerdown', onPointerDown, true);
+      doc.removeEventListener('focusin', onFocusIn, true);
+    };
+  }
+
+  #setHistoryItemSelected(item: HTMLElement, selected: boolean): void {
+    item.classList.toggle('claudian-history-item--selected', selected);
+    const label = item.querySelector('.claudian-history-item-selected-label');
+    if (!selected) {
+      label?.remove();
+    } else if (!label) {
+      item.querySelector<HTMLElement>('.claudian-history-item-content')
+        ?.createSpan({ cls: 'claudian-history-item-selected-label', text: 'Selected' });
+    }
+  }
+
+  #clearHistorySelection(): void {
+    this.#selectionDismissCleanup?.();
+    this.#selectionDismissCleanup = null;
+    if (this.#selectedConversationIds.size === 0) return;
+    this.#selectedConversationIds.clear();
+    this.#selectionContainer
+      ?.querySelectorAll<HTMLElement>('.claudian-history-item--selected')
+      .forEach(selectedItem => this.#setHistoryItemSelected(selectedItem, false));
+  }
+
+  #showSelectionContextMenu(
+    options: HistoryRenderOptions,
+    event: MouseEvent,
+  ): void {
+    const { onSetConversationsArchived, onSetConversationsPinned, onRestoreConversations } = options;
+    const isArchivedView = options.sessionActionMode === 'archived';
+    const selected = this.deps.plugin.getConversationList()
+      .filter(conversation => (
+        this.#selectedConversationIds.has(conversation.id)
+        && (conversation.isArchived === true) === isArchivedView
+      ));
+    const sessionCount = (count: number): string => `${count} ${count === 1 ? 'session' : 'sessions'}`;
+    const menu = new Menu().setUseNativeMenu(false);
+
+    if (isArchivedView) {
+      const ids = selected.map(conversation => conversation.id);
+      if (onRestoreConversations) {
+        menu.addItem(menuItem => menuItem
+          .setTitle(`Restore ${sessionCount(ids.length)}`)
+          .onClick(() => {
+            this.#clearHistorySelection();
+            runConversationAction(() => onRestoreConversations(ids), 'Failed to restore sessions');
+          }));
+      }
+      menu.addItem(menuItem => menuItem
+        .setTitle(`Delete ${sessionCount(ids.length)}`)
+        .onClick(() => {
+          this.#clearHistorySelection();
+          runConversationAction(
+            () => this.#deleteHistoryConversations(ids, options),
+            'Failed to delete sessions',
+          );
+        }));
+      menu.showAtMouseEvent(event);
+      return;
+    }
+
+    if (onSetConversationsPinned) {
+      const unpinnedIds = selected
+        .filter(conversation => !conversation.isPinned)
+        .map(conversation => conversation.id);
+      const isPinning = unpinnedIds.length > 0;
+      const pinIds = isPinning ? unpinnedIds : selected.map(conversation => conversation.id);
+      menu.addItem(menuItem => menuItem
+        .setTitle(`${isPinning ? 'Pin' : 'Unpin'} ${sessionCount(pinIds.length)}`)
+        .onClick(() => {
+          this.#clearHistorySelection();
+          runConversationAction(
+            () => onSetConversationsPinned(pinIds, isPinning),
+            isPinning ? 'Failed to pin sessions' : 'Failed to unpin sessions',
+          );
+        }));
+    }
+
+    const archivableIds = selected
+      .filter(conversation => !this.#getHistoryConversationStatusForMetadata(conversation, options).isRunning)
+      .map(conversation => conversation.id);
+    menu.addItem((menuItem) => {
+      menuItem
+        .setTitle(`Archive ${sessionCount(archivableIds.length)}`)
+        .setDisabled(archivableIds.length === 0);
+      if (archivableIds.length > 0 && onSetConversationsArchived) {
+        menuItem.onClick(() => {
+          this.#clearHistorySelection();
+          runConversationAction(
+            () => onSetConversationsArchived(archivableIds),
+            'Failed to archive sessions',
+          );
+        });
+      }
+    });
+    menu.showAtMouseEvent(event);
+  }
+
   #isHistoryNewTabModifierClick(event: MouseEvent): boolean {
     return !event.altKey && !event.shiftKey && (event.metaKey || event.ctrlKey);
   }
@@ -1516,6 +1803,32 @@ export class SessionBrowser {
       }));
 
     menu.showAtMouseEvent(event);
+  }
+
+  /** Deletes archived sessions after one confirmation, refreshing the list once. */
+  async #deleteHistoryConversations(
+    conversationIds: readonly string[],
+    options: HistoryRenderOptions,
+  ): Promise<void> {
+    const { plugin } = this.deps;
+    const count = conversationIds.length;
+    const confirmed = await confirmDelete(
+      plugin.app,
+      `Permanently delete ${count} ${count === 1 ? 'session' : 'sessions'}?`,
+    );
+    if (!confirmed) return;
+
+    try {
+      for (const conversationId of conversationIds) {
+        await plugin.deleteConversation(conversationId);
+      }
+    } finally {
+      options.onRerender();
+    }
+    const currentConversationId = this.deps.getCurrentConversationId();
+    if (currentConversationId && conversationIds.includes(currentConversationId)) {
+      await this.deps.reloadActiveConversation();
+    }
   }
 
   async #deleteHistoryConversation(

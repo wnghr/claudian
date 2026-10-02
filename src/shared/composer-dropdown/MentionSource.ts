@@ -14,10 +14,10 @@ import type {
 export interface MentionSourceCallbacks {
   readonly getCachedVaultFiles: () => readonly TFile[];
   readonly getCachedVaultFolders: () => readonly FolderMentionItem[];
-  readonly normalizePathForVault: (path: string | undefined | null) => string | null;
 }
 
 export interface MentionSourceOptions {
+  readonly getSessionItems?: () => readonly (ComposerDropdownValueItem & { readonly mtime: number })[];
   readonly formatVaultFileMention?: (path: string) => string;
   readonly getExtensionFolders?: (
     signal: AbortSignal,
@@ -65,6 +65,8 @@ export class MentionSource implements ComposerDropdownSource {
     const index = before.lastIndexOf('@');
     if (index < 0 || (index > 0 && !/\s/.test(before[index - 1]))) return null;
     const query = before.slice(index + 1);
+    // A completed `@[label](target)` mention token is not an open trigger.
+    if (/^\[(?:\\[\\\]]|[^\]\\\r\n])*\]\([^\s)]+\)/.test(query)) return null;
     return {
       atInputStart: index === 0,
       end: cursor,
@@ -110,22 +112,23 @@ export class MentionSource implements ComposerDropdownSource {
     for (const folder of extensionFolders) {
       if (folder.label.toLocaleLowerCase().includes(query)) items.push(folder);
     }
-    items.push(...this.#vaultItems(query));
+    items.push(...this.#vaultItems(query, this.options.getSessionItems?.() ?? []));
     return items;
   }
 
-  #vaultItems(query: string): readonly ComposerDropdownValueItem[] {
+  #vaultItems(query: string, sessions: readonly (ComposerDropdownValueItem & { readonly mtime: number })[]): readonly ComposerDropdownValueItem[] {
     type Scored = {
       readonly path: string;
       readonly mtime: number;
       readonly name: string;
       readonly starts: boolean;
-      readonly type: 'file' | 'folder';
+      readonly type: 'file' | 'folder' | 'session';
+      readonly item?: ComposerDropdownValueItem;
     };
     const compare = (left: Scored, right: Scored): number => {
       if (left.starts !== right.starts) return left.starts ? -1 : 1;
       if (left.mtime !== right.mtime) return right.mtime - left.mtime;
-      if (left.type !== right.type) return left.type === 'file' ? -1 : 1;
+      if (left.type !== right.type) return ['file', 'folder', 'session'].indexOf(left.type) - ['file', 'folder', 'session'].indexOf(right.type);
       return left.name.localeCompare(right.name);
     };
     const files = this.callbacks.getCachedVaultFiles();
@@ -174,10 +177,13 @@ export class MentionSource implements ComposerDropdownSource {
       .sort(compare)
       .slice(0, 100);
 
-    return [...folders, ...fileItems]
+    const sessionItems: Scored[] = sessions.filter(item => item.label.toLocaleLowerCase().includes(query))
+      .map(item => ({ path: item.id, name: item.label, mtime: item.mtime,
+        starts: item.label.toLocaleLowerCase().startsWith(query), type: 'session', item }));
+    return [...folders, ...fileItems, ...sessionItems]
       .sort(compare)
       .map((scored): ComposerDropdownValueItem => {
-        const normalized = this.callbacks.normalizePathForVault(scored.path) ?? scored.path;
+        if (scored.item) return scored.item;
         if (scored.type === 'folder') {
           return {
             className: 'is-vault-folder',
@@ -185,7 +191,7 @@ export class MentionSource implements ComposerDropdownSource {
             id: `vault-folder:${scored.path}`,
             kind: 'value',
             label: `@${scored.path}/`,
-            replacement: `@${normalized}/ `,
+            replacement: `@${scored.path}/ `,
           };
         }
         return {
@@ -193,7 +199,7 @@ export class MentionSource implements ComposerDropdownSource {
           id: `vault-file:${scored.path}`,
           kind: 'value',
           label: scored.path,
-          replacement: (this.options.formatVaultFileMention ?? formatVaultFileMention)(normalized),
+          replacement: (this.options.formatVaultFileMention ?? formatVaultFileMention)(scored.path),
         };
       });
   }

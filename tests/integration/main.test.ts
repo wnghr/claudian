@@ -1,5 +1,7 @@
+import { testClock } from '@test/helpers/testClock';
 import { Notice, TFile, TFolder } from 'obsidian';
 
+import { SessionSnapshotStore } from '@/app/conversations/SessionSnapshotStore';
 import { DEFAULT_CLAUDIAN_SETTINGS as DEFAULT_SETTINGS } from '@/app/settings/defaultSettings';
 import { SharedStorageService } from '@/app/storage/SharedStorageService';
 import { ConversationPersistenceStore } from '@/core/bootstrap/ConversationPersistenceStore';
@@ -13,6 +15,7 @@ import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceReg
 import { isVersionedRuntimeInputFingerprint } from '@/core/providers/settings/RuntimeInputFingerprint';
 import { TOOL_SUBAGENT } from '@/core/tools/toolNames';
 import { type Conversation, type SessionMetadata, VIEW_TYPE_CLAUDIAN } from '@/core/types';
+import { ZenModeController } from '@/features/chat/zen/ZenModeController';
 import * as sdkSession from '@/providers/claude/history/ClaudeHistoryStore';
 import { CodexModelCatalogCoordinator } from '@/providers/codex/runtime/CodexModelCatalogCoordinator';
 import {
@@ -59,6 +62,13 @@ describe('ClaudianPlugin', () => {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async function waitForCondition(condition: () => boolean): Promise<void> {
+    for (let attempt = 0; attempt < 50 && !condition(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    expect(condition()).toBe(true);
   }
 
   function getRegisteredCommand(commandId: string) {
@@ -207,9 +217,10 @@ describe('ClaudianPlugin', () => {
     await plugin.onload();
     const views = [0, 1].map(() => ({
       refreshMessageTimestamps: jest.fn(), refreshDualPaneLayout: jest.fn(),
-      updateHiddenProviderCommands: jest.fn(), refreshModelSelector: jest.fn(),
+      updateHiddenCommands: jest.fn(), refreshModelSelector: jest.fn(),
     }));
     const viewsSpy = jest.spyOn(plugin, 'getAllViews').mockReturnValue(views as never);
+    const zenReconcile = jest.spyOn(ZenModeController.prototype, 'reconcile');
     let finish!: () => void;
     let started!: () => void;
     const writing = new Promise<void>(resolve => { started = resolve; });
@@ -221,18 +232,21 @@ describe('ClaudianPlugin', () => {
       const change = plugin.mutateSettings(settings => {
         settings.showMessageTimestamps = !settings.showMessageTimestamps;
         settings.enableDualPane = !settings.enableDualPane;
-        settings.hiddenProviderCommands = { claude: ['test-command'] };
+        settings.hiddenCommands = ['test-command'];
         settings.customContextLimits = { test: 1000 };
+        settings.enableZenMode = !settings.enableZenMode;
       });
       await writing;
       for (const view of views) {
         for (const refresh of Object.values(view)) expect(refresh).not.toHaveBeenCalled();
       }
+      expect(zenReconcile).not.toHaveBeenCalled();
       finish();
       await change;
       for (const view of views) {
         for (const refresh of Object.values(view)) expect(refresh).toHaveBeenCalledTimes(1);
       }
+      expect(zenReconcile).toHaveBeenCalledTimes(1);
       persist.mockRejectedValueOnce(new Error('disk unavailable'));
       await expect(plugin.mutateSettings(settings => {
         settings.showMessageTimestamps = !settings.showMessageTimestamps;
@@ -248,6 +262,7 @@ describe('ClaudianPlugin', () => {
       expect(plugin.getCommittedSettings().customContextLimits).toEqual({ test: 2000 });
     } finally {
       viewsSpy.mockRestore();
+      zenReconcile.mockRestore();
       persist.mockRestore();
     }
   });
@@ -292,6 +307,34 @@ describe('ClaudianPlugin', () => {
       await new Promise(resolve => setTimeout(resolve, 5));
       await (plugin as any).sessionInputCleanup;
       expect(files.has(inputPath)).toBe(mode !== 'run');
+    });
+
+    it('defers snapshot maintenance, aborts it on unload, and joins it before shutdown', async () => {
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let signal: AbortSignal | undefined;
+      const sweep = jest.spyOn(SessionSnapshotStore.prototype, 'sweep').mockImplementation(async received => {
+        signal = received;
+        entered();
+        await gate;
+      });
+      try {
+        await plugin.onload();
+        expect(sweep).not.toHaveBeenCalled();
+        for (const [ready] of mockApp.workspace.onLayoutReady.mock.calls) ready();
+        await started;
+        plugin.onunload();
+        expect(signal?.aborted).toBe(true);
+        let stopped = false;
+        const shutdown = (plugin as any).applicationShutdownPromise.then(() => { stopped = true; });
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        release();
+        await shutdown;
+        expect(stopped).toBe(true);
+      } finally { release(); sweep.mockRestore(); }
     });
 
     it('joins an admitted input deletion on unload and leaves remaining inputs for the next launch', async () => {
@@ -353,8 +396,11 @@ describe('ClaudianPlugin', () => {
       await plugin.onload();
 
       expect(plugin.settings).toBeDefined();
-      expect(plugin.settings.permissionMode).toBe(DEFAULT_SETTINGS.permissionMode);
-      expect(plugin.settings.hiddenProviderCommands).toEqual(DEFAULT_SETTINGS.hiddenProviderCommands);
+      // A fresh install starts Claude on Auto, which carries to an unsaved provider as Safe.
+      expect(plugin.settings.permissionMode).toBe('auto');
+      expect(ProviderSettingsCoordinator.getProviderSettingsSnapshot(plugin.settings, 'codex').permissionMode)
+        .toBe('auto-review');
+      expect(plugin.settings.hiddenCommands).toEqual(DEFAULT_SETTINGS.hiddenCommands);
     });
 
     // Note: With multi-tab, agentService is per-tab via TabManager, not on plugin
@@ -1493,7 +1539,7 @@ describe('ClaudianPlugin', () => {
       await expect(plugin.loadSettings()).resolves.toBeUndefined();
 
       expect(plugin.settings).toBeDefined();
-      expect(Notice).toHaveBeenCalledWith('Failed to remove obsolete Claude configuration');
+      expect(Notice).toHaveBeenCalledWith('Failed to remove obsolete Claude Code configuration');
     });
 
     it('should merge saved data with defaults', async () => {
@@ -1513,7 +1559,7 @@ describe('ClaudianPlugin', () => {
       await plugin.loadSettings();
 
       expect(plugin.settings.userName).toBe('TestUser');
-      expect(plugin.settings.hiddenProviderCommands).toEqual(DEFAULT_SETTINGS.hiddenProviderCommands);
+      expect(plugin.settings.hiddenCommands).toEqual(DEFAULT_SETTINGS.hiddenCommands);
     });
 
     it('normalizes the concurrent running session limit to 5-10', async () => {
@@ -3217,11 +3263,18 @@ describe('ClaudianPlugin', () => {
       ]);
 
       const conversation = await plugin.createConversation();
+      const other = await plugin.createConversation();
       await plugin.renameConversation(conversation.id, 'Renamed');
+      // Batch mutations refresh once regardless of how many sessions they change.
+      const batch = [conversation.id, other.id];
+      await plugin.setConversationsPinned(batch, true);
+      await expect(plugin.archiveConversationsIf(batch, () => true)).resolves.toBe(2);
+      await plugin.restoreConversations(batch);
       await plugin.deleteConversation(conversation.id);
 
-      expect(firstView.notifyConversationListChanged).toHaveBeenCalledTimes(3);
-      expect(secondView.notifyConversationListChanged).toHaveBeenCalledTimes(3);
+      expect(plugin.getConversationList().find(({ id }) => id === other.id)).toMatchObject({ isArchived: false });
+      expect(firstView.notifyConversationListChanged).toHaveBeenCalledTimes(7);
+      expect(secondView.notifyConversationListChanged).toHaveBeenCalledTimes(7);
     });
 
     it('keeps a committed Conversation when an open view projection fails', async () => {
@@ -3250,7 +3303,120 @@ describe('ClaudianPlugin', () => {
     });
   });
 
+  describe('setConversationArchived', () => {
+    const archivedFlags = (mock: jest.Mock) => mock.mock.calls.map(
+      ([changes]) => changes.map((change: { isArchived: boolean }) => change.isArchived),
+    );
+
+    it('mirrors archive and restore onto the native Codex thread', async () => {
+      await plugin.onload();
+      const setSessionsArchived = jest.fn().mockResolvedValue(undefined);
+      ProviderWorkspaceRegistry.setServices('codex', { sessionArchive: { setSessionsArchived } });
+      const conversation = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-1' });
+
+      await plugin.setConversationArchived(conversation.id, true);
+      await plugin.setConversationArchived(conversation.id, true);
+      await plugin.setConversationArchived(conversation.id, false);
+
+      expect(setSessionsArchived.mock.calls).toEqual([
+        [[{ conversation: expect.objectContaining({ sessionId: 'thread-1' }), isArchived: true }]],
+        [[{ conversation: expect.objectContaining({ sessionId: 'thread-1' }), isArchived: false }]],
+      ]);
+    });
+
+    it('mirrors bulk archive and restore in one native batch', async () => {
+      await plugin.onload();
+      const setSessionsArchived = jest.fn().mockResolvedValue(undefined);
+      ProviderWorkspaceRegistry.setServices('codex', { sessionArchive: { setSessionsArchived } });
+      const first = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-1' });
+      const second = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-2' });
+
+      await expect(plugin.archiveConversationsIf([first.id, second.id], () => true)).resolves.toBe(2);
+      await plugin.restoreConversations([first.id, second.id]);
+
+      expect(archivedFlags(setSessionsArchived)).toEqual([[true, true], [false, false]]);
+    });
+
+    it('applies native archive operations in local commit order', async () => {
+      await plugin.onload();
+      let releaseArchive!: () => void;
+      const setSessionsArchived = jest.fn()
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseArchive = resolve; }))
+        .mockResolvedValue(undefined);
+      ProviderWorkspaceRegistry.setServices('codex', { sessionArchive: { setSessionsArchived } });
+      const conversation = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-1' });
+
+      const archive = plugin.setConversationArchived(conversation.id, true);
+      await waitForCondition(() => setSessionsArchived.mock.calls.length === 1);
+      const restore = plugin.setConversationArchived(conversation.id, false);
+      await waitForCondition(() => plugin.getConversationSync(conversation.id)?.isArchived === false);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(setSessionsArchived).toHaveBeenCalledTimes(1);
+      releaseArchive();
+      await Promise.all([archive, restore]);
+      expect(archivedFlags(setSessionsArchived)).toEqual([[true], [false]]);
+    });
+
+    it('finishes admitted native archive work before disposing provider services', async () => {
+      await plugin.onload();
+      let releaseArchive!: () => void;
+      const setSessionsArchived = jest.fn(() => new Promise<void>((resolve) => { releaseArchive = resolve; }));
+      ProviderWorkspaceRegistry.setServices('codex', { sessionArchive: { setSessionsArchived } });
+      const disposeWorkspaces = jest.spyOn(ProviderWorkspaceRegistry, 'disposeInitialized');
+      const conversation = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-1' });
+      const archive = plugin.setConversationArchived(conversation.id, true);
+      await waitForCondition(() => setSessionsArchived.mock.calls.length === 1);
+
+      plugin.onunload();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(disposeWorkspaces).not.toHaveBeenCalled();
+
+      releaseArchive();
+      await Promise.all([archive, (plugin as any).applicationShutdownPromise]);
+      expect(disposeWorkspaces).toHaveBeenCalledTimes(1);
+      expect(Notice).not.toHaveBeenCalledWith(expect.stringContaining('could not archive or restore'));
+    });
+
+    it('keeps the local archive when the native archive fails', async () => {
+      await plugin.onload();
+      ProviderWorkspaceRegistry.setServices('codex', {
+        sessionArchive: { setSessionsArchived: jest.fn().mockRejectedValue(new Error('codex unavailable')) },
+      });
+      const conversation = await plugin.createConversation({ providerId: 'codex', sessionId: 'thread-1' });
+
+      await plugin.setConversationArchived(conversation.id, true);
+
+      expect(plugin.getConversationSync(conversation.id)?.isArchived).toBe(true);
+      expect(Notice).toHaveBeenCalledWith('Codex CLI could not archive or restore its sessions: codex unavailable');
+    });
+
+    it('does not initialize providers without native session archive', async () => {
+      await plugin.onload();
+      const ensureInitialized = jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized');
+      const conversation = await plugin.createConversation({ providerId: 'claude', sessionId: 'session-1' });
+      ensureInitialized.mockClear();
+
+      await plugin.setConversationArchived(conversation.id, true);
+
+      expect(plugin.getConversationSync(conversation.id)?.isArchived).toBe(true);
+      expect(ensureInitialized).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Linked content path events', () => {
+    it('coalesces vault refreshes while delivering every path event immediately', async () => {
+      await plugin.onload();
+      const view = { handleLinkedContentCreated: jest.fn(), notifyConversationListChanged: jest.fn() };
+      jest.spyOn(plugin, 'getAllViews').mockReturnValue([view as any]);
+      const listener = mockApp.vault.on.mock.calls.find((call: unknown[]) => call[0] === 'create')![1];
+      for (let index = 0; index < 20; index++) listener(new (TFile as any)(`note-${index}.md`));
+      expect(view.handleLinkedContentCreated).toHaveBeenCalledTimes(20);
+      expect(view.notifyConversationListChanged).not.toHaveBeenCalled();
+      await new Promise(resolve => window.setTimeout(resolve, 75));
+      expect(view.notifyConversationListChanged).toHaveBeenCalledTimes(1);
+    });
+
     it('registers Vault create, rename, and delete listeners', async () => {
       await plugin.onload();
 
@@ -3328,6 +3494,7 @@ describe('ClaudianPlugin', () => {
         'Notes/Unpinned.md',
         false,
       );
+      await new Promise(resolve => window.setTimeout(resolve, 75));
       expect(view.notifyConversationListChanged).toHaveBeenCalledTimes(1);
 
       const createListener = mockApp.vault.on.mock.calls.find(
@@ -3337,7 +3504,22 @@ describe('ClaudianPlugin', () => {
       createListener(new (TFile as any)('Notes/Unpinned.md'));
 
       expect(view.handleLinkedContentCreated).toHaveBeenCalledWith('Notes/Unpinned.md');
+      await new Promise(resolve => window.setTimeout(resolve, 75));
       expect(view.notifyConversationListChanged).toHaveBeenCalledTimes(2);
+    });
+
+    it('refreshes a committed rename even when pinned-settings cleanup fails', async () => {
+      await plugin.onload();
+      const conversation = await plugin.createConversation({ linkedContentPath: 'Notes/Old.md' });
+      const view = { handleLinkedContentRenamed: jest.fn(), notifyConversationListChanged: jest.fn() };
+      jest.spyOn(plugin, 'getAllViews').mockReturnValue([view as any]);
+      jest.spyOn((plugin as any).pinnedLinkedContentPaths, 'rewritePaths')
+        .mockRejectedValueOnce(new Error('settings unavailable'));
+      await expect((plugin as any).handleLinkedContentRename(new (TFile as any)('Notes/New.md'), 'Notes/Old.md'))
+        .rejects.toThrow('settings unavailable');
+      expect(plugin.getConversationSync(conversation.id)?.linkedContentPath).toBe('Notes/New.md');
+      await new Promise(resolve => window.setTimeout(resolve, 75));
+      expect(view.notifyConversationListChanged).toHaveBeenCalledTimes(1);
     });
 
     it('invalidates deleted targets even when pinned-settings cleanup fails', async () => {
@@ -3358,6 +3540,7 @@ describe('ClaudianPlugin', () => {
         'Notes/Unpinned.md',
         false,
       );
+      await new Promise(resolve => window.setTimeout(resolve, 75));
       expect(view.notifyConversationListChanged).toHaveBeenCalledTimes(1);
     });
   });
@@ -3481,6 +3664,110 @@ describe('ClaudianPlugin', () => {
       const meta = list.find(c => c.id === conv.id);
 
       expect(meta?.preview).toContain('Hello Claude');
+    });
+  });
+
+  describe('auto-archive inactive sessions', () => {
+    const clock = testClock();
+    const inactiveFor = (days: number): number => clock().getTime() - days * 86_400_000;
+    const sessions = [
+      { id: 'stale-session', providerId: 'claude' as const, title: 'Stale', createdAt: inactiveFor(21), lastActivityAt: inactiveFor(20) },
+      { id: 'recent-session', providerId: 'claude' as const, title: 'Recent', createdAt: inactiveFor(3), lastActivityAt: inactiveFor(2) },
+      { id: 'pinned-stale-session', providerId: 'claude' as const, title: 'Pinned', createdAt: inactiveFor(21), lastActivityAt: inactiveFor(20), isPinned: true },
+      { id: 'second-stale-session', providerId: 'claude' as const, title: 'Second stale', createdAt: inactiveFor(31), lastActivityAt: inactiveFor(30) },
+    ];
+
+    async function loadAllSessions(settings: Record<string, unknown>): Promise<Map<string, string>> {
+      const files = installVaultFiles({ '.claudian/claudian-settings.json': JSON.stringify(settings) });
+      jest.spyOn(SessionStorage.prototype, 'scan').mockImplementation(async (options) => {
+        options?.onBatch?.(deviceMetadataRecords(...sessions));
+        return { records: deviceMetadataRecords(...sessions), complete: true, invalidMetadataCount: 0 };
+      });
+      mockMetadataSources(...sessions);
+      await plugin.onload();
+      await (plugin as any).sessionMetadata.loadRemaining();
+      await new Promise(resolve => setImmediate(resolve));
+      return files;
+    }
+
+    const archivedIds = (): string[] => plugin.getConversationList()
+      .filter(conversation => conversation.isArchived)
+      .map(conversation => conversation.id);
+
+    it('archives unpinned sessions past the threshold once all metadata has loaded', async () => {
+      const files = await loadAllSessions({ sessionAutoArchiveAfter: '14d' });
+
+      expect(archivedIds()).toEqual(['stale-session', 'second-stale-session']);
+      const persisted = JSON.parse(
+        files.get(`${getDeviceSessionsPath(getHostnameKey())}/stale-session.meta.json`) ?? '{}',
+      );
+      expect(persisted.isArchived).toBe(true);
+      expect(Notice).toHaveBeenCalledWith('Auto-archived 2 inactive sessions');
+    });
+
+    it('skips sessions held by a deferred chat pane that has not mounted its view', async () => {
+      mockApp.workspace.getLeavesOfType.mockImplementation((type: string) => (
+        type === VIEW_TYPE_CLAUDIAN
+          ? [{
+              view: {},
+              getViewState: () => ({
+                type: VIEW_TYPE_CLAUDIAN,
+                state: {
+                  tabWorkspace: {
+                    version: 1,
+                    openTabs: [{ tabId: 'deferred-tab', conversationId: 'stale-session' }],
+                    activeTabId: 'deferred-tab',
+                  },
+                },
+              }),
+            }]
+          : []
+      ));
+
+      await loadAllSessions({ sessionAutoArchiveAfter: '14d' });
+
+      // The unheld stale session proves the scan ran.
+      expect(archivedIds()).toEqual(['second-stale-session']);
+    });
+
+    it('does not archive a session whose pin was still being saved when the scan ran', async () => {
+      const files = await loadAllSessions({});
+      const stalePath = `${getDeviceSessionsPath(getHostnameKey())}/stale-session.meta.json`;
+      let releasePinWrite!: () => void;
+      const pinWriteGate = new Promise<void>((resolve) => { releasePinWrite = resolve; });
+      const write = mockApp.vault.adapter.write.getMockImplementation();
+      let isFirstStaleWrite = true;
+      mockApp.vault.adapter.write.mockImplementation(async (path: string, content: string) => {
+        if (path === stalePath && isFirstStaleWrite) {
+          isFirstStaleWrite = false;
+          await pinWriteGate;
+        }
+        return write(path, content);
+      });
+
+      const pin = plugin.setConversationPinned('stale-session', true);
+      await plugin.mutateSettings((settings) => { settings.sessionAutoArchiveAfter = '7d'; });
+      await new Promise(resolve => setImmediate(resolve));
+      releasePinWrite();
+      await pin;
+      await new Promise(resolve => setImmediate(resolve));
+
+      const stale = plugin.getConversationList().find(({ id }) => id === 'stale-session');
+      expect(stale).toMatchObject({ isPinned: true });
+      expect(stale?.isArchived).not.toBe(true);
+      // The unheld stale session proves the scan ran.
+      expect(archivedIds()).toEqual(['second-stale-session']);
+      expect(JSON.parse(files.get(stalePath) ?? '{}')).toMatchObject({ isPinned: true });
+    });
+
+    it('leaves sessions alone while off and archives when the setting is enabled', async () => {
+      await loadAllSessions({});
+      expect(archivedIds()).toEqual([]);
+
+      await plugin.mutateSettings((settings) => { settings.sessionAutoArchiveAfter = '7d'; });
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(archivedIds()).toEqual(['stale-session', 'second-stale-session']);
     });
   });
 

@@ -13,7 +13,7 @@ import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type { ProviderSettingsTabRendererContext } from '@/core/providers/types';
 import type { ClaudianSettings } from '@/core/types';
 import { ModelSelector, type ToolbarCallbacks } from '@/features/chat/ui/InputToolbar';
-import type { ClaudeModelCatalog } from '@/providers/claude/runtime/ClaudeModelCatalog';
+import type { ClaudeModelDiscovery } from '@/providers/claude/runtime/ClaudeModels';
 import { createClaudeModels } from '@/providers/claude/runtime/ClaudeModels';
 import { getClaudeProviderSettings } from '@/providers/claude/settings';
 import { claudeChatUIConfig } from '@/providers/claude/ui/ClaudeChatUIConfig';
@@ -26,6 +26,7 @@ jest.mock('obsidian', () => ({
     setName(value: string) { this.settingEl.createDiv({ text: value }); return this; }
     setDesc(value: string) { this.settingEl.createDiv({ text: value }); return this; }
   },
+  setIcon: jest.fn(),
 }));
 
 HTMLElement.prototype.createEl = function <K extends keyof HTMLElementTagNameMap>(
@@ -48,9 +49,9 @@ HTMLElement.prototype.toggleClass = function (names, value) {
 };
 HTMLElement.prototype.appendText = function (text) { this.append(text); };
 
-function renderModels(container: HTMLElement, context: ProviderSettingsTabRendererContext, native: Pick<ClaudeModelCatalog, 'refresh'>) {
+function renderModels(container: HTMLElement, context: ProviderSettingsTabRendererContext, native: { refresh: ClaudeModelDiscovery }) {
   context.plugin.notifyProviderChatOptionsChanged = jest.fn();
-  return renderProviderModelsSection(container, 'claude', 'Claude', createClaudeModels(context.plugin, native as ClaudeModelCatalog));
+  return renderProviderModelsSection(container, 'claude', 'Claude Code', createClaudeModels(context.plugin, signal => native.refresh(signal)));
 }
 
 describe('Claude model picker', () => {
@@ -152,6 +153,7 @@ describe('Claude model picker', () => {
       getUIConfig: () => claudeChatUIConfig,
     } as unknown as ToolbarCallbacks);
     expect(within(toolbar).getByText('Model unavailable').parentElement?.title).toMatch(/refresh/i);
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Model unavailable' }));
     expect(within(toolbar).getByRole('status').textContent).toMatch(/refresh/i);
     settings.providerConfigs.claude.discoveredModels = [{ value: 'sonnet', label: 'Sonnet' }];
     selector.updateDisplay();
@@ -200,13 +202,13 @@ it('allows Discover after abort and detaches the closed settings observer', asyn
     .mockResolvedValue({ changed: true });
   const notify = jest.fn();
   const catalog = new ProviderModelCatalogController({
-    providerId: 'claude', providerName: 'Claude',
+    providerId: 'claude', providerName: 'Claude Code',
     read: () => ({ enabled: true, models: [{ id: 'sonnet', name: 'Sonnet' }], selectedIds: ['sonnet'], aliases: {} }),
     discover, update: jest.fn(),
     host: { mutateSettings: async mutate => { await mutate({} as any); }, notifyProviderChatOptionsChanged: notify },
   });
   const container = document.body.createDiv();
-  const picker = renderProviderModelsSection(container, 'claude', 'Claude', catalog);
+  const picker = renderProviderModelsSection(container, 'claude', 'Claude Code', catalog);
   catalog.markStale();
   container.querySelector('details')!.open = true;
   const button = within(container).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement;
@@ -248,10 +250,10 @@ it.each(['selections', 'aliases'] as const)(
         coordinator.mutate(draft => mutation(draft as unknown as ClaudianSettings)),
       notifyProviderChatOptionsChanged: notify,
     } as unknown as ProviderHost;
-    const catalog = createClaudeModels(host, { refresh: async () => ({ changed: false }) });
+    const catalog = createClaudeModels(host, async () => ({ changed: false }));
     await catalog.refresh();
     const container = document.body.createDiv();
-    const picker = renderProviderModelsSection(container, 'claude', 'Claude', catalog);
+    const picker = renderProviderModelsSection(container, 'claude', 'Claude Code', catalog);
     expect((await axe(container)).violations).toEqual([]);
     const edit = (name: string, value: string) => {
       if (kind === 'selections') fireEvent.click(within(container).getByRole('checkbox', { name: new RegExp(name) }));

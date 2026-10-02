@@ -2,6 +2,7 @@ import { createConversationPorts } from '@test/helpers/ConversationPorts';
 import { createMockEl } from '@test/helpers/MockElement';
 import { within } from '@testing-library/dom';
 import { JSDOM } from 'jsdom';
+import { Component } from 'obsidian';
 
 import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
 import { RuntimeCommandCatalog } from '@/core/providers/commands/RuntimeCommandCatalog';
@@ -112,7 +113,7 @@ jest.mock('@/core/providers/ProviderRegistry', () => ({
         { label: 'Claude Alternate', value: 'claude-alternate' },
       ]),
       getReasoningOptions: jest.fn().mockReturnValue([]),
-      isAdaptiveReasoningModel: jest.fn().mockReturnValue(false),
+      supportsReasoningEffort: jest.fn().mockReturnValue(false),
       isDefaultModel: jest.fn().mockReturnValue(true),
       normalizeModelVariant: jest.fn((model: string) => model),
       ownsModel: jest.fn().mockReturnValue(true),
@@ -145,7 +146,6 @@ jest.mock('@/core/providers/ProviderSettingsCoordinator', () => ({
       model: 'claude-default',
       permissionMode: 'normal',
       serviceTier: 'standard',
-      thinkingBudget: '',
       ...settings,
     }),
     projectModelSelection: (
@@ -215,14 +215,13 @@ function createTabManager(
   callbacks: Record<string, unknown> = {},
   viewOverrides: Record<string, unknown> = {},
 ) {
-  const view = {
-    addChild: jest.fn(),
+  const view = Object.assign(new Component(), {
     getTabManager: jest.fn(),
     leaf: {},
     registerDomEvent: jest.fn(),
     registerEvent: jest.fn(),
     ...viewOverrides,
-  } as any;
+  }) as any;
   return new TabManager(plugin, containerEl as any, view, callbacks);
 }
 
@@ -278,12 +277,11 @@ async function createTestTab(
     openConversation?: (conversationId: string) => Promise<void>;
   } = {},
 ): Promise<any> {
-  const component = {
-    addChild: jest.fn(),
+  const component = Object.assign(new Component(), {
     registerDomEvent: jest.fn(),
     registerEvent: jest.fn(),
     ...assembly.component,
-  } as any;
+  }) as any;
   const tab = await createTabRuntime({
     ...options,
     component,
@@ -858,7 +856,7 @@ describe('Tab provider execution ownership', () => {
       expect(tab?.ui.imageContextManager).not.toBeNull();
       expect(tab?.ui.modelSelector).not.toBeNull();
       expect(tab?.ui.modeSelector).not.toBeNull();
-      expect(tab?.ui.thinkingBudgetSelector).not.toBeNull();
+      expect(tab?.ui.effortSelector).not.toBeNull();
       expect(tab?.ui.permissionToggle).not.toBeNull();
       expect(tab?.ui.serviceTierToggle).not.toBeNull();
       expect(tab?.ui.composerDropdown).not.toBeNull();
@@ -2488,7 +2486,6 @@ describe('Tab provider execution ownership', () => {
       conversation,
     }, {
       component: {
-        addChild: jest.fn(),
         registerDomEvent: jest.fn(),
         registerEvent: jest.fn(),
       },

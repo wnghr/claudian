@@ -1,7 +1,6 @@
 import { formatReasoningValueLabel } from '../../core/providers/reasoning';
 import type {
   ProviderModelPolicy,
-  ProviderReasoningOption,
   ProviderUIOption,
 } from '../../core/providers/types';
 import {
@@ -21,7 +20,6 @@ import {
 const DEFAULT_PI_REASONING_LEVELS = getPiSupportedThinkingLevels({ reasoning: true });
 
 export const piModelPolicy: ProviderModelPolicy = {
-  permissionModes: { inactiveValue: 'normal', activeValue: 'yolo' },
   getModelOptions(settings): ProviderUIOption[] {
     const piSettings = getPiProviderSettings(settings);
     const discoveredModels = new Map(piSettings.discoveredModels.map((model) => [
@@ -47,7 +45,7 @@ export const piModelPolicy: ProviderModelPolicy = {
     return isPiModelSelectionId(model);
   },
 
-  isAdaptiveReasoningModel(model: string, settings: Record<string, unknown>): boolean {
+  supportsReasoningEffort(model: string, settings: Record<string, unknown>): boolean {
     const piModel = getCachedModel(model, settings);
     if (piModel) {
       return piModel.thinkingLevels.some(level => level !== 'off');
@@ -56,7 +54,7 @@ export const piModelPolicy: ProviderModelPolicy = {
     return !!decodePiModelId(model);
   },
 
-  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderReasoningOption[] {
+  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderUIOption[] {
     const piModel = getCachedModel(model, settings);
     if (piModel && !piModel.reasoning) return [];
     const levels = piModel?.thinkingLevels
@@ -116,22 +114,6 @@ export const piModelPolicy: ProviderModelPolicy = {
   getCustomModelIds(): Set<string> {
     return new Set<string>();
   },
-
-  resolvePermissionMode(settings: Record<string, unknown>): string | null {
-    return getPiProviderSettings(settings).toolMode === 'readonly' ? 'normal' : 'yolo';
-  },
-
-  applyPermissionMode(value: string, settings: unknown): void {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-      return;
-    }
-
-    const settingsBag = settings as Record<string, unknown>;
-    settingsBag.permissionMode = value;
-    updatePiProviderSettings(settingsBag, {
-      toolMode: value === 'normal' ? 'readonly' : 'all',
-    });
-  }
 };
 
 function getCachedModel(model: string, settings: Record<string, unknown>): PiDiscoveredModel | null {

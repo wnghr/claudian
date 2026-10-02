@@ -91,12 +91,12 @@ describe('CodexChatUIConfig', () => {
       expect(options).toEqual([
         {
           value: 'openai-codex/gpt-5.6-sol',
-          label: 'GPT-5.6-Sol',
+          label: 'GPT-5.6 Sol',
           description: 'Latest frontier agentic coding model.',
         },
         {
           value: 'openai-codex/gpt-5.6-luna',
-          label: 'GPT-5.6-Luna',
+          label: 'GPT-5.6 Luna',
           description: 'Fast and affordable agentic coding model.',
         },
       ]);
@@ -294,10 +294,10 @@ describe('CodexChatUIConfig', () => {
     });
   });
 
-  describe('isAdaptiveReasoningModel', () => {
+  describe('supportsReasoningEffort', () => {
     it('should return true for all models', () => {
-      expect(codexChatUIConfig.isAdaptiveReasoningModel(TEST_CODEX_MODEL, {})).toBe(true);
-      expect(codexChatUIConfig.isAdaptiveReasoningModel('unknown-model', {})).toBe(true);
+      expect(codexChatUIConfig.supportsReasoningEffort(TEST_CODEX_MODEL, {})).toBe(true);
+      expect(codexChatUIConfig.supportsReasoningEffort('unknown-model', {})).toBe(true);
     });
   });
 
@@ -577,18 +577,6 @@ describe('CodexChatUIConfig', () => {
     it('should return empty set when no OPENAI_MODEL', () => {
       const ids = codexChatUIConfig.getCustomModelIds({});
       expect(ids.size).toBe(0);
-    });
-  });
-
-  describe('getPermissionModeToggle', () => {
-    it('should return yolo/safe toggle config', () => {
-      const toggle = codexChatUIConfig.getPermissionModeToggle!();
-      expect(toggle).toEqual({
-        inactiveValue: 'normal',
-        inactiveLabel: 'Safe',
-        activeValue: 'yolo',
-        activeLabel: 'YOLO',
-      });
     });
   });
 

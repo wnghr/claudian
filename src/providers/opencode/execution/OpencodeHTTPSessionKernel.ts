@@ -7,9 +7,9 @@ import { forkOpencodeHTTPSession } from '../history/OpencodeSessionFork';
 import { isRecord, OpencodeHTTPError, type OpencodeHTTPEvent, pollOpencodeUntil } from '../http/OpencodeHTTPClient';
 import { projectOpencodeFormQuestions } from '../http/OpencodeHTTPForms';
 import type { OpencodeServerLease, OpencodeServerService } from '../http/OpencodeServerService';
-import { OPENCODE_SAFE_MODE_ID, OPENCODE_YOLO_MODE_ID } from '../modes';
-import { normalizeOpencodeToolInput, normalizeOpencodeToolName, normalizeOpencodeToolUseResult } from '../normalization/opencodeToolNormalization';
-import { AUX_AGENT_IDS, buildOpencodeSystemPrompt, getSystemPromptSettings } from '../runtime/OpencodeExecutionAgents';
+import { OpencodeShellOutput } from '../http/OpencodeShellOutput';
+import { normalizeOpencodeToolInput, normalizeOpencodeToolName, normalizeOpencodeToolResult, normalizeOpencodeToolUseResult } from '../normalization/opencodeToolNormalization';
+import { AUX_AGENT_IDS, buildOpencodeSystemPrompt, getSystemPromptSettings, OPENCODE_BUILD_AGENT_ID } from '../runtime/OpencodeExecutionAgents';
 import {
   type OpencodeKernelConnectOptions,
   type OpencodeNativeOutput,
@@ -26,7 +26,7 @@ interface PendingSteer { text: string; admission: Promise<SteerAdmission>; resol
 type SteerAdmission = 'admitted' | 'refused' | 'unknown';
 interface NativeModel { providerID: string; id: string; variant?: string }
 interface NativeChild { outputSessionId: string; toolCallId: string; turnId: string; interactionTurnId: string; background: boolean; text: Map<string, string>; progress: { startedAt: number; toolUses: number; totalTokens: number; lastToolName?: string } }
-interface NativeTool { name: string; input: Record<string, unknown> }
+interface NativeTool { name: string; input: Record<string, unknown>; sessionId: string; output: string | null; shell?: OpencodeShellOutput }
 
 /** V2 uses native HTTP events and interactions; ACP is only the v1 wire protocol. */
 export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
@@ -37,12 +37,13 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
   private sessionId: string | null = null;
   private databasePath: string | null = null;
   private model: NativeModel | null = null;
-  private models: Array<Record<string, unknown>> = [];
+  private models: Array<Record<string, unknown> & { providerID: string; id: string; name: string }> = [];
   private commands = new Set<string>();
   private profile: OpencodeKernelConnectOptions['profile'] = 'managed';
   private readonly text = new Map<string, string>();
   private readonly children = new Map<string, NativeChild>();
   private readonly tools = new Map<string, NativeTool>();
+  private readonly previewStops = new Map<string, 'cancelled' | 'ended'>();
   private readonly globalForms = new Map<string, { settled: boolean }>();
   private readonly interactions = new Map<string, AbortController>();
   private pending: PendingPrompt | null = null;
@@ -60,13 +61,15 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     this.databasePath = this.client.databasePath;
     await this.client.subscribe(event => this.handleEvent(event), error => this.fail(error), () => !this.disposed && !!this.sessionId && !!this.options.openNativeInteraction);
     this.agents = await this.client.registerAgents(
-      options.profile === 'managed' ? [OPENCODE_SAFE_MODE_ID, OPENCODE_YOLO_MODE_ID] : [AUX_AGENT_IDS[options.profile]],
+      [options.profile === 'managed' ? OPENCODE_BUILD_AGENT_ID : AUX_AGENT_IDS[options.profile]],
       this.resolveSystemPrompt(options),
     );
     const client = this.client;
     await client.waitForActivation(this.controller.signal);
     this.models = await pollOpencodeUntil(
-      async () => (await client.request<{ data: Array<Record<string, unknown>> }>('/api/model')).data.filter(model => model.enabled === true),
+      async () => (await client.request<{ data: Array<Record<string, unknown>> }>('/api/model')).data.flatMap(model => model.enabled === true && typeof model.providerID === 'string' && typeof model.id === 'string'
+        ? [{ ...model, providerID: model.providerID, id: model.id, name: typeof model.name === 'string' ? model.name : model.id }]
+        : []),
       models => models.length > 0, 5000, this.controller.signal,
     );
     const catalog = await this.client.request<{ data: Array<{ name: string }> }>('/api/command');
@@ -81,7 +84,7 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
         const fork = !resumeSessionId ? this.options.forkSource : undefined;
         if (fork) return forkOpencodeHTTPSession(client, fork.sessionId, fork.resumeAt);
         const { data } = await client.request<{ data: Record<string, unknown> }>(resumeSessionId ? `/api/session/${encodeURIComponent(resumeSessionId)}` : '/api/session',
-          resumeSessionId ? {} : { method: 'POST', body: { location: { directory: this.options.config.vaultWorkingDirectory }, agent: this.agents[this.profile === 'managed' ? OPENCODE_SAFE_MODE_ID : AUX_AGENT_IDS[this.profile]] } });
+          resumeSessionId ? {} : { method: 'POST', body: { location: { directory: this.options.config.vaultWorkingDirectory }, agent: this.agents[this.profile === 'managed' ? OPENCODE_BUILD_AGENT_ID : AUX_AGENT_IDS[this.profile]] } });
         if (typeof data.id !== 'string' || (resumeSessionId && data.id !== resumeSessionId)) throw new Error('Invalid OpenCode session response.');
         return data.id;
       }, () => this.serverService.acquire(this.cliPath, this.options.config.vaultWorkingDirectory, this.environment));
@@ -99,7 +102,6 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     const value = String(request.value);
     if (request.configId === 'mode') {
       await this.requireClient().request(`${route}/agent`, { method: 'POST', body: { agent: this.agents[value] ?? value } });
-      this.autoApprove = this.profile === 'managed' && value === OPENCODE_YOLO_MODE_ID;
     } else if (request.configId === 'model') {
       const slash = value.indexOf('/');
       if (slash < 1) throw new Error('Invalid OpenCode model selection.');
@@ -114,6 +116,10 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     return { configOptions: [{ id: 'effort', category: 'thought_level', name: 'Effort', type: 'select', currentValue: this.model?.variant ?? 'default', options: [...new Set([...variants, 'default'])].map(value => ({ value, name: value })) }] };
   }
 
+  setAutoApprove(enabled: boolean): void {
+    this.autoApprove = this.profile === 'managed' && enabled;
+  }
+
   async prompt(request: ACPPromptRequest): Promise<{ stopReason: 'end_turn' | 'cancelled'; userMessageId?: string }> {
     if (this.pending) throw new Error('OpenCode already has an active request.');
     const { text, files } = toNativeInput(request);
@@ -125,6 +131,7 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     const completion = new Promise<{ stopReason: 'end_turn' | 'cancelled'; userMessageId?: string }>((yes, no) => { resolve = yes; reject = no; });
     const pending: PendingPrompt = { resolve, reject, ...(command ? {} : { inputId: nativeMessageId() }), announced: false, started: false, steerable: false, idle: false };
     this.pending = pending;
+    this.previewStops.delete(request.sessionId);
     // A native error may arrive before the admission request resolves.
     void completion.catch(() => undefined);
     try {
@@ -178,6 +185,13 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
   }
 
   cancel(sessionId: string): void {
+    this.previewStops.set(sessionId, 'cancelled');
+    for (const tool of this.tools.values()) {
+      if (tool.sessionId === sessionId) {
+        tool.shell?.stop();
+        tool.output = null;
+      }
+    }
     this.cancellation ??= this.requireClient().request(`/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=false`, { method: 'POST' })
       .catch(() => undefined).finally(() => { this.cancellation = null; });
   }
@@ -191,6 +205,8 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     // Interrupts leave undelivered steers queued in the persistent native inbox.
     const recalls = this.client?.isReusable() ? this.recallSteers() : undefined;
     this.disposed = true;
+    this.stopTools();
+    this.previewStops.clear();
     this.controller.abort();
     for (const [id, controller] of this.interactions) {
       controller.abort();
@@ -228,8 +244,21 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
       return;
     }
     if (nativeSessionId !== this.sessionId && !child) return;
+    if (event.type === 'session.execution.started' && this.previewStops.get(nativeSessionId) === 'ended') {
+      this.previewStops.delete(nativeSessionId);
+    }
+    if (event.type.startsWith('session.execution.') && event.type !== 'session.execution.started') {
+      this.previewStops.set(nativeSessionId, 'ended');
+      this.stopTools(nativeSessionId);
+    }
+    const assistantMessageId = typeof data.assistantMessageID === 'string' ? data.assistantMessageID : undefined;
+    const itemId = typeof data.id === 'string' ? data.id : undefined;
+    const ordinal = typeof data.ordinal === 'number' ? data.ordinal : undefined;
+    if ((event.type.startsWith('session.text.') || event.type.startsWith('session.reasoning.'))
+      && (assistantMessageId === undefined || ordinal === undefined)) return;
+    if (event.type.startsWith('session.tool.') && (assistantMessageId === undefined || itemId === undefined)) return;
     if (child) {
-      if (event.type === 'session.text.ended') child.text.set(`${data.assistantMessageID}:${data.ordinal}`, String(data.text));
+      if (event.type === 'session.text.ended') child.text.set(`${assistantMessageId}:${ordinal}`, String(data.text));
       if (event.type === 'session.step.ended') {
         child.progress.totalTokens += countTokens(data.tokens);
         this.emitChildProgress(child);
@@ -242,12 +271,13 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
           providerSessionId: this.sessionId ?? undefined,
         });
         this.children.delete(nativeSessionId);
+        this.previewStops.delete(nativeSessionId);
       }
       if (!event.type.startsWith('session.tool.') && event.type !== 'permission.asked' && event.type !== 'form.created') return;
     }
-    const key = `${nativeSessionId}:${data.assistantMessageID}:${data.id}`;
+    const key = `${nativeSessionId}:${assistantMessageId}:${itemId}`;
     const identity = child
-      ? { toolCallId: `${nativeSessionId}:${data.id}`, toolScope: { kind: 'subagent' as const, subagentId: child.toolCallId }, parentToolCallId: child.toolCallId }
+      ? { toolCallId: `${nativeSessionId}:${itemId}`, toolScope: { kind: 'subagent' as const, subagentId: child.toolCallId }, parentToolCallId: child.toolCallId }
       : { toolCallId: String(data.id), toolScope: { kind: 'main' as const } };
     switch (event.type) {
       case 'session.execution.started':
@@ -281,7 +311,7 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
       case 'session.text.delta': case 'session.reasoning.delta':
       case 'session.text.ended': case 'session.reasoning.ended': {
         const kind = event.type.includes('.reasoning.') ? 'thinking_delta' : 'text_delta';
-        const key = `${data.assistantMessageID}:${data.ordinal}:${kind}`;
+        const key = `${assistantMessageId}:${ordinal}:${kind}`;
         const previous = this.text.get(key) ?? '';
         const text = typeof data.delta === 'string' ? data.delta : typeof data.text === 'string' ? data.text.slice(previous.length) : '';
         if (event.type.endsWith('.ended')) this.text.delete(key);
@@ -289,7 +319,10 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
         if (text) this.emit({ type: kind, text });
         break;
       }
-      case 'session.tool.input.started': this.tools.set(key, { name: String(data.name), input: {} }); break;
+      case 'session.tool.input.started':
+        this.tools.get(key)?.shell?.stop();
+        this.tools.set(key, { name: String(data.name), input: {}, sessionId: nativeSessionId, output: '' });
+        break;
       case 'session.tool.called': {
         const tool = this.tools.get(key);
         if (!tool) break;
@@ -312,13 +345,30 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
           const interactionTurnId = (background ? this.options.onNativeTaskStarted?.(metadata.sessionID, turnId) : undefined) ?? child?.interactionTurnId ?? turnId;
           this.children.set(metadata.sessionID, { outputSessionId: background ? metadata.sessionID : child?.outputSessionId ?? metadata.sessionID, toolCallId: identity.toolCallId, turnId, interactionTurnId, background, text: new Map(), progress: { startedAt: Date.now(), toolUses: 0, totalTokens: 0 } });
         }
-        if (typeof metadata.output === 'string') this.emit({ type: 'tool_output', ...identity, content: metadata.output }, child?.outputSessionId);
+        if (tool && !this.previewStops.has(nativeSessionId) && tool.output !== null && typeof metadata.shellID === 'string') {
+          tool.shell ??= new OpencodeShellOutput(this.requireClient(), metadata.shellID, content => {
+            if (!this.disposed && this.tools.get(key) === tool) {
+              this.emit({ type: 'tool_output', ...identity, content }, child?.outputSessionId);
+            }
+          });
+        } else if (tool && !this.previewStops.has(nativeSessionId) && !tool.shell && typeof metadata.output === 'string' && tool.output !== null) {
+          if (metadata.output.startsWith(tool.output)) {
+            const content = metadata.output.slice(tool.output.length);
+            tool.output = metadata.output;
+            if (content) this.emit({ type: 'tool_output', ...identity, content }, child?.outputSessionId);
+          } else {
+            // Rolling/replaced snapshots cannot be represented as append-only deltas.
+            tool.output = null;
+          }
+        }
         break;
       }
       case 'session.tool.success': case 'session.tool.failed': {
         const tool = this.tools.get(key);
+        tool?.shell?.stop();
         const content = Array.isArray(data.content) ? data.content.filter(isRecord).flatMap(item => typeof item.text === 'string' ? [item.text] : []).join('\n') : '';
-        this.emit({ type: 'tool_completed', ...identity, content: content || (data.error ? errorText(data.error) : ''), isError: event.type.endsWith('.failed'), providerPayload: { rawName: tool?.name, rawInput: tool?.input, rawOutput: { ...data, metadata: data.metadata } }, toolUseResult: tool ? normalizeOpencodeToolUseResult(tool.name, tool.input, { metadata: data.metadata }) : undefined }, child?.outputSessionId);
+        const result = normalizeOpencodeToolResult(tool?.name, content || (data.error ? errorText(data.error) : ''), { metadata: data.metadata });
+        this.emit({ type: 'tool_completed', ...identity, content: result.content, isError: event.type.endsWith('.failed') || result.isError, providerPayload: { rawName: tool?.name, rawInput: tool?.input, rawOutput: { ...data, metadata: data.metadata } }, toolUseResult: tool ? normalizeOpencodeToolUseResult(tool.name, tool.input, { output: content, metadata: data.metadata }) : undefined }, child?.outputSessionId);
         this.tools.delete(key);
         break;
       }
@@ -387,11 +437,11 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
         await this.requireClient().request(`${route}/reply`, { method: 'POST', body: { answer } });
       } else {
         if (this.autoApprove) {
-          await this.requireClient().request(`${route}/reply`, { method: 'POST', body: { decision: data.action === 'plan_enter' ? 'reject' : 'once' } });
+          await this.requireClient().request(`${route}/reply`, { method: 'POST', body: { decision: 'once' } });
           return;
         }
         const response = await this.options.config.interactionPort.requestApproval({
-          ...identity, kind: 'approval', toolName: data.action === 'shell' ? 'bash' : String(data.action), input: { resources: data.resources, ...(isRecord(data.metadata) ? data.metadata : {}) }, description: typeof data.message === 'string' ? data.message : `${data.action}: ${Array.isArray(data.resources) ? data.resources.join(', ') : ''}`,
+          ...identity, kind: 'approval', toolName: data.action === 'shell' ? 'bash' : String(data.action), input: { resources: data.resources, ...(isRecord(data.metadata) ? data.metadata : {}) }, description: typeof data.message === 'string' ? data.message : `${typeof data.action === 'string' ? data.action : 'Unknown action'}: ${Array.isArray(data.resources) ? data.resources.join(', ') : ''}`,
         }, signal);
         if (signal.aborted) return;
         const reply = response.interactionId === id && response.decision === 'allow' ? 'once' : response.interactionId === id && response.decision === 'allow-always' ? 'always' : 'reject';
@@ -468,9 +518,18 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
       this.settleSteer(id, new Error('OpenCode steer delivery could not be confirmed.', { cause: error }));
     }
   }
+  private stopTools(sessionId?: string): void {
+    for (const [key, tool] of this.tools) {
+      if (sessionId !== undefined && tool.sessionId !== sessionId) continue;
+      tool.shell?.stop();
+      this.tools.delete(key);
+    }
+  }
+
   private finish(stopReason: 'end_turn' | 'cancelled' = 'end_turn'): void {
     const pending = this.pending;
     this.pending = null;
+    this.stopTools(this.sessionId ?? undefined);
     void this.recallSteers();
     pending?.resolve({ stopReason, userMessageId: pending.userMessageId });
     this.options.onNativeTurn?.('completed', undefined, !!pending);
@@ -480,6 +539,7 @@ export class OpencodeHTTPSessionKernel implements OpencodeSessionKernel {
     if (this.disposed) return;
     const pending = this.pending;
     this.pending = null;
+    this.stopTools(this.sessionId ?? undefined);
     void this.recallSteers();
     pending?.reject(error);
     this.options.onNativeTurn?.('completed', error.message, !!pending);

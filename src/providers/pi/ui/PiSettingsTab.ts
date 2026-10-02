@@ -79,7 +79,7 @@ export function createPiSettingsTabRenderer(
       });
 
       renderCLIInstallationSetting({
-        cliName: 'Pi CLI',
+        cliName: 'Pi',
         icon: PI_PROVIDER_ICON,
         inspect: async () => {
           const settings = context.plugin.settings as unknown as Record<string, unknown>;
@@ -98,7 +98,7 @@ export function createPiSettingsTabRenderer(
           const config = getPiProviderSettings(settingsBag);
           return config.cliPathsByHost[hostnameKey] || config.cliPath;
         },
-        name: 'CLI path',
+        name: t('settings.cliPath.genericName'),
         onChange: async (value) => {
           const cliPathsByHost = {
             ...getPiProviderSettings(settingsBag).cliPathsByHost,
@@ -129,21 +129,11 @@ export function createPiSettingsTabRenderer(
       new Setting(container).setName('Models').setHeading();
       const modelPicker = renderProviderModelsSection(container, 'pi', 'Pi', workspace.modelCatalog, () => modelWarning.refresh());
 
-      new Setting(container).setName(t('settings.agentSkills.sectionTitle')).setHeading();
-      context.renderAgentSkillSettings(container, 'pi');
-
-      new Setting(container).setName('Commands').setHeading();
-      context.renderHiddenProviderCommandSetting(container, 'pi', {
-        name: 'Hidden Pi commands and skills',
-        desc: 'Hide runtime commands and skills advertised by Pi from the command dropdown. Enter exact names without the leading slash, one per line.',
-        placeholder: 'skill:review\ncompact',
-      });
-
       renderEnvironmentSettingsSection({
         container,
-        desc: 'Environment variables passed only to Pi.',
-        heading: 'Environment',
-        name: 'Pi environment variables',
+        desc: t('settings.pi.environment.desc'),
+        heading: t('settings.environment'),
+        name: t('settings.pi.environment.name'),
         placeholder: 'PI_CODING_AGENT_SESSION_DIR=/path/to/sessions',
         plugin: context.plugin,
         scope: 'provider:pi',
@@ -161,11 +151,11 @@ function validateCLIPath(value: string): string | null {
 
   const expandedPath = normalizeConfiguredCLIPath(trimmed);
   if (!fs.existsSync(expandedPath)) {
-    return 'Path does not exist';
+    return t('settings.cliPath.validation.notExist');
   }
 
   if (!fs.statSync(expandedPath).isFile()) {
-    return 'Path must point to a file';
+    return t('settings.cliPath.validation.notFile');
   }
 
   return null;

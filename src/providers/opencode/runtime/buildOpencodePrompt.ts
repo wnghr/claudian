@@ -1,25 +1,21 @@
 import type { ProviderLinkedContentContext } from '../../../core/execution';
+import type { ProviderSelectionSnapshot, ProviderSessionReference } from '../../../core/execution/ProviderExecutionRequest';
 import type { ChatMessage, ImageAttachment } from '../../../core/types';
-import {
-  appendBrowserContext,
-  type BrowserSelectionContext,
-} from '../../../utils/browser';
-import {
-  appendCanvasContext,
-  type CanvasSelectionContext,
-} from '../../../utils/canvas';
+import type { BrowserSelectionContext } from '../../../utils/browser';
+import type { CanvasSelectionContext } from '../../../utils/canvas';
 import {
   appendLinkedContent,
   appendLinkedContentBody,
+  appendSelectionContexts,
+  appendSessionReferences,
 } from '../../../utils/context';
-import {
-  appendEditorContext,
-  type EditorSelectionContext,
-} from '../../../utils/editor';
+import type { EditorSelectionContext } from '../../../utils/editor';
 import { buildContextFromHistory, buildPromptWithHistoryContext } from '../../../utils/session';
 import type { ACPContentBlock } from '../../acp';
 
 export interface OpencodePromptRequest {
+  selections?: readonly ProviderSelectionSnapshot[];
+  sessionReferences?: readonly ProviderSessionReference[];
   text: string;
   images?: ImageAttachment[];
   linkedContent?: ProviderLinkedContentContext;
@@ -44,17 +40,9 @@ export function buildOpencodePromptText(
       );
   }
 
-  if (request.editorSelection && request.editorSelection.mode !== 'none') {
-    prompt = appendEditorContext(prompt, request.editorSelection);
-  }
+  prompt = appendSelectionContexts(prompt, request);
 
-  if (request.browserSelection) {
-    prompt = appendBrowserContext(prompt, request.browserSelection);
-  }
-
-  if (request.canvasSelection) {
-    prompt = appendCanvasContext(prompt, request.canvasSelection);
-  }
+  prompt = appendSessionReferences(prompt, request.sessionReferences);
 
   if (conversationHistory.length > 0) {
     const historyContext = buildContextFromHistory(conversationHistory);

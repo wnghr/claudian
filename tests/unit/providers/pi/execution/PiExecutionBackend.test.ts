@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { capturedSelectionPrompt, capturedSelections } from '@test/helpers/capturedSelections';
 import { createProviderRecoveryTestHarness } from '@test/helpers/features/chat/ProviderRecoveryTestHarness';
 import { testTime } from '@test/helpers/testClock';
 
@@ -101,7 +102,6 @@ function createHost(): any {
             thinkingLevels: ['off', 'high'],
           }],
           enabled: true,
-          toolMode: 'all',
           visibleModels: ['pi:anthropic/claude-sonnet-4'],
         },
       },
@@ -869,7 +869,7 @@ describe('PiExecutionBackend', () => {
   it('encodes path-only Linked content without changing the Vault-root process CWD', async () => {
     const harness = createHarness();
     const run = harness.session.execute(createRequest({
-      context: { linkedContent: { path: 'Projects/Research' } },
+      context: { ...capturedSelections, sessionReferences: [{ id: 'conv-1-ref', title: 'Review', providerId: 'codex', updatedAt: 'updated', snapshotPath: '/tmp/claudian-sessions/ref.md' }], linkedContent: { path: 'Projects/Research' } },
       input: [{ text: 'Inspect linked content', type: 'text' }],
     }));
     const eventsPromise = collect(run.events);
@@ -879,7 +879,7 @@ describe('PiExecutionBackend', () => {
 
     expect(harness.kernels[0].launchSpec.cwd).toBe('/vault');
     expect(getPromptMessages(harness.kernels[0])).toEqual([
-      'Inspect linked content\n\n<linked_content path="Projects/Research" />',
+      'Inspect linked content\n\n<linked_content path="Projects/Research" />\n\n' + capturedSelectionPrompt + '\n\n<context_sessions>\n<context_session title="Review" id="conv-1-ref" provider="codex" updated="updated" path="/tmp/claudian-sessions/ref.md" />\n</context_sessions>',
     ]);
     expect(getPromptMessages(harness.kernels[0])[0]).not.toMatch(
       /<(?:linked_note|current_note)\b/,
@@ -1676,6 +1676,20 @@ describe('PiExecutionBackend', () => {
     await eventsPromise;
 
     expect(harness.kernels[0].launchSpec.args).toContain(expected);
+  });
+
+  it('ignores a legacy read-only tool mode for provider-default launches', async () => {
+    const harness = createHarness();
+    const piConfig = (harness.host.settings.providerConfigs as Record<string, Record<string, unknown>>).pi;
+    piConfig.toolMode = 'readonly';
+    const run = harness.session.execute(createRequest());
+    const eventsPromise = collect(run.events);
+    await waitFor(() => harness.kernels.length === 1);
+    harness.kernels[0].emit({ type: 'agent_start' });
+    harness.kernels[0].emit({ type: 'agent_end' });
+    await eventsPromise;
+
+    expect(harness.kernels[0].launchSpec.args).not.toContain('--tools');
   });
 
   it('includes provider-default dynamic sections in the complete system prompt', async () => {

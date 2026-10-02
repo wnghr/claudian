@@ -1,3 +1,4 @@
+import { grokModelPolicy } from '@/providers/grok/GrokModelPolicy';
 import { getGrokProviderSettings } from '@/providers/grok/settings';
 import { grokChatUIConfig } from '@/providers/grok/ui/GrokChatUIConfig';
 import { GROK_PROVIDER_ICON } from '@/shared/icons';
@@ -90,6 +91,24 @@ describe('GrokChatUIConfig', () => {
     ]);
   });
 
+  it('formats raw Grok ids as display names when the catalog has no richer name', () => {
+    const models = [
+      { displayName: 'grok-4.7', rawId: 'grok-4.7', reasoningEfforts: [], supportsReasoning: false },
+      { displayName: 'grok-code-fast-1', rawId: 'grok-code-fast-1', reasoningEfforts: [], supportsReasoning: false },
+      { displayName: 'kimi-coding', rawId: 'kimi-coding', reasoningEfforts: [], supportsReasoning: false },
+      { displayName: 'Grok 4 Heavy', rawId: 'grok-4-heavy', reasoningEfforts: [], supportsReasoning: false },
+    ];
+
+    expect(grokChatUIConfig.getModelOptions(makeSettings({
+      providerConfigs: {
+        grok: {
+          catalogsByHost: { 'device:current': { ...catalog, models } },
+          visibleModels: null,
+        },
+      },
+    })).map(option => option.label)).toEqual(['Grok 4.7', 'Grok Code Fast 1', 'kimi-coding', 'Grok 4 Heavy']);
+  });
+
   it('does not expose active or saved selections that the user disabled', () => {
     const options = grokChatUIConfig.getModelOptions(makeSettings({
       model: 'grok/kimi-coding',
@@ -156,8 +175,8 @@ describe('GrokChatUIConfig', () => {
   it('projects reasoning options, defaults, and preferences from model metadata', () => {
     const settings = makeSettings();
 
-    expect(grokChatUIConfig.isAdaptiveReasoningModel('grok/grok-4', settings)).toBe(true);
-    expect(grokChatUIConfig.isAdaptiveReasoningModel('grok/kimi-coding', settings)).toBe(false);
+    expect(grokChatUIConfig.supportsReasoningEffort('grok/grok-4', settings)).toBe(true);
+    expect(grokChatUIConfig.supportsReasoningEffort('grok/kimi-coding', settings)).toBe(false);
     expect(grokChatUIConfig.getReasoningOptions('grok/grok-4', settings)).toEqual([
       { description: 'Fastest', label: 'Minimal Effort', value: 'minimal' },
       { label: 'High Effort', value: 'high' },
@@ -277,7 +296,7 @@ describe('GrokChatUIConfig', () => {
       savedProviderModel: { grok: 'grok/grok-4.5' },
     });
 
-    expect(grokChatUIConfig.isAdaptiveReasoningModel('grok/grok-4.5', settings)).toBe(true);
+    expect(grokChatUIConfig.supportsReasoningEffort('grok/grok-4.5', settings)).toBe(true);
     expect(grokChatUIConfig.getReasoningOptions('grok/grok-4.5', settings)).toEqual([
       { label: 'Low', value: 'low' },
       { label: 'Medium', value: 'medium' },
@@ -302,7 +321,7 @@ describe('GrokChatUIConfig', () => {
       },
     });
 
-    expect(grokChatUIConfig.isAdaptiveReasoningModel('grok/kimi-coding', settings)).toBe(false);
+    expect(grokChatUIConfig.supportsReasoningEffort('grok/kimi-coding', settings)).toBe(false);
     expect(grokChatUIConfig.getReasoningOptions('grok/kimi-coding', settings)).toEqual([]);
     expect(grokChatUIConfig.getDefaultReasoningValue('grok/kimi-coding', settings)).toBe('');
   });
@@ -333,24 +352,18 @@ describe('GrokChatUIConfig', () => {
     expect(grokChatUIConfig.normalizeModelVariant('claude', settings)).toBe('claude');
   });
 
-  it('uses Safe for obsolete selections and supports explicit YOLO', () => {
-    expect(grokChatUIConfig.getPermissionModeToggle?.()).toEqual({
-      activeLabel: 'YOLO',
-      activeValue: 'yolo',
-      inactiveLabel: 'Safe',
-      inactiveValue: 'normal',
-    });
+  it('offers every native permission mode except plan and fails closed to Ask', () => {
+    const options = grokChatUIConfig.getPermissionModeOptions?.({}) ?? [];
+
+    expect(options.map(option => option.value)).toEqual([
+      'auto', 'normal', 'acceptEdits', 'yolo',
+    ]);
+    expect(options.filter(option => option.bypassesApprovals).map(option => option.value))
+      .toEqual(['yolo']);
+    expect(grokModelPolicy.permissionModes).toEqual(expect.objectContaining({
+      fallbackValue: 'normal',
+      values: options.map(option => option.value),
+    }));
     expect(grokChatUIConfig.getModeSelector?.({})).toBeNull();
-
-    const settings: Record<string, unknown> = {
-      permissionMode: 'yolo',
-      providerConfigs: { grok: { enabled: true } },
-    };
-    grokChatUIConfig.applyPermissionMode?.('plan', settings);
-    expect(settings.permissionMode).toBe('normal');
-    expect(grokChatUIConfig.resolvePermissionMode?.(settings)).toBe('normal');
-
-    grokChatUIConfig.applyPermissionMode?.('yolo', settings);
-    expect(settings.permissionMode).toBe('yolo');
   });
 });

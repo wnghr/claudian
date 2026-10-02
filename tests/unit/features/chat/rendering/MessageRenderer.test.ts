@@ -1,7 +1,7 @@
 import '@/providers';
 
 import { createMockEl } from '@test/helpers/MockElement';
-import { Menu } from 'obsidian';
+import { Component, Menu } from 'obsidian';
 
 import {
   TOOL_AGENT_OUTPUT,
@@ -44,13 +44,7 @@ jest.mock('@/utils/fileLink', () => ({
 }));
 
 function createMockComponent() {
-  return {
-    registerDomEvent: jest.fn(),
-    register: jest.fn(),
-    addChild: jest.fn(),
-    load: jest.fn(),
-    unload: jest.fn(),
-  };
+  return new Component();
 }
 
 function mockCapabilities(providerId: 'claude' | 'codex' | 'grok' = 'claude') {
@@ -585,7 +579,7 @@ describe('MessageRenderer', () => {
     expect(renderStoredToolCall).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'todo', name: 'TodoWrite' }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false, renderMarkdown: expect.any(Function) }),
     );
     expect(renderStoredWriteEdit).toHaveBeenCalled();
     expect(renderStoredToolCall).toHaveBeenCalled();
@@ -615,7 +609,7 @@ describe('MessageRenderer', () => {
     expect(renderStoredWriteEdit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'edit-1', name: 'Edit' }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false }),
     );
   });
 
@@ -641,7 +635,7 @@ describe('MessageRenderer', () => {
     expect(renderStoredWriteEdit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'write-1', name: 'Write' }),
-      { initiallyExpanded: true },
+      expect.objectContaining({ initiallyExpanded: true }),
     );
   });
 
@@ -730,7 +724,7 @@ describe('MessageRenderer', () => {
         name: TOOL_WRITE_STDIN,
         input: { session_id: '2404', chars: 'y\n' },
       }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false }),
     );
     expect(messagesEl.children).toHaveLength(1);
   });
@@ -763,7 +757,7 @@ describe('MessageRenderer', () => {
     expect(renderStoredToolCall).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'patch-1', name: TOOL_APPLY_PATCH }),
-      { initiallyExpanded: true },
+      expect.objectContaining({ initiallyExpanded: true }),
     );
   });
 
@@ -819,7 +813,7 @@ describe('MessageRenderer', () => {
     expect(renderStoredToolCall).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'read-1', name: 'Read' }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false }),
     );
   });
 
@@ -1048,12 +1042,12 @@ describe('MessageRenderer', () => {
     expect(renderStoredToolCall).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'read-1', name: 'Read' }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false }),
     );
     expect(renderStoredToolCall).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ id: 'grep-1', name: 'Grep' }),
-      { initiallyExpanded: false },
+      expect.objectContaining({ initiallyExpanded: false }),
     );
   });
 

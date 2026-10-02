@@ -7,7 +7,7 @@ import { Notice } from 'obsidian';
 import { normalizeInsertionText } from '@/features/inline-edit/ui/normalizeInsertionText';
 
 import { createCatalogCommandDiscoveryStore } from '../../../core/providers/commands/catalogCommandDiscovery';
-import { getHiddenProviderCommandSet } from '../../../core/providers/commands/hiddenCommands';
+import { getHiddenCommandSet } from '../../../core/providers/commands/hiddenCommands';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import { type InlineEditMode, type InlineEditService, type ProviderId } from '../../../core/providers/types';
@@ -25,7 +25,6 @@ import {
   normalizeMentionPath,
 } from '../../../utils/contextMentionResolver';
 import { type CursorContext, getEditorView } from '../../../utils/editor';
-import { getVaultPath, normalizePathForVault as normalizePathForVaultUtil } from '../../../utils/path';
 import type { FeatureHost } from '../../FeatureHost';
 import type { InlineEditSessionOwner } from '../InlineEditSessionOwner';
 import { onInlineEditEditorDestroyed } from './InlineEditEditorLifetime';
@@ -579,7 +578,7 @@ export class InlineEditSession {
     const slashSource = new SlashCommandSource({
       includeBuiltIns: false,
       providerId: this.resolvedProviderId,
-      hiddenCommands: getHiddenProviderCommandSet(this.plugin.settings, this.resolvedProviderId),
+      hiddenCommands: getHiddenCommandSet(this.plugin.settings),
       ...(inlineCatalog && discovery ? {
         providerConfig: inlineCatalog.getDropdownConfig(),
         providerDiscovery: discovery,
@@ -589,7 +588,6 @@ export class InlineEditSession {
       // Inline Edit resolves @mentions at send time from input text.
       getCachedVaultFolders: () => this.mentionDataProvider.getCachedVaultFolders(),
       getCachedVaultFiles: () => this.mentionDataProvider.getCachedVaultFiles(),
-      normalizePathForVault: (rawPath) => this.normalizePathForVault(rawPath),
     });
     const dropdown = new ComposerDropdownController(
       ownerDocument.body,
@@ -1040,16 +1038,6 @@ export class InlineEditSession {
     }
   }
 
-  private normalizePathForVault(rawPath: string | undefined | null): string | null {
-    try {
-      const vaultPath = getVaultPath(this.app);
-      return normalizePathForVaultUtil(rawPath, vaultPath);
-    } catch {
-      new Notice('Failed to attach file: invalid path');
-      return null;
-    }
-  }
-
   #resolveContextFilesFromMessage(message: string): string[] {
     if (!message.includes('@')) return [];
 
@@ -1057,11 +1045,11 @@ export class InlineEditSession {
 
     const pathLookup = new Map<string, string>();
     for (const file of vaultFiles) {
-      const normalized = this.normalizePathForVault(file.path);
-      if (!normalized) continue;
-      const lookupKey = normalizeForPlatformLookup(normalizeMentionPath(normalized));
-      if (!pathLookup.has(lookupKey)) {
-        pathLookup.set(lookupKey, normalized);
+      // TFile paths are already Vault-relative; filesystem normalization would
+      // expand literal `%VAR%`/`$VAR` segments and stat every file.
+      const lookupKey = normalizeForPlatformLookup(normalizeMentionPath(file.path));
+      if (lookupKey && !pathLookup.has(lookupKey)) {
+        pathLookup.set(lookupKey, file.path);
       }
     }
 

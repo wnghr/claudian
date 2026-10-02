@@ -2,7 +2,6 @@ import * as fs from 'fs';
 import { Setting } from 'obsidian';
 
 import { probeCLIInstallation } from '@/core/providers/cli/CLIInstallationProbe';
-import type { ProviderVaultEntryRepository } from '@/core/providers/commands/ProviderVaultEntryRepository';
 import { getRuntimeEnvironmentVariables } from '@/core/providers/providerEnvironment';
 import type { ProviderCLIResolver } from '@/core/providers/types';
 import { CLAUDE_PROVIDER_ICON } from '@/shared/icons';
@@ -21,15 +20,12 @@ import {
   getClaudeModelOptions,
 } from '../modelOptions';
 import {
-  CLAUDE_SAFE_MODES,
-  type ClaudeSafeMode,
   getClaudeProviderSettings,
   updateClaudeProviderSettings,
 } from '../settings';
-import { SlashCommandSettings } from './SlashCommandSettings';
 
 export function createClaudeSettingsTabRenderer(
-  claudeWorkspace: { cliResolver: Pick<ProviderCLIResolver, 'reset'>; vaultCommandRepository: ProviderVaultEntryRepository; modelCatalog: ProviderModelCatalog; },
+  claudeWorkspace: { cliResolver: Pick<ProviderCLIResolver, 'reset'>; modelCatalog: ProviderModelCatalog; },
 ): ProviderSettingsTabRenderer {
   return {
     render(container, context) {
@@ -40,7 +36,7 @@ export function createClaudeSettingsTabRenderer(
 
       const enablement: Omit<ProviderEnablementSettingOptions, 'container' | 'description'> = {
         getValue: () => getClaudeProviderSettings(settingsBag).enabled,
-        name: t('settings.providerEnablement.name', { provider: 'Claude' }),
+        name: t('settings.providerEnablement.name', { provider: 'Claude Code' }),
         onChange: async (value) => {
           if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
             settingsBag,
@@ -76,7 +72,7 @@ export function createClaudeSettingsTabRenderer(
         getHasEnabledModels: () => getClaudeModelOptions(settingsBag).length > 0,
         getIsEnabled: () => getClaudeProviderSettings(settingsBag).enabled,
         providerId: 'claude',
-        providerName: 'Claude',
+        providerName: 'Claude Code',
       });
 
       const hostnameKey = context.plugin.storage.installationKey;
@@ -145,7 +141,7 @@ export function createClaudeSettingsTabRenderer(
       // --- Models ---
 
       new Setting(container).setName(t('settings.models')).setHeading();
-      const modelPicker = renderProviderModelsSection(container, 'claude', 'Claude', claudeWorkspace.modelCatalog, () => modelWarning.refresh());
+      const modelPicker = renderProviderModelsSection(container, 'claude', 'Claude Code', claudeWorkspace.modelCatalog, () => modelWarning.refresh());
 
       new Setting(container)
         .setName(t('settings.claude.responseStyle.name'))
@@ -165,28 +161,9 @@ export function createClaudeSettingsTabRenderer(
             });
         });
 
-      // --- Safety ---
+      // --- Configuration ---
 
-      new Setting(container).setName(t('settings.safety')).setHeading();
-
-      new Setting(container)
-        .setName(t('settings.claudeSafeMode.name'))
-        .setDesc(t('settings.claudeSafeMode.desc'))
-        .addDropdown((dropdown) => {
-          for (const mode of CLAUDE_SAFE_MODES) {
-            dropdown.addOption(mode, mode);
-          }
-          dropdown
-            .setValue(claudeSettings.safeMode)
-            .onChange(async (value) => {
-              await context.plugin.mutateSettings((settings) => {
-                updateClaudeProviderSettings(
-                  settings,
-                  { safeMode: value as ClaudeSafeMode },
-                );
-              });
-            });
-        });
+      new Setting(container).setName(t('settings.claude.configuration')).setHeading();
 
       new Setting(container)
         .setName(t('settings.loadUserSettings.name'))
@@ -201,31 +178,6 @@ export function createClaudeSettingsTabRenderer(
             })
         );
 
-      // --- Slash Commands ---
-
-      new Setting(container).setName(t('settings.slashCommands.name')).setHeading();
-
-      const slashCommandsDesc = container.createDiv({ cls: 'claudian-sp-settings-desc' });
-      const descP = slashCommandsDesc.createEl('p', { cls: 'setting-item-description' });
-      descP.appendText(t('settings.slashCommands.desc') + ' ');
-      descP.createEl('a', {
-        text: 'Learn more',
-        href: 'https://code.claude.com/docs/en/skills',
-      });
-
-      const slashCommandsContainer = container.createDiv({ cls: 'claudian-slash-commands-container' });
-      new SlashCommandSettings(
-        slashCommandsContainer,
-        context.plugin.app,
-        claudeWorkspace.vaultCommandRepository,
-      );
-
-      context.renderHiddenProviderCommandSetting(container, 'claude', {
-        name: t('settings.hiddenSlashCommands.name'),
-        desc: t('settings.hiddenSlashCommands.desc'),
-        placeholder: t('settings.hiddenSlashCommands.placeholder'),
-      });
-
       // --- Environment ---
 
       renderEnvironmentSettingsSection({
@@ -234,7 +186,7 @@ export function createClaudeSettingsTabRenderer(
         scope: 'provider:claude',
         heading: t('settings.environment'),
         name: t('settings.customVariables.name'),
-        desc: 'Claude-owned runtime variables only. Use this for ANTHROPIC_* and Claude-specific toggles.',
+        desc: t('settings.customVariables.desc'),
         placeholder: 'ANTHROPIC_API_KEY=your-key\nANTHROPIC_BASE_URL=https://api.example.com\nANTHROPIC_MODEL=custom-model\nCLAUDE_CODE_USE_BEDROCK=1',
         renderCustomContextLimits: (target) => context.renderCustomContextLimits(target, 'claude'),
       });

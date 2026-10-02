@@ -22,9 +22,17 @@ import {
   extractToolProviderPayload,
   normalizeToolProviderPayload,
 } from '../../../core/tools/toolProviderPayload';
-import { extractToolResultContent } from '../../../core/tools/toolResultContent';
+import {
+  extractResultImages,
+  extractScriptToolCalls,
+  extractToolResultContent,
+  extractToolResultFormat,
+  extractWebSearchResults,
+  extractWebSearchSummary,
+} from '../../../core/tools/toolResultContent';
 import type {
   ChatMessage,
+  ScriptToolCallItem,
   StreamChunk,
   SubagentInfo,
   SubagentProgress,
@@ -97,7 +105,8 @@ export interface SubagentHistoryRecoveryRequest {
 interface StreamingContentSnapshot {
   el: HTMLElement;
   content: string;
-  options?: RenderContentOptions;
+  /** Final renders never defer math or diagrams. */
+  final?: true;
 }
 
 const STREAMING_RENDER_MIN_INTERVAL_MS = 150;
@@ -117,6 +126,12 @@ export class StreamController {
   private pendingToolOutputFrames = new Map<string, ScheduledAnimationFrame>();
   private pendingScrollFrame: ScheduledAnimationFrame | null = null;
   private readonly managedSubagentIds = new Set<string>();
+  /** When the pending thinking indicator is due, so an earlier request can replace a later one. */
+  #thinkingIndicatorDueAt = 0;
+  /** An explicit status (such as compaction) stays with its response across hide and resume. */
+  #explicitIndicator: { contentEl: HTMLElement; text: string; cls?: string } | null = null;
+  /** Stream generation that owns the current indicator; a superseded turn's indicator is discarded. */
+  #thinkingIndicatorGeneration: number | null = null;
 
   // Provider lifecycle agent tracking (spawn → wait/close lifecycle)
 
@@ -144,7 +159,10 @@ export class StreamController {
     return new StreamingRenderCoordinator({
       getOwnerWindow,
       minIntervalMs: STREAMING_RENDER_MIN_INTERVAL_MS,
-      render: async ({ el, content, options }) => {
+      maxIntervalMs: 500,
+      render: async ({ el, content, final }) => {
+        // Derive options only when a render runs so hidden or throttled deltas skip the scans.
+        const options = final ? undefined : this.#getStreamingRenderOptions(content);
         if (options) {
           await this.deps.renderer.renderContent(el, content, options);
         } else {
@@ -153,14 +171,6 @@ export class StreamController {
         this.scrollToBottom();
       },
     });
-  }
-
-  #createStreamingSnapshot(
-    el: HTMLElement,
-    content: string
-  ): StreamingContentSnapshot {
-    const options = this.#getStreamingRenderOptions(content);
-    return options ? { el, content, options } : { el, content };
   }
 
   #getActiveProviderId(): ProviderId {
@@ -198,6 +208,7 @@ export class StreamController {
           await this.finalizeCurrentTextBlock(msg);
         }
         await this.appendThinking(chunk.content);
+        state.recordActivity({ kind: 'thinking' });
         break;
 
       case 'text':
@@ -208,6 +219,7 @@ export class StreamController {
         }
         msg.content += chunk.content;
         await this.appendText(chunk.content);
+        state.recordActivity({ kind: 'text', text: state.currentTextEl ? state.currentTextContent : msg.content });
         break;
 
       case 'citations': {
@@ -281,7 +293,7 @@ export class StreamController {
       case 'error':
         // Flush pending tools before rendering error message
         this.#flushPendingTools();
-        await this.appendText(`\n\n❌ **Error:** ${chunk.content}`);
+        await this.appendError(chunk.content, '❌ **Error:**');
         break;
 
       case 'done':
@@ -337,6 +349,11 @@ export class StreamController {
 
       default:
         break;
+    }
+
+    if (chunk.type === 'tool_use' || chunk.type === 'tool_result') {
+      const tool = msg.toolCalls?.find(candidate => candidate.id === chunk.id);
+      if (tool) state.recordActivity({ kind: 'tool', tool });
     }
 
     this.scrollToBottom();
@@ -473,6 +490,7 @@ export class StreamController {
       state.writeEditStates.delete(toolCall.id);
       replacementEl = renderToolCall(parentEl, toolCall, state.toolCallElements, {
         initiallyExpanded,
+        renderMarkdown: this.#renderToolMarkdown,
       });
       state.toolCallElements.set(toolCall.id, replacementEl);
       if (toolCall.result !== undefined || toolCall.status !== 'running') {
@@ -549,13 +567,18 @@ export class StreamController {
     } else {
       renderToolCall(parentEl, toolCall, state.toolCallElements, {
         initiallyExpanded: toolCall.name === TOOL_APPLY_PATCH ? this.#shouldExpandFileEditsByDefault() : false,
+        renderMarkdown: this.#renderToolMarkdown,
       });
     }
     state.pendingTools.delete(toolId);
   }
 
+  readonly #renderToolMarkdown = (el: HTMLElement, markdown: string): Promise<void> => (
+    this.deps.renderer.renderContent(el, markdown)
+  );
+
   #handleToolOutput(
-    chunk: { type: 'tool_output'; id: string; content: string },
+    chunk: Extract<StreamChunk, { type: 'tool_output' }>,
     msg: ChatMessage,
   ): void {
     const { state } = this.deps;
@@ -569,7 +592,12 @@ export class StreamController {
       return;
     }
 
-    existingToolCall.result = (existingToolCall.result ?? '') + chunk.content;
+    if (chunk.content) existingToolCall.result = (existingToolCall.result ?? '') + chunk.content;
+    const scriptToolCalls = extractScriptToolCalls(chunk.toolUseResult);
+    if (scriptToolCalls) {
+      this.#notifyScriptFileChanges(existingToolCall.scriptToolCalls, scriptToolCalls);
+      existingToolCall.scriptToolCalls = scriptToolCalls;
+    }
     this.#scheduleToolOutputRender(chunk.id, existingToolCall);
     this.showThinkingIndicator();
   }
@@ -790,6 +818,12 @@ export class StreamController {
       }
       existingToolCall.result = normalizedContent;
       if (chunk.images) existingToolCall.images = chunk.images;
+      existingToolCall.resultFormat = extractToolResultFormat(chunk.toolUseResult) ?? existingToolCall.resultFormat;
+      existingToolCall.webSearchResults = extractWebSearchResults(chunk.toolUseResult) ?? existingToolCall.webSearchResults;
+      existingToolCall.webSearchSummary = extractWebSearchSummary(chunk.toolUseResult) ?? existingToolCall.webSearchSummary;
+      existingToolCall.resultImages = extractResultImages(chunk.toolUseResult) ?? existingToolCall.resultImages;
+      const previousScriptToolCalls = existingToolCall.scriptToolCalls;
+       existingToolCall.scriptToolCalls = extractScriptToolCalls(chunk.toolUseResult) ?? previousScriptToolCalls;
 
       if (existingToolCall.name === TOOL_ASK_USER_QUESTION) {
         const answers =
@@ -823,6 +857,8 @@ export class StreamController {
       if (!chunk.isError && !isBlocked && existingToolCall.name === TOOL_APPLY_PATCH) {
         this.#notifyApplyPatchFileChanges(existingToolCall.input);
       }
+
+      this.#notifyScriptFileChanges(previousScriptToolCalls, existingToolCall.scriptToolCalls);
     }
 
     this.showThinkingIndicator();
@@ -831,6 +867,12 @@ export class StreamController {
   // ============================================
   // Text Block Management
   // ============================================
+
+  /** Renders a terminal error and publishes it as the latest activity. */
+  async appendError(message: string, label = '**Error:**'): Promise<void> {
+    await this.appendText(`\n\n${label} ${message}`);
+    this.deps.state.recordActivity({ kind: 'error', message });
+  }
 
   async appendText(text: string): Promise<void> {
     const { state } = this.deps;
@@ -845,9 +887,12 @@ export class StreamController {
     }
 
     state.currentTextContent += text;
-    this.textRenderCoordinator.request(
-      this.#createStreamingSnapshot(state.currentTextEl, state.currentTextContent)
-    );
+    this.textRenderCoordinator.request({
+      el: state.currentTextEl,
+      content: state.currentTextContent,
+    });
+    // Each chunk restarts the pause; the indicator returns only once text stops arriving.
+    if (state.isStreaming) this.#scheduleThinkingIndicator(StreamController.TEXT_PAUSE_INDICATOR_DELAY);
   }
 
   async finalizeCurrentTextBlock(msg?: ChatMessage): Promise<void> {
@@ -859,7 +904,7 @@ export class StreamController {
       textEl
       && this.#getStreamingRenderOptions(content)
     ) {
-      this.textRenderCoordinator.request({ el: textEl, content });
+      this.textRenderCoordinator.request({ el: textEl, content, final: true });
     }
     await this.textRenderCoordinator.flush();
 
@@ -923,12 +968,10 @@ export class StreamController {
     }
 
     state.currentThinkingState.content += content;
-    this.thinkingRenderCoordinator.request(
-      this.#createStreamingSnapshot(
-        state.currentThinkingState.contentEl,
-        state.currentThinkingState.content
-      )
-    );
+    this.thinkingRenderCoordinator.request({
+      el: state.currentThinkingState.contentEl,
+      content: state.currentThinkingState.content,
+    });
   }
 
   async finalizeCurrentThinkingBlock(msg?: ChatMessage): Promise<void> {
@@ -940,6 +983,7 @@ export class StreamController {
       this.thinkingRenderCoordinator.request({
         el: thinkingState.contentEl,
         content: thinkingState.content,
+        final: true,
       });
     }
     await this.thinkingRenderCoordinator.flush();
@@ -1125,10 +1169,15 @@ export class StreamController {
             ? 'blocked'
             : (chunk.isError ? 'error' : 'completed');
           toolCall.result = normalizedContent;
-          if (chunk.images) toolCall.images = chunk.images;
+            if (chunk.images) toolCall.images = chunk.images;
+            toolCall.resultFormat = extractToolResultFormat(chunk.toolUseResult) ?? toolCall.resultFormat;
           mergeToolProviderPayload(toolCall, chunk.toolUseResult?.providerPayload);
           mergeToolProviderPayload(toolCall, chunk.providerPayload);
           toolCall.diffData = extractDiffData(chunk.toolUseResult, toolCall) ?? toolCall.diffData;
+          toolCall.webSearchResults = extractWebSearchResults(chunk.toolUseResult) ?? toolCall.webSearchResults;
+          toolCall.webSearchSummary = extractWebSearchSummary(chunk.toolUseResult) ?? toolCall.webSearchSummary;
+          toolCall.resultImages = extractResultImages(chunk.toolUseResult) ?? toolCall.resultImages;
+          toolCall.scriptToolCalls = extractScriptToolCalls(chunk.toolUseResult) ?? toolCall.scriptToolCalls;
           subagentManager.updateSyncToolResult(parentToolUseId, chunk.id, toolCall);
         }
         break;
@@ -1539,6 +1588,8 @@ export class StreamController {
 
   /** Debounce delay before showing thinking indicator (ms). */
   private static readonly THINKING_INDICATOR_DELAY = 400;
+  /** Longer delay after streamed text, so token gaps do not flicker the indicator. */
+  private static readonly TEXT_PAUSE_INDICATOR_DELAY = 1500;
 
   /**
    * Schedules showing the thinking indicator after a delay.
@@ -1547,13 +1598,37 @@ export class StreamController {
    * Note: Flavor text is hidden when model thinking block is active (thinking takes priority).
    */
   showThinkingIndicator(overrideText?: string, overrideCls?: string): void {
+    this.#scheduleThinkingIndicator(StreamController.THINKING_INDICATOR_DELAY, overrideText, overrideCls);
+  }
+
+  /** Brings the indicator back while the turn continues without visible output. */
+  resumeThinkingIndicator(): void {
+    if (this.deps.state.isStreaming) this.showThinkingIndicator();
+  }
+
+  #scheduleThinkingIndicator(delay: number, overrideText?: string, overrideCls?: string): void {
     const { state } = this.deps;
 
     // Early return if no content element
     if (!state.currentContentEl) return;
 
-    // Clear any existing timeout
+    const generation = state.streamGeneration;
+    if (this.#thinkingIndicatorGeneration !== generation) {
+      if (state.thinkingEl || state.thinkingIndicatorTimeout) this.hideThinkingIndicator();
+      this.#thinkingIndicatorGeneration = generation;
+    }
+
+    const isExplicitRequest = !!overrideText;
+    if (overrideText) {
+      this.#explicitIndicator = { contentEl: state.currentContentEl, text: overrideText, cls: overrideCls };
+    } else if (this.#explicitIndicator?.contentEl === state.currentContentEl) {
+      ({ text: overrideText, cls: overrideCls } = this.#explicitIndicator);
+    }
+
+    // A pending show keeps its deadline; repeated requests must not postpone it.
+    const dueAt = performance.now() + delay;
     if (state.thinkingIndicatorTimeout) {
+      if (!isExplicitRequest && this.#thinkingIndicatorDueAt <= dueAt) return;
       const timerWindow = state.currentContentEl.ownerDocument.defaultView ?? window;
       state.clearThinkingIndicatorTimeout(timerWindow);
     }
@@ -1573,10 +1648,16 @@ export class StreamController {
 
     // Schedule showing the indicator after a delay
     const timerWindow = state.currentContentEl.ownerDocument.defaultView ?? window;
+    this.#thinkingIndicatorDueAt = dueAt;
     state.setThinkingIndicatorTimeout(timerWindow.setTimeout(() => {
       state.setThinkingIndicatorTimeout(null, null);
-      // Double-check we still have a content element, no indicator exists, and no thinking block
-      if (!state.currentContentEl || state.thinkingEl || state.currentThinkingState) return;
+      // Double-check we still have a content element, no indicator exists, and no thinking block.
+      // A pending user interaction takes the place of the indicator until it settles,
+      // and a superseded stream (new chat, teardown) no longer owns the indicator.
+      if (
+        !state.currentContentEl || state.thinkingEl || state.currentThinkingState || state.requiresAction
+        || state.streamGeneration !== generation
+      ) return;
 
       const cls = overrideCls
         ? `claudian-thinking ${overrideCls}`
@@ -1584,6 +1665,7 @@ export class StreamController {
       state.thinkingEl = state.currentContentEl.createDiv({ cls });
       const text = overrideText || FLAVOR_TEXTS[Math.floor(Math.random() * FLAVOR_TEXTS.length)];
       state.thinkingEl.createSpan({ text });
+      state.waitingStatus = text;
 
       // Create timer span with initial value
       const timerSpan = state.thinkingEl.createSpan({ cls: 'claudian-thinking-hint' });
@@ -1608,7 +1690,7 @@ export class StreamController {
       const thinkingWindow = state.currentContentEl.ownerDocument.defaultView ?? timerWindow;
       state.setFlavorTimerInterval(thinkingWindow.setInterval(updateTimer, 1000), thinkingWindow);
       this.scrollToBottom();
-    }, StreamController.THINKING_INDICATOR_DELAY), timerWindow);
+    }, delay), timerWindow);
   }
 
   /** Hides the thinking indicator and cancels any pending show timeout. */
@@ -1628,6 +1710,7 @@ export class StreamController {
       state.thinkingEl.remove();
       state.thinkingEl = null;
     }
+    state.waitingStatus = null;
   }
 
   // ============================================
@@ -1638,6 +1721,8 @@ export class StreamController {
     const { state } = this.deps;
     if (!state.currentContentEl) return;
     this.hideThinkingIndicator();
+    // Compaction is over; later waiting in this response shows ordinary flavor.
+    this.#explicitIndicator = null;
     const el = state.currentContentEl.createDiv({ cls: 'claudian-compact-boundary' });
     el.createSpan({ cls: 'claudian-compact-boundary-label', text: 'Conversation compacted' });
   }
@@ -1672,6 +1757,21 @@ export class StreamController {
         vault.adapter.list(parentDir).catch(() => { /* ignore */ });
       }
     }, 200);
+  }
+
+  /**
+   * Refreshes files nested script calls finished changing since the previous snapshot.
+   * A later script failure or cancellation does not undo them.
+   */
+  #notifyScriptFileChanges(
+    previous: readonly ScriptToolCallItem[] | undefined,
+    next: readonly ScriptToolCallItem[] | undefined,
+  ): void {
+    next?.forEach((call, index) => {
+      if (call.status !== 'completed' || !call.input || previous?.[index]?.status === 'completed') return;
+      if (isEditTool(call.name)) this.#notifyVaultFileChange(call.input);
+      else if (call.name === TOOL_APPLY_PATCH) this.#notifyApplyPatchFileChanges(call.input);
+    });
   }
 
   /** Refreshes vault for each file path in an apply_patch changes array or patch text. */
@@ -1795,6 +1895,7 @@ export class StreamController {
   }
 
   dispose(): void {
+    this.hideThinkingIndicator();
     this.resetSubagentStreamingState();
     this.textRenderCoordinator.dispose();
     this.thinkingRenderCoordinator.dispose();
@@ -1807,10 +1908,11 @@ export function providerOutputEventToStreamChunk(
   event: ProviderExecutionEvent | ProviderBackgroundOutputEvent,
 ): StreamChunk | null {
   switch (event.type) {
+    // Empty deltas carry no output; dropping them here keeps them from ending the waiting state.
     case 'text_delta':
-      return { content: event.text, type: 'text' };
+      return event.text ? { content: event.text, type: 'text' } : null;
     case 'thinking_delta':
-      return { content: event.text, type: 'thinking' };
+      return event.text ? { content: event.text, type: 'thinking' } : null;
     case 'citations':
       return { citations: event.citations, type: 'citations' };
     case 'tool_started':
@@ -1833,7 +1935,12 @@ export function providerOutputEventToStreamChunk(
     case 'tool_output':
       return event.toolScope.kind === 'subagent'
         ? { content: event.content, id: event.toolCallId, type: 'subagent_tool_output', subagentId: event.toolScope.subagentId }
-        : { content: event.content, id: event.toolCallId, type: 'tool_output' };
+        : {
+          content: event.content,
+          id: event.toolCallId,
+          type: 'tool_output',
+          ...(event.toolUseResult ? { toolUseResult: event.toolUseResult } : {}),
+        };
     case 'tool_completed':
       return event.toolScope.kind === 'subagent'
         ? {

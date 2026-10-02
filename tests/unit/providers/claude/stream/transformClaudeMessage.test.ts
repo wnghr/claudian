@@ -1,12 +1,22 @@
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { buildSDKMessage } from '@test/helpers/sdkMessages';
 
 import {
   createTransformStreamState,
   createTransformUsageState,
+  type TransformOptions,
   transformSDKMessage,
 } from '@/providers/claude/stream/transformClaudeMessage';
 
 const msg = buildSDKMessage;
+
+function transform(message: SDKMessage, options: Partial<TransformOptions> = {}) {
+  return [...transformSDKMessage(message, {
+    streamState: createTransformStreamState(),
+    usageState: createTransformUsageState(),
+    ...options,
+  })];
+}
 
 describe('transformSDKMessage', () => {
   describe('system messages', () => {
@@ -17,7 +27,7 @@ describe('transformSDKMessage', () => {
         session_id: 'test-session-123',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -35,7 +45,7 @@ describe('transformSDKMessage', () => {
         session_id: 'test-session',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -52,7 +62,7 @@ describe('transformSDKMessage', () => {
         session_id: 'test-session',
       } as any;
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([{
         type: 'tool_result',
@@ -69,7 +79,7 @@ describe('transformSDKMessage', () => {
         subtype: 'compact_boundary',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'context_compacted' },
@@ -84,7 +94,7 @@ describe('transformSDKMessage', () => {
         permissionMode: 'plan',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toHaveLength(1);
       expect(results[0]).toEqual({
@@ -105,7 +115,7 @@ describe('transformSDKMessage', () => {
         summary: 'Agent completed successfully.',
       } as any);
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -129,7 +139,7 @@ describe('transformSDKMessage', () => {
         summary: 'Agent failed.',
       } as any);
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -145,25 +155,6 @@ describe('transformSDKMessage', () => {
 
   describe('assistant messages', () => {
 
-    it('generates fallback id for tool_use without id', () => {
-      const message = msg({
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'tool_use', name: 'Bash' },
-          ],
-        },
-      });
-
-      const results = [...transformSDKMessage(message)];
-
-      expect(results.length).toBe(1);
-      expect(results[0].type).toBe('tool_use');
-      expect((results[0] as any).id).toMatch(/^tool-\d+-\w+$/);
-      expect((results[0] as any).name).toBe('Bash');
-      expect((results[0] as any).input).toEqual({});
-    });
-
     it('normalizes mixed assistant blocks in order without inventing usage', () => {
       const message = msg({
         type: 'assistant',
@@ -176,7 +167,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'thinking', content: 'Let me think about this...' },
@@ -196,7 +187,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -215,7 +206,7 @@ describe('transformSDKMessage', () => {
         message: { content: [] },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -226,7 +217,7 @@ describe('transformSDKMessage', () => {
         message: {},
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -242,7 +233,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'text', content: 'Valid text' },
@@ -260,7 +251,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'tool_use', id: 'tool-1', name: 'Skill', input: { skill: 'md2docx' } },
@@ -278,7 +269,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'thinking', content: 'Valid thinking' },
@@ -296,30 +287,16 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
-        { type: 'error', content: 'rate_limit' },
+        { type: 'error', content: 'Claude rate limit reached. Try again later.' },
         { type: 'text', content: 'Partial response' },
       ]);
     });
   });
 
   describe('user messages', () => {
-    it('yields warning notice for blocked tool calls', () => {
-      const message = msg({
-        type: 'user',
-        _blocked: true,
-        _blockReason: 'Command blocked: rm -rf /',
-      });
-
-      const results = [...transformSDKMessage(message)];
-
-      expect(results).toEqual([
-        { type: 'notice', content: 'Command blocked: rm -rf /', level: 'warning' },
-      ]);
-    });
-
     it('yields tool_result for tool_use_result with parent_tool_use_id', () => {
       const message = msg({
         type: 'user',
@@ -327,7 +304,7 @@ describe('transformSDKMessage', () => {
         tool_use_result: 'File contents here',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -348,7 +325,7 @@ describe('transformSDKMessage', () => {
         tool_use_result: { status: 'success', data: [1, 2, 3] },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results.length).toBe(1);
       expect(results[0].type).toBe('subagent_tool_result');
@@ -366,7 +343,7 @@ describe('transformSDKMessage', () => {
         tool_use_result: toolUseResult,
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -398,7 +375,7 @@ describe('transformSDKMessage', () => {
         tool_use_result: toolUseResult,
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         expect.objectContaining({
@@ -430,7 +407,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -458,7 +435,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const [result] = [...transformSDKMessage(message)];
+      const [result] = transform(message);
 
       expect(result.type).toBe('tool_result');
       expect(result).toMatchObject({ id: 'tool-image', isError: false });
@@ -484,7 +461,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -513,7 +490,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -539,7 +516,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results.length).toBe(1);
       expect((results[0] as any).content).toContain('"key": "value"');
@@ -563,27 +540,36 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results.length).toBe(1);
       expect((results[0] as any).content).toBe(JSON.stringify(toolRefs, null, 2));
     });
 
-    it('uses parent_tool_use_id as fallback for tool_result id', () => {
+    it('emits one result for a subagent frame carrying both structured output and its tool_result block', () => {
       const message = msg({
         type: 'user',
-        parent_tool_use_id: 'fallback-id',
+        parent_tool_use_id: 'task-1',
+        tool_use_result: { stdout: 'child output', stderr: '', interrupted: false },
         message: {
           content: [
-            { type: 'tool_result', content: 'Some result' },
+            { type: 'tool_result', tool_use_id: 'child-1', content: 'child output' },
           ],
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
-      expect(results.length).toBe(1);
-      expect((results[0] as any).id).toBe('fallback-id');
+      expect(results).toEqual([
+        {
+          type: 'subagent_tool_result',
+          subagentId: 'task-1',
+          id: 'child-1',
+          content: 'child output',
+          isError: false,
+          toolUseResult: { stdout: 'child output', stderr: '', interrupted: false },
+        },
+      ]);
     });
 
     it('yields nothing for user messages without tool results', () => {
@@ -591,7 +577,7 @@ describe('transformSDKMessage', () => {
         type: 'user',
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -612,7 +598,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         {
@@ -622,24 +608,6 @@ describe('transformSDKMessage', () => {
           input: { file_path: '/test.ts' },
         },
       ]);
-    });
-
-    it('generates fallback id for content_block_start without id', () => {
-      const message = msg({
-        type: 'stream_event',
-        event: {
-          type: 'content_block_start',
-          content_block: {
-            type: 'tool_use',
-            name: 'Glob',
-          },
-        },
-      });
-
-      const results = [...transformSDKMessage(message)];
-
-      expect(results.length).toBe(1);
-      expect((results[0] as any).id).toMatch(/^tool-\d+$/);
     });
 
     it('yields cumulative tool_use updates for input_json_delta', () => {
@@ -680,7 +648,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      expect([...transformSDKMessage(startMessage, { streamState })]).toEqual([
+      expect(transform(startMessage, { streamState })).toEqual([
         {
           type: 'tool_use',
           id: 'stream-tool-1',
@@ -688,7 +656,7 @@ describe('transformSDKMessage', () => {
           input: {},
         },
       ]);
-      expect([...transformSDKMessage(firstDeltaMessage, { streamState })]).toEqual([
+      expect(transform(firstDeltaMessage, { streamState })).toEqual([
         {
           type: 'tool_use',
           id: 'stream-tool-1',
@@ -696,7 +664,7 @@ describe('transformSDKMessage', () => {
           input: { file_path: 'notes.md' },
         },
       ]);
-      expect([...transformSDKMessage(secondDeltaMessage, { streamState })]).toEqual([
+      expect(transform(secondDeltaMessage, { streamState })).toEqual([
         {
           type: 'tool_use',
           id: 'stream-tool-1',
@@ -704,6 +672,45 @@ describe('transformSDKMessage', () => {
           input: { file_path: 'notes.md', content: 'Hello' },
         },
       ]);
+    });
+
+    it('reparses streamed tool input only when a delta can change the parsed snapshot', () => {
+      const streamState = createTransformStreamState();
+      const usageState = createTransformUsageState();
+      const input = {
+        file_path: 'notes.md',
+        content: 'She said "hi", then left.\\n{not: json} [x], '.repeat(40),
+      };
+      const serialized = JSON.stringify(input);
+      const deltas: string[] = [];
+      for (let offset = 0; offset < serialized.length; offset += 3) {
+        deltas.push(serialized.slice(offset, offset + 3));
+      }
+      const streamEvent = (event: Record<string, unknown>) => msg({ type: 'stream_event', event: { index: 0, ...event } });
+      transform(streamEvent({
+        type: 'content_block_start',
+        content_block: { type: 'tool_use', id: 'stream-tool-1', name: 'Write', input: {} },
+      }), { streamState, usageState });
+
+      const parseSpy = jest.spyOn(JSON, 'parse');
+      const emitted: unknown[] = [];
+      try {
+        for (const partialJson of deltas) {
+          emitted.push(...transform(streamEvent({
+            type: 'content_block_delta',
+            delta: { type: 'input_json_delta', partial_json: partialJson },
+          }), { streamState, usageState }));
+        }
+        expect(parseSpy.mock.calls.length).toBeLessThan(deltas.length / 20);
+      } finally {
+        parseSpy.mockRestore();
+      }
+
+      expect(deltas.length).toBeGreaterThan(500);
+      expect(emitted.at(-1)).toEqual({ type: 'tool_use', id: 'stream-tool-1', name: 'Write', input });
+      expect(emitted).toContainEqual({
+        type: 'tool_use', id: 'stream-tool-1', name: 'Write', input: { file_path: 'notes.md' },
+      });
     });
 
     it('yields thinking for content_block_start with thinking', () => {
@@ -718,7 +725,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'thinking', content: 'Initial thinking...' },
@@ -737,7 +744,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'text', content: 'Starting response...' },
@@ -756,7 +763,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'thinking', content: 'More thinking...' },
@@ -775,7 +782,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'text', content: ' additional text' },
@@ -794,7 +801,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -811,7 +818,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -828,7 +835,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -845,7 +852,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -863,7 +870,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -874,7 +881,7 @@ describe('transformSDKMessage', () => {
         event: undefined,
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -906,15 +913,15 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      expect([...transformSDKMessage(startMessage, {
+      expect(transform(startMessage, {
         intendedModel: 'glm-5.1',
         usageState,
-      })]).toEqual([]);
+      })).toEqual([]);
 
-      const results = [...transformSDKMessage(deltaMessage, {
+      const results = transform(deltaMessage, {
         intendedModel: 'glm-5.1',
         usageState,
-      })];
+      });
 
       expect(results).toEqual([
         {
@@ -973,18 +980,18 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const startResults = [...transformSDKMessage(startMessage, {
+      const startResults = transform(startMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })];
-      const deltaResults = [...transformSDKMessage(deltaMessage, {
+      });
+      const deltaResults = transform(deltaMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })];
-      const assistantResults = [...transformSDKMessage(assistantMessage, {
+      });
+      const assistantResults = transform(assistantMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })];
+      });
 
       expect(startResults).toEqual([]);
       expect(deltaResults).toEqual([]);
@@ -1021,11 +1028,11 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      expect([...transformSDKMessage(assistantMessage, {
+      expect(transform(assistantMessage, {
         intendedModel: 'custom-model',
         reportedContextWindow: 1_000_000,
         usageState,
-      })]).toEqual([
+      })).toEqual([
         { type: 'text', content: 'Hello' },
         {
           type: 'usage',
@@ -1074,19 +1081,19 @@ describe('transformSDKMessage', () => {
         modelUsage: undefined,
       });
 
-      expect([...transformSDKMessage(startMessage, {
+      expect(transform(startMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })]).toEqual([]);
-      expect([...transformSDKMessage(deltaMessage, {
+      })).toEqual([]);
+      expect(transform(deltaMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })]).toEqual([]);
+      })).toEqual([]);
 
-      expect([...transformSDKMessage(resultMessage, {
+      expect(transform(resultMessage, {
         intendedModel: 'sonnet',
         usageState,
-      })]).toEqual([
+      })).toEqual([
         {
           type: 'usage',
           usage: {
@@ -1115,7 +1122,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { usageState })];
+      const results = transform(message, { usageState });
 
       expect(results).toEqual([]);
     });
@@ -1134,7 +1141,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { usageState })];
+      const results = transform(message, { usageState });
 
       expect(results).toEqual([]);
     });
@@ -1155,14 +1162,14 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { usageState })];
+      const results = transform(message, { usageState });
 
       expect(results).toEqual([]);
-      expect([...transformSDKMessage(msg({
+      expect(transform(msg({
         type: 'result',
         subtype: 'success',
         modelUsage: undefined,
-      }), { usageState })]).toEqual([]);
+      }), { usageState })).toEqual([]);
     });
   });
 
@@ -1184,7 +1191,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 200000 },
@@ -1198,7 +1205,7 @@ describe('transformSDKMessage', () => {
         errors: ['Hit maximum turn limit'],
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 200000 },
@@ -1223,7 +1230,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1257,7 +1264,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'custom-main-model' })];
+      const results = transform(message, { intendedModel: 'custom-main-model' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 200000 },
@@ -1291,7 +1298,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'opus[1m]' })];
+      const results = transform(message, { intendedModel: 'opus[1m]' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1325,7 +1332,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'fable' })];
+      const results = transform(message, { intendedModel: 'fable' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1359,7 +1366,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'anthropic/claude-opus-4-6[1m]' })];
+      const results = transform(message, { intendedModel: 'anthropic/claude-opus-4-6[1m]' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1393,7 +1400,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'eu.anthropic.claude-opus-4-6[1m]' })];
+      const results = transform(message, { intendedModel: 'eu.anthropic.claude-opus-4-6[1m]' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1427,7 +1434,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'anthropic/claude-opus-4-6[1M]' })];
+      const results = transform(message, { intendedModel: 'anthropic/claude-opus-4-6[1M]' });
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1461,9 +1468,34 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'anthropic/claude-opus-4-6' })];
+      const results = transform(message, { intendedModel: 'anthropic/claude-opus-4-6' });
 
       expect(results).toEqual([]);
+    });
+
+    it('matches an explicit model id against the SDK canonical model of provider-specific keys', () => {
+      const usage = (contextWindow: number, canonicalModel: string) => ({
+        inputTokens: 1000,
+        outputTokens: 300,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        webSearchRequests: 0,
+        costUSD: 0.01,
+        contextWindow,
+        maxOutputTokens: 32000,
+        canonicalModel,
+      });
+      const message = msg({
+        type: 'result',
+        modelUsage: {
+          'arn:aws:bedrock:us-east-1:123:application-inference-profile/haiku': usage(200000, 'claude-haiku-4-5'),
+          'arn:aws:bedrock:us-east-1:123:application-inference-profile/opus': usage(1000000, 'claude-opus-4-7'),
+        },
+      });
+
+      expect(transform(message, { intendedModel: 'claude-opus-4-7' })).toEqual([
+        { type: 'context_window', contextWindow: 1000000 },
+      ]);
     });
 
     it('does not override the heuristic when multi-model result usage is ambiguous', () => {
@@ -1493,7 +1525,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'sonnet' })];
+      const results = transform(message, { intendedModel: 'sonnet' });
 
       expect(results).toEqual([]);
     });
@@ -1515,7 +1547,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'sonnet' })];
+      const results = transform(message, { intendedModel: 'sonnet' });
 
       const usageResults = results.filter(r => r.type === 'usage');
       expect(usageResults).toHaveLength(1);
@@ -1545,10 +1577,10 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, {
+      const results = transform(message, {
         intendedModel: 'sonnet',
         usageState,
-      })];
+      });
 
       const usageResults = results.filter(r => r.type === 'usage');
       expect(usageResults).toHaveLength(1);
@@ -1578,7 +1610,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       const usageResults = results.filter(r => r.type === 'usage');
       expect(usageResults).toHaveLength(0);
@@ -1594,7 +1626,7 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, { intendedModel: 'sonnet' })];
+      const results = transform(message, { intendedModel: 'sonnet' });
 
       const usageResults = results.filter(r => r.type === 'usage');
       expect(usageResults).toHaveLength(1);
@@ -1620,10 +1652,10 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const results = [...transformSDKMessage(message, {
+      const results = transform(message, {
         intendedModel: 'sonnet',
         usageState,
-      })];
+      });
 
       expect(results).toEqual([
         { type: 'text', content: 'Hello' },
@@ -1666,14 +1698,14 @@ describe('transformSDKMessage', () => {
         },
       });
 
-      const streamResults = [...transformSDKMessage(deltaMessage, {
+      const streamResults = transform(deltaMessage, {
         intendedModel: 'glm-5.1',
         usageState,
-      })];
-      const assistantResults = [...transformSDKMessage(assistantMessage, {
+      });
+      const assistantResults = transform(assistantMessage, {
         intendedModel: 'glm-5.1',
         usageState,
-      })];
+      });
 
       expect(streamResults.filter(r => r.type === 'usage')).toHaveLength(1);
       expect(assistantResults).toEqual([
@@ -1690,10 +1722,10 @@ describe('transformSDKMessage', () => {
         message: { content: [] },
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([
-        { type: 'error', content: 'unknown' },
+        { type: 'error', content: 'Claude API request failed.' },
       ]);
     });
   });
@@ -1707,7 +1739,7 @@ describe('transformSDKMessage', () => {
         elapsed_time_seconds: 5,
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });
@@ -1719,7 +1751,7 @@ describe('transformSDKMessage', () => {
         output: [],
       });
 
-      const results = [...transformSDKMessage(message)];
+      const results = transform(message);
 
       expect(results).toEqual([]);
     });

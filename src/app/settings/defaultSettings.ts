@@ -1,4 +1,3 @@
-import { getDefaultHiddenProviderCommands } from '../../core/providers/commands/hiddenCommands';
 import { DEFAULT_REASONING_VALUE } from '../../core/providers/reasoning';
 import { DEFAULT_MAX_WARM_AGENT_PROCESSES } from '../../core/settings/warmExecutionLimits';
 import { type ClaudianSettings } from '../../core/types/settings';
@@ -7,10 +6,9 @@ import { getBuiltInProviderDefaultConfigs } from '../../providers/defaultProvide
 export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
   userName: '',
 
-  permissionMode: 'yolo',
+  permissionMode: 'auto',
 
   model: 'haiku',
-  thinkingBudget: 'off',
   effortLevel: DEFAULT_REASONING_VALUE,
   serviceTier: 'default',
   enableAutoTitleGeneration: true,
@@ -44,7 +42,6 @@ export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
   savedProviderModel: {},
   savedProviderEffort: {},
   savedProviderServiceTier: {},
-  savedProviderThinkingBudget: {},
   savedProviderPermissionMode: {},
   pendingProviderSessionInvalidations: {},
 
@@ -54,12 +51,15 @@ export const DEFAULT_CLAUDIAN_SETTINGS: ClaudianSettings = {
   deferMathRenderingDuringStreaming: true,
   expandFileEditsByDefault: false,
   chatViewPlacement: 'right-sidebar',
+  enableZenMode: true,
   enableDualPane: true,
   dualPaneSide: 'right',
   restoreTabsOnStartup: true,
+  skillsSynced: false,
   sessionManagerOrganization: 'list',
   sessionManagerSort: 'last-updated',
+  sessionAutoArchiveAfter: 'off',
   pinnedLinkedContentPaths: [],
 
-  hiddenProviderCommands: getDefaultHiddenProviderCommands(),
+  hiddenCommands: [],
 };

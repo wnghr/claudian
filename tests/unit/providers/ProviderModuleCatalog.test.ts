@@ -42,7 +42,6 @@ describe('built-in ProviderModule catalog', () => {
       defaultModel: {},
       enableChrome: 'true',
       loadUserSettings: 'false',
-      safeMode: 'unknown',
     });
     Object.assign(getProviderConfig(malformedSettings, 'codex'), {
       catalogFingerprint: [],
@@ -50,9 +49,6 @@ describe('built-in ProviderModule catalog', () => {
       customModels: {},
       reasoningSummary: 'verbose',
       safeMode: 'danger-full-access',
-    });
-    Object.assign(getProviderConfig(malformedSettings, 'opencode'), {
-      selectedMode: 123,
     });
     Object.assign(getProviderConfig(malformedSettings, 'pi'), {
       toolMode: 'danger-full-access',
@@ -89,7 +85,6 @@ describe('built-in ProviderModule catalog', () => {
       discoveredModels: [],
       enableChrome: false,
       loadUserSettings: true,
-      safeMode: 'default',
     });
     expect(getProviderConfig(normalizedSettings, 'codex')).not.toHaveProperty('customModels');
     expect(getProviderConfig(normalizedSettings, 'codex')).toMatchObject({
@@ -98,26 +93,21 @@ describe('built-in ProviderModule catalog', () => {
       reasoningSummary: 'detailed',
       safeMode: 'read-only',
     });
-    expect(getProviderConfig(normalizedSettings, 'opencode')).toMatchObject({
-      selectedMode: 'claudian-safe',
-    });
-    expect(getProviderConfig(normalizedSettings, 'pi')).toMatchObject({
-      toolMode: 'readonly',
-    });
+    expect(getProviderConfig(normalizedSettings, 'pi')).not.toHaveProperty('toolMode');
   });
 
-  it('normalizes obsolete OpenCode modes through provider storage', () => {
+  it('drops the retired OpenCode selected mode through provider storage', () => {
     const opencodeModule = BUILT_IN_PROVIDER_MODULES.find(module => module.id === 'opencode');
     const normalizedSettings: Record<string, unknown> = {};
 
-    expect(opencodeModule?.settingsStorage.normalizeStored(normalizedSettings, {
+    opencodeModule?.settingsStorage.normalizeStored(normalizedSettings, {
       providerConfigs: {
         opencode: {
-          selectedMode: 'plan',
+          selectedMode: 'claudian-yolo',
         },
       },
-    })).toBe(true);
-    expect(getProviderConfig(normalizedSettings, 'opencode').selectedMode).toBe('claudian-safe');
+    });
+    expect(getProviderConfig(normalizedSettings, 'opencode')).not.toHaveProperty('selectedMode');
   });
 
   it('does not report canonical provider defaults as changed', () => {

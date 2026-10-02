@@ -1,7 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import type * as fsType from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 import pair from '@test/fixtures/providers/codex/turn-stats-pair.json';
+import { capturedSelectionPrompt, capturedSelections } from '@test/helpers/capturedSelections';
 import { TEST_CODEX_MODEL } from '@test/helpers/codexModels';
 
 import type {
@@ -14,6 +17,7 @@ import type {
 import { isSteerableExecutionSession } from '@/core/execution';
 import type { ProviderHost } from '@/core/providers/ProviderHost';
 import type { ClaudianSettings } from '@/core/types';
+import { createCodexPathMapper } from '@/providers/codex/runtime/CodexPathMapper';
 type MutableTestHost = ProviderHost & { settings: ClaudianSettings };
 
 const mockTransportRequest = jest.fn();
@@ -124,6 +128,21 @@ function emitNotification(method: string, params: unknown): void {
   notificationHandlers.get(method)?.(params);
 }
 
+// Policies the app server derives from a config.toml with sandbox_workspace_write overrides.
+const CONFIGURED_WORKSPACE_WRITE_SANDBOX = {
+  type: 'workspaceWrite',
+  writableRoots: ['/configured/root'],
+  networkAccess: true,
+  excludeTmpdirEnvVar: false,
+  excludeSlashTmp: false,
+} as const;
+
+function configuredSandboxFor(mode: unknown) {
+  if (mode === 'danger-full-access') return { type: 'dangerFullAccess' };
+  if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
+  return CONFIGURED_WORKSPACE_WRITE_SANDBOX;
+}
+
 function createThreadResult(
   threadId: string,
   turns: Array<{
@@ -163,7 +182,7 @@ function createThreadResult(
     cwd: '/vault',
     approvalPolicy: 'never',
     approvalsReviewer: 'user',
-    sandbox: { type: 'readOnly', access: { type: 'fullAccess' }, networkAccess: false },
+    sandbox: CONFIGURED_WORKSPACE_WRITE_SANDBOX as Record<string, unknown>,
     reasoningEffort: 'medium',
   };
 }
@@ -420,6 +439,260 @@ async function createActiveSteerSession() {
 }
 
 describe('CodexExecutionBackend', () => {
+  it.each([
+    ['normal', 'workspace-write', 'on-request', 'user', undefined, 'workspace-write'],
+    ['auto-review', 'workspace-write', 'on-request', 'auto_review', undefined, 'workspace-write'],
+    ['yolo', 'danger-full-access', 'never', 'user', { type: 'dangerFullAccess' }, 'workspace-write'],
+    ['auto-review', 'read-only', 'on-request', 'auto_review', undefined, 'read-only'],
+    ['invalid', 'read-only', 'on-request', 'user', undefined, 'corrupt'],
+  ])('sends the %s preset on thread start, resume, and every turn', async (
+    permissionMode, sandbox, approvalPolicy, approvalsReviewer, sandboxPolicy, safeMode,
+  ) => {
+    let turn = 0;
+    let nativeSandbox: unknown;
+    mockTransportRequest.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      // A loaded thread keeps its policy on resume; only thread/start derives one from the mode.
+      if (method === 'thread/start') nativeSandbox = configuredSandboxFor(params.sandbox);
+      if (method === 'thread/start' || method === 'thread/resume') return {
+        ...createThreadResult('thread-permissions'), approvalsReviewer, sandbox: nativeSandbox,
+      };
+      if (method === 'turn/start') {
+        const turnId = `turn-permissions-${++turn}`;
+        queueMicrotask(() => completeTurn('thread-permissions', turnId));
+        return createTurnResult(turnId);
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const plugin = createPlugin();
+    plugin.settings.providerConfigs.codex!.safeMode = safeMode;
+    const session = new CodexExecutionBackend(plugin).createSession(createSessionConfig());
+    for (const instructions of ['First instructions.', 'Updated instructions.']) {
+      const request = createRequest();
+      await collectEvents(session.execute({
+        ...request,
+        configuration: {
+          ...request.configuration, permissionMode,
+          systemInstructions: { kind: 'explicit', instructions },
+        },
+      }).events);
+    }
+    for (const method of ['thread/start', 'thread/resume']) {
+      expect(mockTransportRequest).toHaveBeenCalledWith(method, expect.objectContaining({
+        sandbox, approvalPolicy, approvalsReviewer,
+      }));
+    }
+    const turns = mockTransportRequest.mock.calls.filter(([method]) => method === 'turn/start');
+    expect(turns).toHaveLength(2);
+    for (const [, params] of turns) {
+      expect(params).toEqual(expect.objectContaining({ approvalPolicy, approvalsReviewer }));
+      expect(params.sandboxPolicy).toEqual(sandboxPolicy);
+    }
+    expect(mockTransportRequest).not.toHaveBeenCalledWith('config/read', expect.anything());
+    await session.dispose();
+  });
+
+  it.each([undefined, 'user'])('does not run auto-review when the server returns reviewer %s', async reviewer => {
+    mockTransportRequest.mockImplementation(async (method: string) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      if (method === 'thread/start') return { ...createThreadResult('thread-no-review'), approvalsReviewer: reviewer };
+      if (method === 'turn/start') {
+        queueMicrotask(() => completeTurn('thread-no-review', 'turn-no-review'));
+        return createTurnResult('turn-no-review');
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+    const request = createRequest();
+    const events = await collectEvents(session.execute({
+      ...request, configuration: { ...request.configuration, permissionMode: 'auto-review' },
+    }).events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'execution_error' }));
+    expect(mockTransportRequest.mock.calls.some(([method]) => method === 'turn/start')).toBe(false);
+    await session.dispose();
+  });
+
+  it.each([false, true])('switches a warm thread to auto-review and surfaces native rejection (reject: %s)', async reject => {
+    let turn = 0;
+    mockTransportRequest.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      if (method === 'thread/start') return createThreadResult('thread-review-switch');
+      if (method === 'turn/start') {
+        if (reject && params.approvalsReviewer === 'auto_review') {
+          throw new CodexRPCResponseError({ code: -32602, message: 'Unsupported approvalsReviewer: auto_review' });
+        }
+        const turnId = `turn-review-switch-${++turn}`;
+        queueMicrotask(() => completeTurn('thread-review-switch', turnId));
+        return createTurnResult(turnId);
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+    const request = createRequest();
+    await collectEvents(session.execute(request).events);
+    const events = await collectEvents(session.execute({
+      ...request, configuration: { ...request.configuration, permissionMode: 'auto-review' },
+    }).events);
+    expect(mockTransportRequest.mock.calls.filter(([method]) => method === 'thread/start')).toHaveLength(1);
+    const turns = mockTransportRequest.mock.calls.filter(([method]) => method === 'turn/start');
+    expect(turns.map(([, params]) => params.approvalsReviewer)).toEqual(['user', 'auto_review']);
+    expect(turns[1][1]).toMatchObject({ approvalPolicy: 'on-request' });
+    expect(turns[1][1]).not.toHaveProperty('sandboxPolicy');
+    expect(events.some(event => event.type === 'execution_error')).toBe(reject);
+    expect(events.some(event => event.type === 'turn_started' && event.accepted)).toBe(!reject);
+    await session.dispose();
+  });
+
+  it.each([
+    ['yolo', 'workspace-write', 'normal', 'workspace-write', CONFIGURED_WORKSPACE_WRITE_SANDBOX, [{ cwd: '/vault' }]],
+    ['normal', 'workspace-write', 'normal', 'read-only', {
+      type: 'readOnly', access: { type: 'fullAccess' }, networkAccess: false,
+    }, []],
+    ['normal', 'read-only', 'normal', 'workspace-write', CONFIGURED_WORKSPACE_WRITE_SANDBOX, [{ cwd: '/vault' }]],
+  ])('restores the configured sandbox when a warm thread switches from %s/%s to %s/%s', async (
+    firstMode, firstSafeMode, nextMode, nextSafeMode, restoredPolicy, configReads,
+  ) => {
+    let turn = 0;
+    mockTransportRequest.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      if (method === 'thread/start') return {
+        ...createThreadResult('thread-sandbox-switch'), sandbox: configuredSandboxFor(params.sandbox),
+      };
+      if (method === 'config/read') return {
+        config: {
+          sandbox_mode: 'danger-full-access',
+          sandbox_workspace_write: {
+            writable_roots: ['/configured/root'],
+            network_access: true,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+          },
+        },
+      };
+      if (method === 'turn/start') {
+        const turnId = `turn-sandbox-switch-${++turn}`;
+        queueMicrotask(() => completeTurn('thread-sandbox-switch', turnId));
+        return createTurnResult(turnId);
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const plugin = createPlugin();
+    const session = new CodexExecutionBackend(plugin).createSession(createSessionConfig());
+    const runWith = async (permissionMode: string, safeMode: string) => {
+      plugin.settings.providerConfigs.codex!.safeMode = safeMode;
+      const request = createRequest();
+      await collectEvents(session.execute({
+        ...request, configuration: { ...request.configuration, permissionMode },
+      }).events);
+    };
+    await runWith(firstMode, firstSafeMode);
+    await runWith(nextMode, nextSafeMode);
+    await runWith(nextMode, nextSafeMode);
+
+    const turns = mockTransportRequest.mock.calls.filter(([method]) => method === 'turn/start');
+    expect(turns).toHaveLength(3);
+    expect(turns[1][1].sandboxPolicy).toEqual(restoredPolicy);
+    expect(turns[2][1]).not.toHaveProperty('sandboxPolicy');
+    expect(mockTransportRequest.mock.calls.filter(([method]) => method === 'config/read')
+      .map(([, params]) => params)).toEqual(configReads);
+    await session.dispose();
+  });
+
+  it.each(['late', 'lost'])('does not trust the prior sandbox after an override response is %s', async outcome => {
+    const yoloResponse = createDeferred<unknown>();
+    let turn = 0;
+    mockTransportRequest.mockImplementation(async (method: string) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      if (method === 'thread/start') return createThreadResult('thread-late-override');
+      if (method === 'config/read') return {
+        config: { sandbox_workspace_write: { writable_roots: ['/configured/root'], network_access: true } },
+      };
+      if (method === 'turn/start') {
+        const turnId = `turn-late-override-${++turn}`;
+        if (turn === 2) {
+          // Native handoff and completion precede the acknowledgement of the YOLO override.
+          emitNotification('turn/started', { threadId: 'thread-late-override', turn: createTurnResult(turnId).turn });
+          queueMicrotask(() => completeTurn('thread-late-override', turnId));
+          return yoloResponse.promise;
+        }
+        queueMicrotask(() => completeTurn('thread-late-override', turnId));
+        return createTurnResult(turnId);
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+    const runWith = (permissionMode: string) => {
+      const request = createRequest();
+      return collectEvents(session.execute({
+        ...request, configuration: { ...request.configuration, permissionMode },
+      }).events);
+    };
+    await runWith('normal');
+    if (outcome === 'late') {
+      await runWith('yolo');
+    } else {
+      const yoloRun = runWith('yolo');
+      yoloResponse.reject(new Error('turn/start acknowledgement lost'));
+      await yoloRun;
+    }
+    await runWith('normal');
+    yoloResponse.resolve(createTurnResult('turn-late-override-2'));
+    await flushMicrotasks();
+    await runWith('normal');
+
+    const turns = mockTransportRequest.mock.calls.filter(([method]) => method === 'turn/start');
+    expect(turns.map(([, params]) => params.sandboxPolicy)).toEqual([
+      undefined,
+      { type: 'dangerFullAccess' },
+      CONFIGURED_WORKSPACE_WRITE_SANDBOX,
+      undefined,
+    ]);
+    await session.dispose();
+  });
+
+  it('sends the configured workspace-write sandbox when a fork child ignores the resume mode', async () => {
+    mockTransportRequest.mockImplementation(async (method: string) => {
+      if (method === 'initialize') return {
+        userAgent: 'test', codexHome: '/tmp/.codex', platformFamily: 'unix', platformOs: 'macos',
+      };
+      // thread/fork applies the config sandbox_mode, and resuming the loaded child keeps it.
+      if (method === 'thread/fork' || method === 'thread/resume') return {
+        ...createThreadResult('thread-fork-sandbox', [{ id: 'checkpoint' }]),
+        sandbox: { type: 'dangerFullAccess' },
+      };
+      if (method === 'config/read') return {
+        config: {
+          sandbox_workspace_write: { writable_roots: ['/configured/root'], network_access: true },
+        },
+      };
+      if (method === 'turn/start') {
+        queueMicrotask(() => completeTurn('thread-fork-sandbox', 'turn-fork-sandbox'));
+        return createTurnResult('turn-fork-sandbox');
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const session = new CodexExecutionBackend(createPlugin()).createSession(createForkSessionConfig());
+    await collectEvents(session.execute(createRequest()).events);
+
+    expect(mockTransportRequest).toHaveBeenCalledWith('thread/resume', expect.objectContaining({
+      threadId: 'thread-fork-sandbox', sandbox: 'workspace-write',
+    }));
+    expect(mockTransportRequest).toHaveBeenCalledWith('turn/start', expect.objectContaining({
+      sandboxPolicy: CONFIGURED_WORKSPACE_WRITE_SANDBOX,
+    }));
+    await session.dispose();
+  });
+
   it('rejects an unavailable selected model before native startup with a configuration error', async () => {
     const host = createPlugin();
     host.settings.providerConfigs!.codex!.visibleModels = [];
@@ -572,6 +845,25 @@ describe('CodexExecutionBackend', () => {
       }
     },
   );
+
+  it.each([false, true])('steers session references with target-visible paths (WSL: %s)', async wsl => {
+    if (wsl) {
+      const launch = await mockResolveLaunchSpec();
+      mockResolveLaunchSpec.mockResolvedValue({ ...launch, pathMapper: createCodexPathMapper({ method: 'wsl', platformFamily: 'unix', platformOs: 'linux', distroName: 'Ubuntu' }) });
+    }
+    configureSteerTransport('thread-reference', 'turn-reference', () => ({ turnId: 'turn-reference' }));
+    const { run, session } = await createActiveSteerSession();
+    try {
+      await expect(session.steer(createRequest(new AbortController().signal, {
+        input: [{ type: 'text', text: 'Use @"Review"' }],
+        context: { ...capturedSelections, sessionReferences: [{ id: 'conv-1-ref', title: 'Review & fix', providerId: 'codex', updatedAt: 'updated',
+          snapshotPath: wsl ? 'C:\\Temp\\claudian-sessions\\ref.md' : '/tmp/claudian-sessions/ref.md' }] },
+      }))).resolves.toBe(true);
+      const input = mockTransportRequest.mock.calls.find(([method]) => method === 'turn/steer')![1].input;
+      expect(input).toEqual([{ type: 'text', text_elements: [], text: 'Use @"Review"\n\n<context_sessions>\n<context_session title="Review &amp; fix" id="conv-1-ref" provider="codex" updated="updated" path="'
+        + (wsl ? '/mnt/c/Temp/claudian-sessions/ref.md' : '/tmp/claudian-sessions/ref.md') + '" />\n</context_sessions>' + '\n\n' + capturedSelectionPrompt }]);
+    } finally { run.cancel(); await collectEvents(run.events); await session.dispose(); }
+  });
 
   it.each([true, false])('retains steering image bytes until native acknowledgement (accepted: %s)', async accepted => {
     const steerResult = createDeferred<{ turnId: string }>();
@@ -1271,7 +1563,11 @@ describe('CodexExecutionBackend', () => {
     }
   });
 
-  it('sends all attached context using canonical escaped XML', async () => {
+  it.each([false, true])('sends escaped context using target-visible snapshot paths (WSL: %s)', async wsl => {
+    if (wsl) {
+      const launch = await mockResolveLaunchSpec();
+      mockResolveLaunchSpec.mockResolvedValue({ ...launch, pathMapper: createCodexPathMapper({ method: 'wsl', platformFamily: 'unix', platformOs: 'linux', distroName: 'Ubuntu' }) });
+    }
     mockTransportRequest.mockImplementation(async (method: string) => {
       if (method === 'initialize') {
         return {
@@ -1295,6 +1591,7 @@ describe('CodexExecutionBackend', () => {
       new AbortController().signal,
       {
         context: {
+          sessionReferences: [{ id: 'conv-1-ref', title: 'Review', providerId: 'codex', updatedAt: 'updated', snapshotPath: wsl ? 'C:\\Temp\\claudian-sessions\\ref.md' : '/tmp/claudian-sessions/ref.md' }],
           linkedContent: {
             path: 'notes/"draft" & review.md',
             content: 'Before\n]]>\nAfter',
@@ -1334,6 +1631,7 @@ describe('CodexExecutionBackend', () => {
     expect(prompt).toContain(
       '<canvas_selection path="boards/&quot;draft&quot; &amp; review.canvas">',
     );
+    expect(prompt).toContain(`<context_sessions>\n<context_session title="Review" id="conv-1-ref" provider="codex" updated="updated" path="${wsl ? "/mnt/c/Temp/claudian-sessions/ref.md" : "/tmp/claudian-sessions/ref.md"}" />\n</context_sessions>`);
     expect(prompt).not.toContain('[Editor selection from');
     expect(prompt).not.toContain('<linked_note');
     expect(prompt).not.toContain('<current_note');
@@ -1364,7 +1662,7 @@ describe('CodexExecutionBackend', () => {
     await collectEvents(session.execute(createRequest(
       new AbortController().signal,
       {
-        context: { linkedContent: { path: 'Projects/Research' } },
+        context: { ...capturedSelections, linkedContent: { path: 'Projects/Research' } },
         input: [{ type: 'text', text: 'Inspect linked content' }],
       },
     )).events);
@@ -1377,7 +1675,7 @@ describe('CodexExecutionBackend', () => {
       };
     expect(threadStartParams.cwd).toBe('/vault');
     expect(turnStartParams.input.find(block => block.type === 'text')?.text).toBe(
-      'Inspect linked content\n\n<linked_content path="Projects/Research" />',
+      'Inspect linked content\n\n<linked_content path="Projects/Research" />\n\n' + capturedSelectionPrompt,
     );
 
     await session.dispose();
@@ -2096,6 +2394,127 @@ describe('CodexExecutionBackend', () => {
     ).toHaveLength(2);
 
     await session.dispose();
+  });
+
+  describe('when a native thread omits its rollout path', () => {
+    const realFs = jest.requireActual<typeof fsType>('node:fs');
+    let codexHome: string;
+    let sessionsRoot: string;
+    let probes: jest.SpyInstance[];
+
+    beforeEach(() => {
+      codexHome = mkdtempSync(join(tmpdir(), 'claudian-codex-home-'));
+      sessionsRoot = join(codexHome, 'sessions');
+      mkdirSync(join(sessionsRoot, 'nested'), { recursive: true });
+      probes = [
+        jest.spyOn(realFs, 'existsSync'),
+        jest.spyOn(realFs, 'readdirSync'),
+        jest.spyOn(realFs.promises, 'access'),
+        jest.spyOn(realFs.promises, 'readdir'),
+      ];
+    });
+
+    afterEach(() => {
+      for (const probe of probes) probe.mockRestore();
+      rmSync(codexHome, { recursive: true, force: true });
+    });
+
+    function writeRollout(threadId: string): string {
+      const rolloutPath = join(sessionsRoot, 'nested', `rollout-${threadId}.jsonl`);
+      writeFileSync(rolloutPath, '');
+      return rolloutPath;
+    }
+
+    function countTranscriptRootProbes(): number {
+      return probes.reduce(
+        (count, probe) => count + probe.mock.calls.filter(([target]) => String(target) === sessionsRoot).length,
+        0,
+      );
+    }
+
+    function mockPathlessThread(threadId: string, ephemeral: boolean): void {
+      let turnIndex = 0;
+      mockTransportRequest.mockImplementation(async (method: string) => {
+        if (method === 'initialize') {
+          return { userAgent: 'test', codexHome, platformFamily: 'unix', platformOs: 'macos' };
+        }
+        if (method === 'thread/start') {
+          const result = createThreadResult(threadId);
+          return { ...result, thread: { ...result.thread, ephemeral, path: null } };
+        }
+        if (method === 'turn/start') {
+          turnIndex += 1;
+          const turnId = `${threadId}-turn-${turnIndex}`;
+          queueMicrotask(() => completeTurn(threadId, turnId));
+          return createTurnResult(turnId);
+        }
+        throw new Error(`Unexpected method: ${method}`);
+      });
+    }
+
+    it('never searches the transcript root for a non-persistent thread', async () => {
+      mockPathlessThread('thread-ephemeral-pathless', true);
+      writeRollout('thread-ephemeral-pathless');
+      const session = new CodexExecutionBackend(createPlugin()).createSession(
+        createSessionConfig({ lifecycle: 'ephemeral', nativePersistence: 'disabled-if-supported' }),
+      );
+
+      await collectEvents(session.execute(createRequest()).events);
+      await collectEvents(session.execute(createRequest()).events);
+      await flushMicrotasks();
+
+      expect(countTranscriptRootProbes()).toBe(0);
+      expect(session.getSnapshot().providerState?.sessionFilePath).toBeUndefined();
+
+      await session.dispose();
+    });
+
+    it('adopts a persistent rollout found after release and publishes it as session state', async () => {
+      mockPathlessThread('thread-persistent-pathless', false);
+      const rolloutPath = writeRollout('thread-persistent-pathless');
+      const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+      const adopted = new Promise<ProviderSessionEvent>((resolve) => {
+        session.onEvent((event) => {
+          if (
+            event.type === 'session_state_changed'
+            && event.snapshot.providerState?.sessionFilePath
+          ) {
+            resolve(event);
+          }
+        });
+      });
+
+      const events = await collectEvents(session.execute(createRequest()).events);
+
+      expect(events.at(-1)).toMatchObject({ type: 'turn_completed' });
+      await expect(adopted).resolves.toMatchObject({
+        scope: { kind: 'session' },
+        snapshot: {
+          providerSessionId: 'thread-persistent-pathless',
+          providerState: { sessionFilePath: rolloutPath },
+        },
+      });
+      expect(session.getSnapshot().providerState?.sessionFilePath).toBe(rolloutPath);
+      expect(probes[1].mock.calls).toHaveLength(0);
+
+      await session.dispose();
+    });
+
+    it('searches once per persistent thread instead of after every run', async () => {
+      mockPathlessThread('thread-persistent-missing', false);
+      const session = new CodexExecutionBackend(createPlugin()).createSession(createSessionConfig());
+
+      await collectEvents(session.execute(createRequest()).events);
+      const probesAfterFirstRun = countTranscriptRootProbes();
+      await collectEvents(session.execute(createRequest()).events);
+      await flushMicrotasks();
+
+      expect(probesAfterFirstRun).toBeGreaterThan(0);
+      expect(countTranscriptRootProbes()).toBe(probesAfterFirstRun);
+      expect(session.getSnapshot().providerState?.sessionFilePath).toBeUndefined();
+
+      await session.dispose();
+    });
   });
 
   it('forks, resumes, and rolls back to the requested checkpoint before executing', async () => {
@@ -3681,7 +4100,7 @@ describe('CodexExecutionBackend', () => {
     await expect(session.steer(createRequest(
       new AbortController().signal,
       { input: [{ type: 'text', text: 'redirect' }] },
-    ))).rejects.toThrow('Codex returned an ambiguous steer acknowledgement.');
+    ))).rejects.toThrow('Codex CLI returned an ambiguous steer acknowledgement.');
 
     run.cancel();
     await collectEvents(run.events);

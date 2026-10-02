@@ -5,6 +5,7 @@ import { axe } from 'jest-axe';
 import { type App, type Component, MarkdownRenderer, Platform, TFile } from 'obsidian';
 
 import { ComposerEditor } from '@/features/chat/composer/ComposerEditor';
+import { formatComposerSessionMention } from '@/features/chat/composer/composerSessionMentions';
 import { CanvasSelectionController } from '@/features/chat/controllers/CanvasSelectionController';
 import { sendTabInputMessageFromExplicitEnterShortcut } from '@/features/chat/tabs/TabInputEvents';
 import { ComposerContextTray } from '@/features/chat/ui/ComposerContextTray';
@@ -416,4 +417,40 @@ it('upgrades to the editor when a focusin reaches the composer host', () => {
     parent.remove();
     outside.remove();
   }
+});
+
+it.each([
+  ['Draft ] \\ review', '@[Draft \\] \\\\ review](claudian-session:conv-1-abc)'],
+  ['Fix `bug`', '@[Fix `bug`](claudian-session:conv-1-abc)'],
+])('renders session title %s accessibly and deletes its token', async (title, token) => {
+  const parent = document.body.createDiv();
+  const editor = createEditor(parent);
+  try {
+    expect(formatComposerSessionMention(title, 'conv-1-abc')).toBe(token + ' ');
+    editor.element.value = token;
+    editor.element.focus();
+    const chip = within(parent).getByRole('img', { name: `Session: ${title}` });
+    expect(chip.textContent).toBe(title);
+    expect(editor.element.value).toBe(token);
+    expect((await axe(chip)).violations).toEqual([]);
+    fireEvent.keyDown(within(parent).getByRole('textbox', { name: 'Message' }), { key: 'Backspace', code: 'Backspace' });
+    expect(editor.element.value).toBe('');
+  } finally { editor.destroy(); parent.remove(); }
+});
+
+it.each([
+  '`@[Review](claudian-session:conv-1-abc)`',
+  '```md\n@[Review](claudian-session:conv-1-abc)\n```',
+  '    @[Review](claudian-session:conv-1-abc)',
+  '\\@[Review](claudian-session:conv-1-abc)',
+])('keeps literal session token editable: %s', source => {
+  const parent = document.body.createDiv();
+  const editor = createEditor(parent);
+  try {
+    editor.element.value = `${source}\n\n@[Visible](claudian-session:conv-2-abc)`;
+    editor.element.focus();
+    expect(within(parent).getByRole('img', { name: 'Session: Visible' })).toBeTruthy();
+    expect(within(parent).queryByRole('img', { name: 'Session: Review' })).toBeNull();
+    expect(within(parent).getByRole('textbox', { name: 'Message' }).textContent).toContain(source.replace(/\n/g, ''));
+  } finally { editor.destroy(); parent.remove(); }
 });

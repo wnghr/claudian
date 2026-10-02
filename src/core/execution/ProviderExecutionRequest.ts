@@ -18,7 +18,23 @@ export interface ProviderLinkedContentContext {
   readonly content?: string;
 }
 
+export interface ProviderSessionReference {
+  readonly id: string;
+  readonly title: string;
+  readonly providerId: string;
+  readonly updatedAt: string;
+  readonly snapshotPath: string;
+}
+
+export type ProviderSelectionSnapshot =
+  | { readonly kind: 'editor'; readonly selection: EditorSelectionContext }
+  | { readonly kind: 'browser'; readonly selection: BrowserSelectionContext }
+  | { readonly kind: 'canvas'; readonly selection: CanvasSelectionContext };
+
 export interface ProviderExecutionContext {
+  /** Ordered captures; when present, supersedes the legacy singular selection fields. */
+  readonly selections?: readonly ProviderSelectionSnapshot[];
+  readonly sessionReferences?: readonly ProviderSessionReference[];
   readonly linkedContent?: ProviderLinkedContentContext;
   readonly editorSelection?: EditorSelectionContext | null;
   readonly browserSelection?: BrowserSelectionContext | null;
@@ -42,6 +58,7 @@ export interface ProviderExecutionConfiguration {
   readonly reasoning?: string | null;
   readonly permissionMode?: string;
   readonly serviceTier?: string;
+  readonly readableRoots?: readonly string[];
 }
 
 export type ProviderToolPolicy =

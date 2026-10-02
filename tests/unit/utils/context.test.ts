@@ -1,7 +1,12 @@
+import { capturedSelectionPrompt, capturedSelections } from '@test/helpers/capturedSelections';
+
 import {
   appendContextFiles,
   appendLinkedContent,
   appendLinkedContentBody,
+  appendSelectionContexts,
+  appendSessionReferences,
+  captureSelectionSnapshots,
   extractUserDisplayContent,
   extractUserQuery,
   formatLinkedContent,
@@ -238,5 +243,60 @@ describe('appendContextFiles', () => {
   it('handles empty file array', () => {
     const result = appendContextFiles('Query', []);
     expect(result).toBe('Query\n\n<context_files>\n\n</context_files>');
+  });
+});
+
+
+describe('session reference context', () => {
+  it('renders escaped metadata and mapped paths, hidden in both history display paths', () => {
+    const prompt = appendSessionReferences('ref @"Review"', [{
+      id: 'conv-1-abc', title: 'Review "A" & <B>', providerId: 'codex',
+      updatedAt: 'updated', snapshotPath: 'C:\\tmp\\session.md',
+    }], () => '/mnt/c/tmp/"session".md');
+    expect(prompt).toBe('ref @"Review"\n\n<context_sessions>\n<context_session title="Review &quot;A&quot; &amp; &lt;B&gt;" id="conv-1-abc" provider="codex" updated="updated" path="/mnt/c/tmp/&quot;session&quot;.md" />\n</context_sessions>');
+    expect(extractUserDisplayContent(prompt)).toBe('ref @"Review"');
+    expect(extractUserQuery(prompt)).toBe('ref @"Review"');
+    expect(extractUserQuery('Query <context_sessions>private</context_sessions> end')).toBe('Query end');
+  });
+
+  it('leaves inputs without references unchanged', () => {
+    expect(appendSessionReferences('plain')).toBe('plain');
+    expect(appendSessionReferences('plain', [])).toBe('plain');
+  });
+});
+
+
+describe('captured selections', () => {
+  it('renders ordered captures once, with precedence over legacy fields, and hides them in display', () => {
+    const prompt = appendSelectionContexts('Question', {
+      ...capturedSelections,
+      editorSelection: { mode: 'selection', notePath: 'legacy.md', selectedText: 'legacy duplicate' },
+    });
+    expect(prompt).toBe('Question\n\n' + capturedSelectionPrompt);
+    expect(extractUserDisplayContent(prompt)).toBe('Question');
+    expect(extractUserQuery(prompt)).toBe('Question');
+  });
+
+  it('normalizes legacy fields but respects an explicitly empty ordered capture', () => {
+    const legacy = { editorSelection: { mode: 'selection' as const, notePath: 'same.md', selectedText: 'first editor' } };
+    expect(appendSelectionContexts('Question', legacy)).toBe('Question\n\n' + capturedSelectionPrompt.split('\n\n')[0]);
+    expect(appendSelectionContexts('Question', { ...legacy, selections: [] })).toBe('Question');
+  });
+
+  it('owns nested cursor and canvas data after capture', () => {
+    const context = {
+      editorSelection: { mode: 'cursor' as const, notePath: 'same.md', cursorContext: {
+        beforeCursor: 'before', afterCursor: 'after', isInbetween: false, line: 0, column: 6,
+      } },
+      canvasSelection: { canvasPath: 'same.canvas', nodeIds: ['captured-node'] },
+    };
+    const selections = captureSelectionSnapshots(context);
+    context.editorSelection.cursorContext.beforeCursor = 'changed';
+    context.canvasSelection.nodeIds.push('later-node');
+    const prompt = appendSelectionContexts('Question', { selections });
+    expect(prompt).toContain('before|after');
+    expect(prompt).toContain('captured-node');
+    expect(prompt).not.toContain('changed');
+    expect(prompt).not.toContain('later-node');
   });
 });

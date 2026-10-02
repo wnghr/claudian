@@ -80,7 +80,7 @@ export function createOpencodeSettingsTabRenderer(
       });
 
       renderCLIInstallationSetting({
-        cliName: 'OpenCode CLI',
+        cliName: 'OpenCode',
         icon: OPENCODE_PROVIDER_ICON,
         inspect: async () => {
           const settings = context.plugin.settings as unknown as Record<string, unknown>;
@@ -100,7 +100,7 @@ export function createOpencodeSettingsTabRenderer(
           const config = getOpencodeProviderSettings(settingsBag);
           return config.cliPathsByHost[hostnameKey] || config.cliPath;
         },
-        name: 'CLI path',
+        name: t('settings.cliPath.genericName'),
         onChange: async (value) => {
           const cliPathsByHost = {
             ...getOpencodeProviderSettings(settingsBag).cliPathsByHost,
@@ -128,23 +128,13 @@ export function createOpencodeSettingsTabRenderer(
       new Setting(container).setName('Models').setHeading();
       const modelPicker = renderProviderModelsSection(container, 'opencode', 'OpenCode', opencodeWorkspace.modelCatalog, () => modelWarning.refresh());
 
-      new Setting(container).setName(t('settings.agentSkills.sectionTitle')).setHeading();
-      context.renderAgentSkillSettings(container, 'opencode');
-
-      new Setting(container).setName('Commands').setHeading();
-      context.renderHiddenProviderCommandSetting(container, 'opencode', {
-        name: 'Hidden Commands and Skills',
-        desc: 'Hide specific OpenCode commands and skills from the dropdown. Enter names without the leading slash, one per line.',
-        placeholder: 'compact\nreview\nfix',
-      });
-
       renderEnvironmentSettingsSection({
         container,
         plugin: context.plugin,
         scope: 'provider:opencode',
-        heading: 'Environment',
-        name: 'Environment Variables',
-        desc: 'Extra environment variables passed to OpenCode.',
+        heading: t('settings.environment'),
+        name: t('settings.opencode.environment.name'),
+        desc: t('settings.opencode.environment.desc'),
         placeholder: 'OPENCODE_DB=/path/to/opencode.db',
         renderCustomContextLimits: (target) => context.renderCustomContextLimits(target, 'opencode'),
       });
@@ -161,10 +151,10 @@ function validateCLIPath(value: string): string | null {
 
   const expandedPath = normalizeConfiguredCLIPath(trimmed);
   if (!fs.existsSync(expandedPath)) {
-    return 'Path does not exist';
+    return t('settings.cliPath.validation.notExist');
   }
   if (!fs.statSync(expandedPath).isFile()) {
-    return 'Path must point to a file';
+    return t('settings.cliPath.validation.notFile');
   }
   return null;
 }

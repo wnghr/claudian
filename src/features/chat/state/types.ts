@@ -1,5 +1,7 @@
 import type { EditorView } from '@codemirror/view';
 
+import type { ProviderSelectionSnapshot, ProviderSessionReference } from '@/core/execution/ProviderExecutionRequest';
+
 import type {
   ChatMessage,
   ImageAttachment,
@@ -14,6 +16,10 @@ import type { ThinkingBlockState } from '../rendering/ThinkingBlockRenderer';
 import type { WriteEditState } from '../rendering/WriteEditRenderer';
 
 export interface ChatTurnRequest {
+  selections?: readonly ProviderSelectionSnapshot[];
+  /** Original composer text for recovery before provider acceptance. */
+  draftContent?: string;
+  sessionReferences?: readonly ProviderSessionReference[];
   text: string;
   images?: ImageAttachment[];
   linkedContentPath?: string;
@@ -124,6 +130,18 @@ export interface ChatStateData {
   responseStartTime: number | null;
   flavorTimerInterval: number | null;
 }
+
+/**
+ * Runtime-only latest live activity. Streamed text keeps the current block's
+ * immutable string, and tool activity references the live tool record, so
+ * recording stays O(1) per chunk; consumers project it only when displayed.
+ */
+export type ChatActivity =
+  | { kind: 'user'; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'thinking' }
+  | { kind: 'tool'; tool: ToolCallInfo }
+  | { kind: 'error'; message: string };
 
 /** Callbacks for ChatState changes. */
 export interface ChatStateCallbacks {

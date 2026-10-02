@@ -1,4 +1,3 @@
-export type HiddenProviderCommands = Record<string, string[]>;
 
 export interface ApprovalSelectionDecision {
   type: 'select-option';
@@ -69,6 +68,7 @@ export type DualPaneSide = typeof DUAL_PANE_SIDES[number];
 
 export type SessionManagerOrganization = 'list' | 'linked-content';
 export type SessionManagerSort = 'last-updated' | 'created';
+export type SessionAutoArchiveAfter = 'off' | '7d' | '14d' | '30d';
 
 export interface LegacyLinkedContentSettingsInput {
   sessionManagerOrganization?: SessionManagerOrganization | 'linked-note';
@@ -85,7 +85,7 @@ export interface AuxiliaryContinuityReset {
   clarification?: never;
 }
 
-/** Permission mode for tool execution. */
+/** Safe/YOLO permission values shared by providers with a two-mode control. */
 export type PermissionMode = 'yolo' | 'normal';
 
 /** Scope for environment variable storage and snippets. */
@@ -106,7 +106,7 @@ export interface StoredChatModelSelection {
 /**
  * Application settings stored in .claudian/claudian-settings.json.
  *
- * Provider-specific fields (model, thinkingBudget, effortLevel, serviceTier, etc.) use
+ * Provider-specific fields (model, effortLevel, serviceTier, etc.) use
  * `string` here.  The active provider casts internally when it needs
  * narrower types.
  */
@@ -114,12 +114,11 @@ export interface ClaudianSettings {
   // User preferences
   userName: string;
 
-  // Security
-  permissionMode: PermissionMode;
+  // Security (provider interprets values)
+  permissionMode: string;
 
   // Model & thinking (provider interprets values)
   model: string;
-  thinkingBudget: string;
   effortLevel: string;
   serviceTier: string;
   enableAutoTitleGeneration: boolean;
@@ -156,12 +155,11 @@ export interface ClaudianSettings {
   providerConfigs: ProviderConfigMap;
 
   // Provider selection
-  settingsProvider: string;  // ProviderId — which provider's model/effort/budget is projected to top-level fields
+  settingsProvider: string;  // ProviderId — which provider's model/effort is projected to top-level fields
   lastSelectedChatModel: StoredChatModelSelection | null;
   savedProviderModel: Partial<Record<string, string>>;
   savedProviderEffort: Partial<Record<string, string>>;
   savedProviderServiceTier: Partial<Record<string, string>>;
-  savedProviderThinkingBudget: Partial<Record<string, string>>;
   savedProviderPermissionMode: Partial<Record<string, string>>;
 
   // Internal lifecycle state. Entries remain until all affected session metadata is durable.
@@ -174,15 +172,22 @@ export interface ClaudianSettings {
   deferMathRenderingDuringStreaming: boolean;
   expandFileEditsByDefault: boolean;
   chatViewPlacement: ChatViewPlacement;
+  enableZenMode: boolean;
   enableDualPane: boolean;
   dualPaneSide: DualPaneSide;
   restoreTabsOnStartup: boolean;
+  /**
+   * Vault-wide record that Sync unified Claude skills into `.agents/skills`. The
+   * `.claude/skills` link itself is per device and always read from disk.
+   */
+  skillsSynced: boolean;
   sessionManagerOrganization?: SessionManagerOrganization;
   sessionManagerSort?: SessionManagerSort;
   pinnedLinkedContentPaths?: string[];
+  sessionAutoArchiveAfter?: SessionAutoArchiveAfter;
 
   // Provider command visibility
-  hiddenProviderCommands: HiddenProviderCommands;
+  hiddenCommands: string[];
 
   // Allow provider-specific extension fields
   [key: string]: unknown;

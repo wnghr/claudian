@@ -1,11 +1,12 @@
 import { defaultKeymap, history, historyKeymap, insertNewline } from '@codemirror/commands';
 import { Annotation, Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, keymap, placeholder, WidgetType } from '@codemirror/view';
-import { type App, type Component, MarkdownRenderer } from 'obsidian';
+import { type App, type Component, MarkdownRenderer, setIcon } from 'obsidian';
 
 import type { ComposerInputElement } from '@/shared/composer-dropdown/types';
 import { registerFileLinkHandler } from '@/utils/fileLink';
 
+import { findComposerSessionMentions } from './composerSessionMentions';
 import { findComposerWikilinks } from './composerWikilinks';
 
 const refreshLinks = StateEffect.define<null>();
@@ -33,6 +34,26 @@ class WikilinkWidget extends WidgetType {
     void MarkdownRenderer.render(this.app, this.markdown, el, '', this.component).then(() => {
       if (el.isConnected) view.requestMeasure();
     }).catch(() => { el.textContent = this.markdown; });
+    return el;
+  }
+}
+
+class SessionMentionWidget extends WidgetType {
+  constructor(private readonly title: string) { super(); }
+
+  eq(other: SessionMentionWidget): boolean {
+    return this.title === other.title;
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const ownerWindow = view.dom.ownerDocument.win as Window & { createSpan: typeof createSpan };
+    const el = ownerWindow.createSpan();
+    el.className = 'claudian-composer-session';
+    el.contentEditable = 'false';
+    el.setAttribute('role', 'img');
+    el.setAttribute('aria-label', `Session: ${this.title}`);
+    setIcon(el.createSpan({ cls: 'claudian-composer-session-icon' }), 'message-circle-more');
+    el.append(view.dom.ownerDocument.createTextNode(this.title));
     return el;
   }
 }
@@ -71,7 +92,8 @@ export class ComposerEditor {
           { key: 'Backspace', run: view => {
             const { main, ranges } = view.state.selection;
             if (!main.empty || ranges.length !== 1) return false;
-            const link = findComposerWikilinks(view.state.doc.toString())
+            const text = view.state.doc.toString();
+            const link = [...findComposerSessionMentions(text), ...findComposerWikilinks(text)]
               .find(link => link.index + link.fullMatch.length === main.head);
             if (!link) return false;
             view.dispatch({
@@ -183,13 +205,19 @@ export class ComposerEditor {
   };
 
   private decorate(state: EditorState): DecorationSet {
-    const links = findComposerWikilinks(state.doc.toString()).filter(link => {
+    const text = state.doc.toString();
+    const sessions = findComposerSessionMentions(text);
+    const links = [...sessions, ...findComposerWikilinks(text).filter(link => !sessions.some(session =>
+      link.index < session.index + session.fullMatch.length && link.index + link.fullMatch.length > session.index))]
+      .filter(link => {
       const end = link.index + link.fullMatch.length;
       return !state.selection.ranges.some(range =>
         (range.from > link.index && range.from < end) || (range.to > link.index && range.to < end));
     });
     return Decoration.set(links.map(link => Decoration.replace({
-      widget: new WikilinkWidget(link.fullMatch, this.app, this.component, this.linkRevision),
+      widget: 'conversationId' in link
+        ? new SessionMentionWidget(link.title)
+        : new WikilinkWidget(link.fullMatch, this.app, this.component, this.linkRevision),
     }).range(link.index, link.index + link.fullMatch.length)), true);
   }
 

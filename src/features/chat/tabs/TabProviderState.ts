@@ -1,5 +1,5 @@
 import { createCatalogCommandDiscoveryStore } from '../../../core/providers/commands/catalogCommandDiscovery';
-import { getHiddenProviderCommandSet } from '../../../core/providers/commands/hiddenCommands';
+import { getHiddenCommandSet } from '../../../core/providers/commands/hiddenCommands';
 import {
   findProviderModelOption,
   getProviderSettingsSnapshotWithModel,
@@ -35,7 +35,6 @@ import { UNRESOLVED_TAB_CAPABILITIES, UNRESOLVED_TAB_UI } from './UnresolvedTabU
 
 export type TabProviderSettings = Record<string, unknown> & {
   model: string;
-  thinkingBudget: string;
   effortLevel: string;
   serviceTier: string;
   permissionMode: string;
@@ -51,7 +50,7 @@ export function getBlankTabModelOptions(
     const group = ProviderRegistry.getProviderDisplayName(providerId);
 
     return uiConfig.getModelOptions(settings)
-      .map(model => ({ ...model, group, providerIcon }));
+      .map(model => ({ ...model, group, providerIcon, providerId }));
   });
 }
 
@@ -99,11 +98,7 @@ export function getTabSettingsSnapshot(
       : uiConfig.getDefaultReasoningValue(snapshot.model, snapshot);
     tab.session.reasoningSelections.set(key, reasoning);
     snapshot.reasoning = reasoning;
-    if (uiConfig.isAdaptiveReasoningModel(snapshot.model, snapshot)) {
-      snapshot.effortLevel = reasoning;
-    } else {
-      snapshot.thinkingBudget = reasoning;
-    }
+    snapshot.effortLevel = reasoning;
   }
   return snapshot;
 }
@@ -117,21 +112,10 @@ export async function updateTabReasoning(
   const model = getTabSettingsSnapshot(tab, plugin).model;
   const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
   const committed = await updateTabProviderSettings(tab, plugin, snapshot => {
-    if (uiConfig.isAdaptiveReasoningModel(model, snapshot)) {
-      snapshot.effortLevel = reasoning;
-    } else {
-      snapshot.thinkingBudget = reasoning;
-    }
+    snapshot.effortLevel = reasoning;
     uiConfig.applyReasoningSelection?.(model, reasoning, snapshot);
   });
   if (committed) tab.session.reasoningSelections.set(`${providerId}:${model}`, reasoning);
-}
-
-export function getTabConversation(
-  tab: TabProviderContext,
-  plugin: ChatFeatureHost,
-): Conversation | null {
-  return tab.conversationId ? plugin.getConversationSync(tab.conversationId) : null;
 }
 
 export function getTabSelectedModel(
@@ -153,15 +137,6 @@ export function getTabSelectedModel(
   }
 
   return null;
-}
-
-export function getTabHiddenCommands(
-  tab: TabProviderContext,
-  plugin: ChatFeatureHost,
-  conversation?: Conversation | null,
-): Set<string> {
-  const providerId = getTabProviderId(tab, plugin, conversation);
-  return providerId ? getHiddenProviderCommandSet(plugin.settings, providerId) : new Set();
 }
 
 function getRegistryProviderCatalogInfo(providerId: ProviderId): ProviderCatalogInfo {
@@ -199,7 +174,7 @@ export function syncComposerDropdownForProvider(
     dropdown.clearProviderCatalog?.();
   }
 
-  dropdown.setHiddenCommands(getTabHiddenCommands(tab, plugin, conversation));
+  dropdown.setHiddenCommands(getHiddenCommandSet(plugin.settings));
 }
 
 export function invalidateTabProviderCommands(
@@ -260,7 +235,7 @@ export function refreshTabProviderUI(tab: AssembledTabRuntime): void {
   tab.ui.modelSelector.renderOptions();
   tab.ui.modeSelector.updateDisplay();
   tab.ui.modeSelector.renderOptions();
-  tab.ui.thinkingBudgetSelector.updateDisplay();
+  tab.ui.effortSelector.updateDisplay();
   tab.ui.permissionToggle.updateDisplay();
   tab.ui.serviceTierToggle.updateDisplay();
 }
@@ -271,7 +246,7 @@ export function applyProviderUIGating(
 ): void {
   const capabilities = getTabCapabilities(tab, plugin);
   const uiConfig = getTabChatUIConfig(tab, plugin);
-  const hasPermissionToggle = Boolean(uiConfig.getPermissionModeToggle?.());
+  const hasPermissionToggle = Boolean(uiConfig.getPermissionModeOptions?.()?.length);
 
   tab.ui.permissionToggle.setVisible(hasPermissionToggle);
 

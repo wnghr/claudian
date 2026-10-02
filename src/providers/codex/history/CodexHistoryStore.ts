@@ -1,6 +1,8 @@
+import { createReadStream } from 'node:fs';
 import * as fsp from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 
-import * as fs from 'fs';
+import type * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -27,7 +29,7 @@ import {
   normalizeCodexMemoryCitation,
   stripCodexMemoryCitationMarkup,
 } from '../normalization/CodexMemoryCitation';
-import { parseCodexQuestionReply } from '../normalization/codexQuestionNormalization';
+import { getCodexQuestionAnswerKey, parseCodexQuestionReply } from '../normalization/codexQuestionNormalization';
 import { applyCodexSubagentActivity, normalizeCodexSubagentActivity } from '../normalization/codexSubagentActivity';
 import { buildCodexSubagentInfo } from '../normalization/codexSubagentNormalization';
 import {
@@ -972,7 +974,7 @@ function applyQuestionReplies(text: string, ctx: PersistedParseContext): boolean
     const tool = findPersistedToolCallById(ctx, reply.callId);
     const question: unknown = Array.isArray(tool?.input.questions) ? tool.input.questions[reply.index] : undefined;
     if (tool?.input.replyMode === 'user-message' && question && typeof question === 'object' && 'question' in question && question.question === reply.question) {
-      tool.resolvedAnswers = { ...tool.resolvedAnswers, [String(('id' in question ? question.id : undefined) ?? reply.index)]: reply.answer };
+      tool.resolvedAnswers = { ...tool.resolvedAnswers, [getCodexQuestionAnswerKey('id' in question ? question.id : undefined, reply.index)]: reply.answer };
     }
   }
   return replies.length > 0;
@@ -1338,60 +1340,6 @@ export function deriveCodexSessionsRootFromSessionPath(
   return null;
 }
 
-export function deriveCodexMemoriesDirFromSessionsRoot(
-  sessionsDir: string | null | undefined,
-): string | null {
-  if (!sessionsDir) {
-    return null;
-  }
-
-  const pathModule = getPathModuleForSessionPath(sessionsDir);
-  return pathModule.join(pathModule.dirname(sessionsDir), 'memories');
-}
-
-export function findCodexSessionFile(
-  threadId: string,
-  root: string = path.join(os.homedir(), '.codex', 'sessions'),
-): string | null {
-  if (!threadId || !SAFE_SESSION_ID_PATTERN.test(threadId) || !fs.existsSync(root)) {
-    return null;
-  }
-
-  const directPath = path.join(root, `${threadId}.jsonl`);
-  if (fs.existsSync(directPath)) {
-    return directPath;
-  }
-
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) {
-      continue;
-    }
-
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-
-      if (entry.isFile() && entry.name.endsWith(`-${threadId}.jsonl`)) {
-        return fullPath;
-      }
-    }
-  }
-
-  return null;
-}
-
 export async function findCodexSessionFileAsync(
   threadId: string,
   root: string = path.join(os.homedir(), '.codex', 'sessions'),
@@ -1455,12 +1403,12 @@ async function runBeforeDeadline<T>(
 ): Promise<T> {
   const remainingMs = deadline - Date.now();
   if (remainingMs <= 0) {
-    throw new Error('Codex history lookup deadline exceeded.');
+    throw new Error('Codex CLI history lookup deadline exceeded.');
   }
 
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
-      reject(new Error('Codex history lookup deadline exceeded.'));
+      reject(new Error('Codex CLI history lookup deadline exceeded.'));
     }, remainingMs);
     operation().then(
       (value) => {
@@ -1510,43 +1458,63 @@ export function parseCodexSessionContent(content: string): ChatMessage[] {
   return turns.flatMap(t => t.messages);
 }
 
-export function parseCodexSessionModel(
-  content: string,
-  resumeAtTurnId?: string,
-): string | null {
-  let model: string | null = null;
-  for (const line of content.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+/** Shared checkpoint rules for in-memory and streaming model recovery. */
+class SessionModelReader {
+  model: string | null = null;
+  reached = false;
+  constructor(private readonly checkpoint?: string) {}
+
+  accept(line: string): void {
     try {
-      const record = JSON.parse(line) as {
-        type?: unknown;
-        payload?: { model?: unknown; turn_id?: unknown };
-      };
-      if (record.type !== 'turn_context') continue;
-      const candidate = typeof record.payload?.model === 'string'
-        ? record.payload.model.trim()
-        : '';
-      if (candidate) model = candidate;
-      if (
-        resumeAtTurnId
-        && record.payload?.turn_id === resumeAtTurnId
-      ) {
-        return model;
-      }
-    } catch {
-      // Ignore malformed provider-native transcript records.
-    }
+      const record = JSON.parse(line) as { type?: unknown; payload?: { model?: unknown; turn_id?: unknown } } | null;
+      if (record?.type !== 'turn_context') return;
+      const candidate = typeof record.payload?.model === 'string' ? record.payload.model.trim() : '';
+      if (candidate) this.model = candidate;
+      if (this.checkpoint && record.payload?.turn_id === this.checkpoint) this.reached = true;
+    } catch { /* Ignore malformed provider-native transcript records. */ }
   }
-  return resumeAtTurnId ? null : model;
+
+  result(): string | null { return this.checkpoint && !this.reached ? null : this.model; }
 }
 
-export function parseCodexSessionTurns(content: string, throughTurnId?: string): CodexParsedTurn[] {
-  const records = content
+export function parseCodexSessionModel(content: string, resumeAtTurnId?: string): string | null {
+  const reader = new SessionModelReader(resumeAtTurnId);
+  for (const line of content.split(/\r?\n/)) {
+    reader.accept(line);
+    if (reader.reached) break;
+  }
+  return reader.result();
+}
+
+/** Stream model metadata; checkpoint recovery does not read the remainder of the file. */
+export async function readCodexSessionModel(file: string, resumeAtTurnId?: string): Promise<string | null> {
+  const input = createReadStream(file, { encoding: 'utf8' });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  const timer = window.setTimeout(() => input.destroy(new Error('Codex model recovery timed out.')), 10_000);
+  const reader = new SessionModelReader(resumeAtTurnId);
+  try {
+    for await (const line of lines) {
+      reader.accept(line);
+      if (reader.reached) break;
+    }
+    return reader.result();
+  } finally {
+    window.clearTimeout(timer);
+    lines.close();
+    input.destroy();
+  }
+}
+
+export function parseCodexSessionRecords(content: string): ParsedSessionRecord[] {
+  return content
     .split('\n')
     .filter(line => line.trim())
     .map(parseSessionRecord)
     .filter((record): record is ParsedSessionRecord => record !== null);
+}
 
+export function parseCodexSessionTurns(content: string | ParsedSessionRecord[], throughTurnId?: string): CodexParsedTurn[] {
+  const records = typeof content === 'string' ? parseCodexSessionRecords(content) : content;
   if (throughTurnId) {
     let reached = false;
     const nextTurn = records.findIndex(record => {

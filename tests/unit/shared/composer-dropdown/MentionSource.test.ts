@@ -14,13 +14,15 @@ function file(path: string, mtime = 1): TFile {
   } as TFile;
 }
 
-function source(overrides: Record<string, unknown> = {}) {
+function source(
+  overrides: Record<string, unknown> = {},
+  options: ConstructorParameters<typeof MentionSource>[1] = {},
+) {
   const value = new MentionSource({
     getCachedVaultFiles: () => [file('notes/Alpha.md', 5)],
     getCachedVaultFolders: () => [{ name: 'notes', path: 'notes' }],
-    normalizePathForVault: path => path ?? null,
     ...overrides,
-  });
+  }, options);
   return { source: value };
 }
 
@@ -28,19 +30,18 @@ describe('MentionSource', () => {
   it('formats only retained suggestions while preserving file and folder ranking', async () => {
     const now = testDate().getTime();
     const files = Array.from({ length: 250 }, (_, index) => file(`folder${index % 60}/Note ${index}.md`, now + index + 1));
-    const normalizePathForVault = jest.fn((path: string) => path);
+    const formatVaultFileMention = jest.fn((path: string) => `@${path} `);
     const { source: value } = source({
       getCachedVaultFiles: () => files,
       getCachedVaultFolders: () => Array.from({ length: 60 }, (_, index) => ({ name: `folder${index}`, path: `folder${index}` })),
-      normalizePathForVault,
-    });
+    }, { formatVaultFileMention });
     const items = await value.load(value.match('@', 1)!, new AbortController().signal);
     expect(items).toHaveLength(150);
     expect(items.slice(0, 2)).toEqual([
       expect.objectContaining({ id: 'vault-file:folder9/Note 249.md', replacement: '@folder9/Note 249.md ' }),
       expect.objectContaining({ id: 'vault-folder:folder9', replacement: '@folder9/ ' }),
     ]);
-    expect(normalizePathForVault).toHaveBeenCalledTimes(150);
+    expect(formatVaultFileMention).toHaveBeenCalledTimes(100);
     files[0].stat.mtime = now + 1000;
     const updated = await value.load(value.match('@', 1)!, new AbortController().signal);
     expect(updated.slice(0, 2).map(item => item.id)).toEqual(['vault-file:folder0/Note 0.md', 'vault-folder:folder0']);
@@ -53,6 +54,9 @@ describe('MentionSource', () => {
     expect(value.match('@Alpha note', 11)).toEqual(expect.objectContaining({
       query: 'Alpha note',
     }));
+    const completed = '@[A \\] B](claudian-session:conv-1-a) summarize this';
+    expect(value.match(completed, completed.length)).toBeNull();
+    expect(value.match(`${completed} @Al`, completed.length + 4)).toEqual(expect.objectContaining({ query: 'Al' }));
     value.destroy();
   });
 
@@ -113,4 +117,23 @@ describe('MentionSource', () => {
     }));
     value.destroy();
   });
+});
+
+it('mixes opt-in sessions with files by prefix then recency, including the empty query', async () => {
+  const now = testDate().getTime();
+  const { source: value } = source({
+    getCachedVaultFolders: () => [],
+    getCachedVaultFiles: () => [file('Alpha.md', now)],
+  }, {
+    getSessionItems: () => [
+      { id: 'session:1', kind: 'value', label: 'Alpha review', replacement: 'token ', mtime: now - 1 },
+      { id: 'session:2', kind: 'value', label: 'Review Alpha', replacement: 'token2 ', mtime: now + 1 },
+    ],
+  });
+  const signal = new AbortController().signal;
+  expect((await value.load(value.match('@', 1)!, signal)).map(item => item.id))
+    .toEqual(['session:2', 'vault-file:Alpha.md', 'session:1']);
+  expect((await value.load(value.match('@Alpha', 6)!, signal)).map(item => item.id))
+    .toEqual(['vault-file:Alpha.md', 'session:1', 'session:2']);
+  expect(await value.load(value.match('@missing', 8)!, signal)).toEqual([]);
 });

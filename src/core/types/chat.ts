@@ -1,3 +1,4 @@
+import type { ProviderSelectionSnapshot, ProviderSessionReference } from '../execution/ProviderExecutionRequest';
 import type { ProviderCapabilities } from '../providers/types';
 import type { SDKToolUseResult } from './diff';
 import type { ProviderId } from './provider';
@@ -66,6 +67,8 @@ export interface ExecutionInputCanvasSnapshot {
 }
 
 export interface ExecutionInputContextSnapshot {
+  selections?: readonly ProviderSelectionSnapshot[];
+  sessionReferences?: readonly ProviderSessionReference[];
   linkedContent?: ExecutionInputLinkedContentSnapshot;
   editorSelection?: ExecutionInputEditorSnapshot | null;
   browserSelection?: ExecutionInputBrowserSnapshot | null;
@@ -220,6 +223,8 @@ export interface ConversationMeta {
   isArchived?: boolean;
   /** Status of AI title generation. */
   titleGenerationStatus?: 'pending' | 'success' | 'failed';
+  /** Cheap availability hint; native history may still be missing at hydration. */
+  hasSessionReference?: boolean;
   /** Whether metadata still uses a writable legacy namespace. */
   isLegacySession?: boolean;
 }
@@ -282,7 +287,14 @@ export type StreamChunk =
       toolUseResult?: SDKToolUseResult;
       providerPayload?: ToolProviderPayload;
     }
-  | { type: 'tool_output'; id: string; content: string }
+  | {
+      type: 'tool_output';
+      id: string;
+      /** Text to append to the tool's result. */
+      content: string;
+      /** Latest structured snapshot of a running tool, replacing earlier ones. */
+      toolUseResult?: SDKToolUseResult;
+    }
   | {
       type: 'error';
       content: string;

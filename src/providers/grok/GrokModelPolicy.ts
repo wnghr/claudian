@@ -1,6 +1,5 @@
 import type {
   ProviderModelPolicy,
-  ProviderReasoningOption,
   ProviderUIOption,
 } from '../../core/providers/types';
 import {
@@ -8,9 +7,11 @@ import {
   encodeGrokModelId,
   findGrokModel,
   getGrokAvailableReasoningEfforts,
+  getGrokModelLabel,
   isGrokModelSelectionId,
   resolveGrokDefaultReasoningEffort,
 } from './models';
+import { GROK_PERMISSION_MODE_POLICY } from './permissionModes';
 import {
   getGrokProviderSettings,
   getOrderedGrokVisibleModelIds,
@@ -19,7 +20,7 @@ import {
 
 
 export const grokModelPolicy: ProviderModelPolicy = {
-  permissionModes: { inactiveValue: 'normal', activeValue: 'yolo' },
+  permissionModes: GROK_PERMISSION_MODE_POLICY,
   getModelOptions(settings): ProviderUIOption[] {
     const grokSettings = getGrokProviderSettings(settings);
     const catalogModels = grokSettings.currentCatalog?.models ?? [];
@@ -45,13 +46,13 @@ export const grokModelPolicy: ProviderModelPolicy = {
     return isGrokModelSelectionId(model);
   },
 
-  isAdaptiveReasoningModel(model, settings): boolean {
+  supportsReasoningEffort(model, settings): boolean {
     return getGrokAvailableReasoningEfforts(
       getExplicitlySelectedGrokModel(model, settings),
     ).length > 0;
   },
 
-  getReasoningOptions(model, settings): ProviderReasoningOption[] {
+  getReasoningOptions(model, settings): ProviderUIOption[] {
     return getGrokAvailableReasoningEfforts(
       getExplicitlySelectedGrokModel(model, settings),
     ).map(option => ({
@@ -138,23 +139,13 @@ export const grokModelPolicy: ProviderModelPolicy = {
   getCustomModelIds(): Set<string> {
     return new Set();
   },
-
-  resolvePermissionMode(settings): string {
-    return settings.permissionMode === 'yolo' ? 'yolo' : 'normal';
-  },
-
-  applyPermissionMode(value, settings): void {
-    if (isRecord(settings)) {
-      settings.permissionMode = value === 'yolo' ? 'yolo' : 'normal';
-    }
-  }
 };
 
 function pushModelOption(
   options: ProviderUIOption[],
   seen: Set<string>,
   rawId: string,
-  catalogById: ReadonlyMap<string, { description?: string; displayName: string }>,
+  catalogById: ReadonlyMap<string, { description?: string; displayName: string; rawId: string }>,
   aliases: Record<string, string>,
 ): void {
   const value = encodeGrokModelId(rawId);
@@ -166,8 +157,8 @@ function pushModelOption(
   if (!model) return;
   options.push({
     value,
-    label: aliases[rawId] ?? model?.displayName ?? rawId,
-    description: model?.description ?? 'Selected in an existing session',
+    label: aliases[rawId] ?? getGrokModelLabel(model),
+    description: model.description ?? 'Selected in an existing session',
   });
 }
 

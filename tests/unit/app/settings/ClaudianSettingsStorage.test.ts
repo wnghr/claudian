@@ -74,13 +74,13 @@ describe('ClaudianSettingsStorage', () => {
       expect(written).not.toHaveProperty('persistentExternalContextPaths');
     });
 
+
     it('should return defaults when file does not exist', async () => {
       mockAdapter.exists.mockResolvedValue(false);
 
       const result = await storage.load();
 
       expect(result.model).toBe(DEFAULT_SETTINGS.model);
-      expect(result.thinkingBudget).toBe(DEFAULT_SETTINGS.thinkingBudget);
       expect(result.permissionMode).toBe(DEFAULT_SETTINGS.permissionMode);
       expect(result.requireCommandOrControlEnterToSend).toBe(false);
       expect(result.titleGenerationLocale).toBe('');
@@ -88,6 +88,7 @@ describe('ClaudianSettingsStorage', () => {
       expect(result.enableDualPane).toBe(true);
       expect(result.dualPaneSide).toBe('right');
       expect(result.restoreTabsOnStartup).toBe(true);
+      expect(result.enableZenMode).toBe(true);
       expect(mockAdapter.read).not.toHaveBeenCalled();
     });
 
@@ -112,7 +113,7 @@ describe('ClaudianSettingsStorage', () => {
       expect(result.model).toBe('claude-opus-4-5');
       expect(result.userName).toBe('TestUser');
       // Defaults should still be present for unspecified fields
-      expect(result.thinkingBudget).toBe(DEFAULT_SETTINGS.thinkingBudget);
+      expect(result.effortLevel).toBe(DEFAULT_SETTINGS.effortLevel);
     });
 
     it('preserves an explicitly stored provider-qualified chat model selection', async () => {
@@ -257,7 +258,7 @@ describe('ClaudianSettingsStorage', () => {
       expect(getCodexProviderSettings(result).cliPath).toBe('');
       expect(getClaudeProviderSettings(result).environmentVariables).toBe('');
       expect(result.sharedEnvironmentVariables).toBe('');
-      expect(result.hiddenProviderCommands).toEqual({});
+      expect(result.hiddenCommands).toEqual([]);
     });
 
     it('normalizes invalid chatViewPlacement values', async () => {
@@ -316,6 +317,33 @@ describe('ClaudianSettingsStorage', () => {
 
       expect(result.restoreTabsOnStartup).toBe(false);
       expect(writtenContent.restoreTabsOnStartup).toBe(false);
+    });
+
+    it.each([
+      ['missing', {}, true],
+      ['disabled', { enableZenMode: false }, false],
+      ['enabled', { enableZenMode: true }, true],
+    ])('loads a %s zen mode preference', async (_label, stored, expected) => {
+      mockAdapter.exists.mockResolvedValue(true);
+      mockAdapter.read.mockResolvedValue(JSON.stringify(stored));
+
+      const result = await storage.load();
+
+      expect(result.enableZenMode).toBe(expected);
+      const writtenValues = mockAdapter.write.mock.calls
+        .map(([, content]) => (JSON.parse(content) as Record<string, unknown>).enableZenMode)
+        .filter(value => value !== undefined);
+      expect(writtenValues.every(value => value === expected)).toBe(true);
+    });
+
+    it('persists a normalized invalid zen mode preference', async () => {
+      mockAdapter.exists.mockResolvedValue(true);
+      mockAdapter.read.mockResolvedValue(JSON.stringify({ enableZenMode: 'yes' }));
+
+      const result = await storage.load();
+
+      expect(result.enableZenMode).toBe(true);
+      expect(JSON.parse(mockAdapter.write.mock.calls.at(-1)![1]).enableZenMode).toBe(true);
     });
 
     it('normalizes claude provider CLI paths from loaded data', async () => {
@@ -687,24 +715,51 @@ describe('ClaudianSettingsStorage', () => {
       expect(result.providerConfigs.claude).toMatchObject({ enableOpus1M: true, enableSonnet1M: true });
     });
 
-    it('should not override explicit provider hidden commands with legacy hiddenSlashCommands', async () => {
+    it('merges per-provider hidden commands into one global list and retires the old key', async () => {
       mockAdapter.exists.mockResolvedValue(true);
       mockAdapter.read.mockResolvedValue(JSON.stringify({
         hiddenProviderCommands: {
-          claude: ['existing'],
+          claude: ['commit', '/Review'],
+          codex: ['$commit'],
+          pi: ['skill:review', 'review'],
         },
-        hiddenSlashCommands: ['commit', '/review'],
+        hiddenSlashCommands: ['legacy'],
       }));
 
       const result = await storage.load();
       const writtenContent = JSON.parse(mockAdapter.write.mock.calls[0][1]);
 
-      expect(result.hiddenProviderCommands).toEqual({
-        claude: ['existing'],
-      });
-      expect(writtenContent.hiddenProviderCommands).toEqual({
-        claude: ['existing'],
-      });
+      expect(result.hiddenCommands).toEqual(['commit', 'Review', 'skill:review']);
+      expect(writtenContent.hiddenCommands).toEqual(['commit', 'Review', 'skill:review']);
+      expect(writtenContent).not.toHaveProperty('hiddenProviderCommands');
+      expect(result).not.toHaveProperty('hiddenProviderCommands');
+    });
+
+    it('loads the vault-wide skills sync flag as a boolean', async () => {
+      mockAdapter.exists.mockResolvedValue(true);
+      mockAdapter.read.mockResolvedValue(JSON.stringify({}));
+      expect((await storage.load()).skillsSynced).toBe(false);
+
+      mockAdapter.read.mockResolvedValue(JSON.stringify({ skillsSynced: true }));
+      expect((await storage.load()).skillsSynced).toBe(true);
+
+      mockAdapter.read.mockResolvedValue(JSON.stringify({ skillsSynced: 'yes' }));
+      expect((await storage.load()).skillsSynced).toBe(false);
+    });
+
+    it('keeps an existing global hidden list over a stale per-provider map', async () => {
+      mockAdapter.exists.mockResolvedValue(true);
+      mockAdapter.read.mockResolvedValue(JSON.stringify({
+        hiddenCommands: ['kept', ' /kept ', ''],
+        hiddenProviderCommands: { claude: ['stale'] },
+      }));
+
+      const result = await storage.load();
+      const writtenContent = JSON.parse(mockAdapter.write.mock.calls[0][1]);
+
+      expect(result.hiddenCommands).toEqual(['kept']);
+      expect(writtenContent.hiddenCommands).toEqual(['kept']);
+      expect(writtenContent).not.toHaveProperty('hiddenProviderCommands');
     });
 
     it('preserves explicit scope on stored mixed environment snippets', async () => {

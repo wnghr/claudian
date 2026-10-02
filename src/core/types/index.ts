@@ -39,6 +39,7 @@ export {
   type KeyboardNavigationSettings,
   type LegacyLinkedContentSettingsInput,
   type PermissionMode,
+  type SessionAutoArchiveAfter,
   type SessionManagerOrganization,
   type SessionManagerSort,
   type SlashCommand,
@@ -59,11 +60,14 @@ export {
   type AskUserQuestionItem,
   type AskUserQuestionOption,
   type AsyncSubagentStatus,
+  type ScriptToolCallItem,
   type SubagentInfo,
   type SubagentMode,
   type SubagentProgress,
   type ToolCallInfo,
   type ToolDiffData,
   type ToolProviderPayload,
+  type ToolResultImage,
+  type WebSearchResultItem,
 } from './tools';
 export { createTurnStats, isTokenCount } from './turnStats';

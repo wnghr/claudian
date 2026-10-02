@@ -278,6 +278,7 @@ describe('PiHistoryStore', () => {
       input: { file_path: 'a.md', path: 'a.md' },
       name: 'Read',
       result: 'file contents',
+      resultFormat: 'plain',
       status: 'completed',
     }]);
   });
@@ -315,6 +316,7 @@ describe('PiHistoryStore', () => {
       input: { file_path: 'a.md', path: 'a.md' },
       name: 'Read',
       result: 'file contents',
+      resultFormat: 'plain',
       status: 'completed',
     }]);
     expect(messages[0].contentBlocks).toEqual([{ toolId: 'tool-1', type: 'tool_use' }]);
@@ -508,7 +510,7 @@ describe('PiHistoryStore', () => {
     ]);
   });
 
-  it('hydrates Pi write/edit tool calls with diff data for stored rendering', () => {
+  it('falls back to edit input pairs when a Pi edit result has only the numbered display diff', () => {
     const content = [
       JSON.stringify({
         id: 'a1',
@@ -534,9 +536,8 @@ describe('PiHistoryStore', () => {
         type: 'message',
         message: {
           content: [{ text: 'Edited notes/a.md', type: 'text' }],
-          details: {
-            diff: '--- a/notes/a.md\n+++ b/notes/a.md\n@@ -1 +1 @@\n-old\n+new',
-          },
+          // Results without `details.patch` carry only Pi's TUI diff, whose gutters are not diff syntax.
+          details: { diff: '-1 old\n+1 new', firstChangedLine: 1 },
           isError: false,
           role: 'toolResult',
           toolCallId: 'edit-1',
@@ -624,6 +625,7 @@ describe('PiHistoryStore', () => {
       input: { file_path: 'left.md', path: 'left.md' },
       name: 'Read',
       result: 'left contents',
+      resultFormat: 'plain',
       status: 'completed',
     }]);
   });
@@ -765,6 +767,7 @@ describe('PiHistoryStore', () => {
       input: { file_path: 'a.md', path: 'a.md' },
       name: 'Read',
       result: 'file contents',
+      resultFormat: 'plain',
       status: 'completed',
     }]);
   });

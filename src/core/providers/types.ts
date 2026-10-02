@@ -18,7 +18,6 @@ import type {
 import type { ProviderId } from '../types/provider';
 import type { ProviderCommandCatalog } from './commands/ProviderCommandCatalog';
 import type { ProviderCommandDiscoveryResult } from './commands/ProviderCommandDiscoveryResult';
-import type { ProviderVaultEntryRepository } from './commands/ProviderVaultEntryRepository';
 import type { ProviderModelCatalog } from './models/ProviderModelCatalog';
 import type { ProviderHost } from './ProviderHost';
 
@@ -44,7 +43,7 @@ export interface ProviderCapabilities {
   supportsFastMode?: boolean;
   /** Can report authoritative main-agent output tokens and elapsed turn time. */
   supportsResponseThroughput?: boolean;
-  reasoningControl: 'effort' | 'token-budget' | 'none';
+  reasoningControl: 'effort' | 'none';
 }
 
 export const DEFAULT_CHAT_PROVIDER_ID = 'claude' as const satisfies ProviderId;
@@ -178,6 +177,8 @@ export interface ProviderUIOption {
   group?: string;
   /** Per-option icon override (e.g. when mixing providers in a single dropdown). */
   providerIcon?: ProviderIconSvg;
+  /** Owning provider when several providers share one dropdown, so the option can carry its brand. */
+  providerId?: ProviderId;
 }
 
 export interface ProviderPathIconSvg {
@@ -208,17 +209,21 @@ export interface ProviderCompositeIconSvg {
 /** SVG icon descriptor for provider branding in selectors and headers. */
 export type ProviderIconSvg = ProviderPathIconSvg | ProviderCompositeIconSvg;
 
-/** Extended option with token count for budget-based reasoning controls. */
-export interface ProviderReasoningOption extends ProviderUIOption {
-  tokens?: number;
+/** Permission-mode values a provider accepts in the shared `permissionMode` setting. */
+export interface ProviderPermissionModePolicy {
+  readonly values: readonly string[];
+  /** Fail-closed value for unknown stored values. */
+  readonly fallbackValue: string;
+  /** Initial choice when no permission has been selected for this provider. */
+  readonly defaultValue?: string;
+  /** Maps a retired stored value to a current one; unmapped values use the fallback. */
+  migrateValue?(value: string, settings: Record<string, unknown>): string | undefined;
 }
 
-/** Compact permission-mode toggle descriptor for providers that expose the current toolbar control. */
-export interface ProviderPermissionModeToggleConfig {
-  inactiveValue: string;
-  inactiveLabel: string;
-  activeValue: string;
-  activeLabel: string;
+/** One toolbar permission-mode choice, in menu order. */
+export interface ProviderPermissionModeOption extends ProviderUIOption {
+  /** Skips approval prompts; the toolbar marks it as a warning while selected. */
+  bypassesApprovals?: boolean;
 }
 
 /** Provider-reported service-tier choices, labels and resolved selection. */
@@ -243,7 +248,7 @@ export interface ProviderModeSelectorConfig {
 
 /** Provider model and execution preferences, independent of chat rendering. */
 export interface ProviderModelPolicy {
-  readonly permissionModes?: { inactiveValue: string; activeValue: string };
+  readonly permissionModes?: ProviderPermissionModePolicy;
   /** Available models in durable selection order, independent of dropdown layout. */
   getModelOptions(settings: Record<string, unknown>): ProviderUIOption[];
 
@@ -253,11 +258,11 @@ export interface ProviderModelPolicy {
   /** Whether this provider owns the given model id. */
   ownsModel(model: string, settings: Record<string, unknown>): boolean;
 
-  /** Whether the model uses adaptive reasoning (effort levels vs token budgets). */
-  isAdaptiveReasoningModel(model: string, settings: Record<string, unknown>): boolean;
+  /** Whether the model takes an effort level; otherwise the saved effort is kept unvalidated. */
+  supportsReasoningEffort(model: string, settings: Record<string, unknown>): boolean;
 
-  /** Reasoning options for the current model (effort levels if adaptive, budgets otherwise). */
-  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderReasoningOption[];
+  /** Effort levels for the current model. */
+  getReasoningOptions(model: string, settings: Record<string, unknown>): ProviderUIOption[];
 
   /** Default reasoning value for the model. */
   getDefaultReasoningValue(model: string, settings: Record<string, unknown>): string;
@@ -315,7 +320,7 @@ export interface ProviderModelPolicy {
 
 /** UI composition may reuse policy, but application code consumes ProviderModelPolicy. */
 export interface ProviderChatUIConfig extends Omit<ProviderModelPolicy, 'permissionModes' | 'getServiceTierPolicy'> {
-  getPermissionModeToggle?(): ProviderPermissionModeToggleConfig | null;
+  getPermissionModeOptions?(settings?: Record<string, unknown>): readonly ProviderPermissionModeOption[] | null;
   getServiceTierToggle?(settings: Record<string, unknown>): ProviderServiceTierToggleConfig | null;
   getModeSelector?(settings: Record<string, unknown>): ProviderModeSelectorConfig | null;
   getProviderIcon?(): ProviderIconSvg | null;
@@ -365,12 +370,26 @@ export interface ProviderCommandLoader {
 export interface ProviderWorkspaceServices {
   onAgentSkillsChanged?(): Promise<void> | void;
   commandCatalog?: ProviderCommandCatalog | null;
-  vaultCommandRepository?: ProviderVaultEntryRepository | null;
   cliResolver?: ProviderCLIResolver | null;
   commandLoader?: ProviderCommandLoader | null;
   settingsTabRenderer?: ProviderSettingsTabRenderer | null;
   modelCatalog?: ProviderModelCatalog;
+  sessionArchive?: ProviderSessionArchive | null;
   dispose?(): Promise<void> | void;
+}
+
+export interface ProviderSessionArchiveChange {
+  conversation: ProviderHistoryInput;
+  isArchived: boolean;
+}
+
+/** Explicit native archive operation; application archive state stays authoritative. */
+export interface ProviderSessionArchive {
+  /**
+   * Applies every change in order. Sessions that are missing or already in the requested
+   * state are unchanged; other failures reject after the remaining changes were attempted.
+   */
+  setSessionsArchived(changes: readonly ProviderSessionArchiveChange[]): Promise<void>;
 }
 
 export interface ProviderModelCatalogRefreshResult {
@@ -383,15 +402,6 @@ export interface ProviderModelCatalogRefreshResult {
 
 export interface ProviderSettingsTabRendererContext {
   plugin: ProviderHost;
-  renderAgentSkillSettings(
-    container: HTMLElement,
-    providerId: ProviderId,
-  ): void;
-  renderHiddenProviderCommandSetting(
-    container: HTMLElement,
-    providerId: ProviderId,
-    copy: { name: string; desc: string; placeholder: string },
-  ): void;
   /** Publish provider model-option changes to every settings and chat consumer. */
   notifyProviderModelOptionsChanged(providerId: ProviderId): void;
   renderCustomContextLimits(container: HTMLElement, providerId: ProviderId): void;
@@ -418,6 +428,8 @@ export interface ProviderWorkspaceRegistration<
 > {
   /** Shared skill changes invalidate resources even before lazy initialization. */
   consumesAgentSkills?: boolean;
+  /** Initialized services provide `sessionArchive`; lets callers skip initializing other providers. */
+  providesSessionArchive?: boolean;
   initialize(context: ProviderWorkspaceInitContext): Promise<TServices>;
 }
 
